@@ -104,6 +104,7 @@
                             <RadioButton x:Name="NavTeams" Style="{StaticResource NavItem}" Content="Teams" Tag="&#xE790;" Checked="OnNav" />
                             <RadioButton x:Name="NavArenas" Style="{StaticResource NavItem}" Content="Arenas" Tag="&#xE80F;" Checked="OnNav" />
                             <RadioButton x:Name="NavBeAPro" Style="{StaticResource NavItem}" Content="Be A Pro" Tag="&#xE77B;" Checked="OnNav" />
+                            <RadioButton x:Name="NavFranchise" Style="{StaticResource NavItem}" Content="Franchise" Tag="&#xE7C1;" Checked="OnNav" />
                             <RadioButton x:Name="NavUniforms" Style="{StaticResource NavItem}" Content="Uniforms" Tag="&#xE7BF;" Checked="OnNav" />
                             <RadioButton x:Name="NavStudio" Style="{StaticResource NavItem}" Content="Studio" Tag="&#xE790;" Checked="OnNav" />
                             <RadioButton x:Name="NavUnused" Style="{StaticResource NavItem}" Content="Unused" Tag="&#xE8F1;" ToolTip="Unused jerseys" Checked="OnNav" />
@@ -400,6 +401,7 @@
                 <local:TuningPage x:Name="TuningPage" Grid.Column="1" Visibility="Collapsed" />
                 <local:TeamsPage x:Name="TeamsPage" Grid.Column="1" Visibility="Collapsed" />
                 <local:BeAProPage x:Name="BeAProPage" Grid.Column="1" Visibility="Collapsed" />
+                <local:FranchisePage x:Name="FranchisePage" Grid.Column="1" Visibility="Collapsed" />
                 <local:ArenasPage x:Name="ArenasPage" Grid.Column="1" Visibility="Collapsed" />
 
                 <!-- ======================================================== sounds page -->

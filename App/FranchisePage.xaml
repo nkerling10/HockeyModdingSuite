@@ -1,0 +1,455 @@
+<UserControl x:Class="NHL27Kit.App.FranchisePage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:NHL27Kit.App">
+    <UserControl.Resources>
+        <Style x:Key="GridHeader" TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="{StaticResource Surface2}" />
+            <Setter Property="Foreground" Value="{StaticResource TextDim}" />
+            <Setter Property="FontSize" Value="11.5" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Padding" Value="8,6" />
+            <Setter Property="BorderBrush" Value="{StaticResource Line}" />
+            <Setter Property="BorderThickness" Value="0,0,1,1" />
+        </Style>
+        <Style x:Key="GridCell" TargetType="DataGridCell">
+            <Setter Property="Padding" Value="8,3" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="DataGridCell">
+                        <Border Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter VerticalAlignment="Center" />
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="{StaticResource Selection}" />
+                    <Setter Property="Foreground" Value="{StaticResource Text}" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <!-- a read-only grid of rows: whole-row selection, sortable columns -->
+        <Style x:Key="RowsGrid" TargetType="DataGrid">
+            <Setter Property="AutoGenerateColumns" Value="False" />
+            <Setter Property="IsReadOnly" Value="True" />
+            <Setter Property="CanUserAddRows" Value="False" />
+            <Setter Property="CanUserDeleteRows" Value="False" />
+            <Setter Property="HeadersVisibility" Value="Column" />
+            <Setter Property="GridLinesVisibility" Value="Horizontal" />
+            <Setter Property="HorizontalGridLinesBrush" Value="{StaticResource Line}" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="RowBackground" Value="Transparent" />
+            <Setter Property="AlternatingRowBackground" Value="#08FFFFFF" />
+            <Setter Property="BorderThickness" Value="0,1,0,0" />
+            <Setter Property="BorderBrush" Value="{StaticResource Line}" />
+            <Setter Property="Foreground" Value="{StaticResource Text}" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="ColumnHeaderStyle" Value="{StaticResource GridHeader}" />
+            <Setter Property="CellStyle" Value="{StaticResource GridCell}" />
+            <Setter Property="SelectionMode" Value="Single" />
+            <Setter Property="SelectionUnit" Value="FullRow" />
+            <Setter Property="EnableRowVirtualization" Value="True" />
+            <Setter Property="EnableColumnVirtualization" Value="True" />
+            <Setter Property="VirtualizingPanel.VirtualizationMode" Value="Recycling" />
+        </Style>
+        <!-- label / value lines of the player and team cards -->
+        <DataTemplate x:Key="FactTemplate" DataType="{x:Type local:FrFact}">
+            <StackPanel Margin="0,5,12,5" ToolTip="{Binding Hint}">
+                <TextBlock Text="{Binding Label}" Foreground="{StaticResource Muted}" FontSize="11" TextTrimming="CharacterEllipsis" />
+                <TextBlock Text="{Binding Value}" FontSize="13" Foreground="{StaticResource Text}" TextWrapping="Wrap" Margin="0,1,0,0" />
+            </StackPanel>
+        </DataTemplate>
+        <ItemsPanelTemplate x:Key="TwoColumns">
+            <UniformGrid Columns="2" />
+        </ItemsPanelTemplate>
+    </UserControl.Resources>
+
+    <Grid Margin="22,18,22,14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- header -->
+        <DockPanel Margin="0,0,0,14">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button x:Name="ChangeButton" Click="OnChange" Padding="12,6" Visibility="Collapsed" ToolTip="Pick another franchise save">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE8AB;" Style="{StaticResource Icon}" FontSize="13" />
+                        <TextBlock Text="Change franchise" Margin="8,0,0,0" />
+                    </StackPanel>
+                </Button>
+                <Button x:Name="ReloadButton" Click="OnReload" Padding="12,6" Margin="8,0,0,0" ToolTip="Read the save again">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE72C;" Style="{StaticResource Icon}" FontSize="13" />
+                        <TextBlock Text="Reload" Margin="8,0,0,0" />
+                    </StackPanel>
+                </Button>
+                <Button x:Name="FolderButton" Click="OnOpenFolder" Padding="12,6" Margin="8,0,0,0" ToolTip="Open the save's folder">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE838;" Style="{StaticResource Icon}" FontSize="13" />
+                        <TextBlock Text="Folder" Margin="8,0,0,0" />
+                    </StackPanel>
+                </Button>
+            </StackPanel>
+            <StackPanel>
+                <TextBlock x:Name="PageTitle" Text="Franchise" Style="{StaticResource Title}" />
+                <TextBlock x:Name="Summary" Text="Explore a franchise save: its players, teams, rosters and league tables, read from KytyPS5's save folder."
+                           Style="{StaticResource Caption}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis" />
+            </StackPanel>
+        </DockPanel>
+
+        <!-- ============================================================ picking the franchise -->
+        <Grid x:Name="PickerView" Grid.Row="1">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,30,0,30">
+                    <TextBlock Text="PICK YOUR FRANCHISE" FontFamily="{StaticResource DisplayFont}" FontSize="15" Foreground="{StaticResource Muted}"
+                               HorizontalAlignment="Center" Margin="0,0,0,18" />
+                    <ItemsControl x:Name="SlotCards" HorizontalAlignment="Center" MaxWidth="1100">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel HorizontalAlignment="Center" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="{x:Type local:FrSlotCard}">
+                                <Button Click="OnSlotCard" Margin="10" Cursor="Hand" ToolTip="{Binding Slot.Dir}">
+                                    <Button.Template>
+                                        <ControlTemplate TargetType="Button">
+                                            <Border x:Name="Card" Width="236" Padding="14" CornerRadius="16" BorderThickness="1.5"
+                                                    Background="{StaticResource Surface}" BorderBrush="{StaticResource LineStrong}">
+                                                <StackPanel>
+                                                    <Grid Width="206" Height="150">
+                                                        <Border CornerRadius="10" Background="{Binding Banner}" />
+                                                        <Rectangle Height="4" VerticalAlignment="Bottom" Fill="{StaticResource RinkStripe}" Margin="0,0,0,0" />
+                                                        <TextBlock Text="{Binding Initials}" FontFamily="{StaticResource DisplayFont}" FontSize="58" Foreground="#E6FFFFFF"
+                                                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                                        <Border Style="{StaticResource Pill}" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="8"
+                                                                Visibility="{Binding Slot.IsBackup, Converter={StaticResource BoolVisible}}">
+                                                            <TextBlock Text="BACKUP" FontSize="10" FontWeight="Bold" Foreground="{StaticResource Patch}" />
+                                                        </Border>
+                                                    </Grid>
+                                                    <TextBlock Text="{Binding TeamText}" FontFamily="{StaticResource DisplayFont}" FontSize="21" Foreground="{StaticResource Text}"
+                                                               Margin="2,14,2,0" TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock Text="{Binding Slot.Detail}" FontFamily="{StaticResource BoardFont}" FontSize="12.5" Foreground="{StaticResource TextDim}" Margin="2,2,2,0" />
+                                                    <DockPanel Margin="2,8,2,0">
+                                                        <Border DockPanel.Dock="Left" Style="{StaticResource Pill}" VerticalAlignment="Center">
+                                                            <TextBlock Text="{Binding Slot.Name}" FontSize="11" Foreground="{StaticResource Accent}" />
+                                                        </Border>
+                                                        <TextBlock Text="{Binding Saved}" FontSize="11" Foreground="{StaticResource Faint}" Margin="8,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                                    </DockPanel>
+                                                </StackPanel>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter TargetName="Card" Property="BorderBrush" Value="{StaticResource Accent}" />
+                                                    <Setter TargetName="Card" Property="Background" Value="{StaticResource Hover}" />
+                                                </Trigger>
+                                                <Trigger Property="IsKeyboardFocused" Value="True">
+                                                    <Setter TargetName="Card" Property="BorderBrush" Value="{StaticResource Accent}" />
+                                                </Trigger>
+                                                <Trigger Property="IsPressed" Value="True">
+                                                    <Setter TargetName="Card" Property="BorderBrush" Value="{StaticResource Goal}" />
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Button.Template>
+                                </Button>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock x:Name="SlotsEmpty" Style="{StaticResource Caption}" TextWrapping="Wrap" TextAlignment="Center" MaxWidth="560" Margin="0,6,0,0" />
+                    <Button Style="{StaticResource Ghost}" Content="Another save folder…" Click="OnBrowse" HorizontalAlignment="Center" Margin="0,18,0,0"
+                            ToolTip="A franchise slot (BeAGM1…) or the save folder that holds the slots (…\_SaveData\PPSA34063)" />
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+
+        <!-- ============================================================ the open franchise -->
+        <Grid x:Name="ExplorerView" Grid.Row="1" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Border CornerRadius="9" Padding="3" Background="{StaticResource Surface}" BorderBrush="{StaticResource Line}" BorderThickness="1"
+                    HorizontalAlignment="Left" Margin="0,0,0,12">
+                <StackPanel Orientation="Horizontal">
+                    <RadioButton x:Name="TabPlayers" Style="{StaticResource Segment}" GroupName="FrTab" Content="Players" IsChecked="True" Checked="OnTab" />
+                    <RadioButton x:Name="TabTeams" Style="{StaticResource Segment}" GroupName="FrTab" Content="Teams" Checked="OnTab" />
+                    <RadioButton x:Name="TabRosters" Style="{StaticResource Segment}" GroupName="FrTab" Content="Rosters" Checked="OnTab" />
+                    <RadioButton x:Name="TabGms" Style="{StaticResource Segment}" GroupName="FrTab" Content="GMs" Checked="OnTab" />
+                    <RadioButton x:Name="TabPicks" Style="{StaticResource Segment}" GroupName="FrTab" Content="Draft picks" Checked="OnTab" />
+                    <RadioButton x:Name="TabSchedule" Style="{StaticResource Segment}" GroupName="FrTab" Content="Schedule" Checked="OnTab" />
+                    <RadioButton x:Name="TabTables" Style="{StaticResource Segment}" GroupName="FrTab" Content="League tables" Checked="OnTab" />
+                    <RadioButton x:Name="TabBlocks" Style="{StaticResource Segment}" GroupName="FrTab" Content="Save blocks" Checked="OnTab" />
+                </StackPanel>
+            </Border>
+
+            <!-- ======================================================== players -->
+            <Grid x:Name="PlayersView" Grid.Row="1">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" MinWidth="420" />
+                    <ColumnDefinition Width="12" />
+                    <ColumnDefinition Width="470" MinWidth="360" />
+                </Grid.ColumnDefinitions>
+                <Border Style="{StaticResource Card}">
+                    <DockPanel>
+                        <Grid DockPanel.Dock="Top" Margin="14,12,14,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="230" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="PlayerSearch" Style="{StaticResource SearchBox}" Tag="Find a player, birthplace or game id" TextChanged="OnPlayerFilter" />
+                            <ComboBox x:Name="PlayerTeam" Grid.Column="1" Margin="10,0,0,0" Height="40" DisplayMemberPath="Label" SelectionChanged="OnPlayerFilter" />
+                            <Border Grid.Column="2" Margin="10,0,0,0" CornerRadius="9" Padding="3" Background="{StaticResource Surface2}" BorderBrush="{StaticResource Line}" BorderThickness="1" VerticalAlignment="Center">
+                                <StackPanel Orientation="Horizontal">
+                                    <RadioButton x:Name="PosAll" Style="{StaticResource Segment}" GroupName="FrPos" Content="All" IsChecked="True" Checked="OnPlayerFilter" />
+                                    <RadioButton x:Name="PosF" Style="{StaticResource Segment}" GroupName="FrPos" Content="F" Checked="OnPlayerFilter" />
+                                    <RadioButton x:Name="PosD" Style="{StaticResource Segment}" GroupName="FrPos" Content="D" Checked="OnPlayerFilter" />
+                                    <RadioButton x:Name="PosG" Style="{StaticResource Segment}" GroupName="FrPos" Content="G" Checked="OnPlayerFilter" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                        <TextBlock x:Name="PlayerCount" DockPanel.Dock="Top" Style="{StaticResource Caption}" Margin="16,0,16,6" />
+                        <DataGrid x:Name="PlayerGrid" Style="{StaticResource RowsGrid}" SelectionChanged="OnPlayerPicked" FrozenColumnCount="2" />
+                    </DockPanel>
+                </Border>
+                <GridSplitter Grid.Column="1" HorizontalAlignment="Stretch" Background="Transparent" />
+
+                <!-- the player card -->
+                <Border Grid.Column="2" Style="{StaticResource Card}">
+                    <Grid>
+                        <ScrollViewer x:Name="PlayerScroll" VerticalScrollBarVisibility="Auto">
+                            <StackPanel x:Name="PlayerCard" Visibility="Collapsed">
+                                <!-- banner in the team's colour -->
+                                <Border x:Name="PlayerBanner" CornerRadius="12,12,0,0" Padding="20,16,20,14">
+                                    <DockPanel>
+                                        <Border DockPanel.Dock="Right" CornerRadius="10" Background="#33000000" Padding="12,6" VerticalAlignment="Center">
+                                            <StackPanel>
+                                                <TextBlock x:Name="PlayerOverall" FontFamily="{StaticResource DisplayFont}" FontSize="34" Foreground="White" HorizontalAlignment="Center" />
+                                                <TextBlock Text="OVR" FontSize="10.5" FontWeight="Bold" Foreground="#CCFFFFFF" HorizontalAlignment="Center" />
+                                            </StackPanel>
+                                        </Border>
+                                        <StackPanel>
+                                            <TextBlock x:Name="PlayerFirst" FontSize="15" Foreground="#E6FFFFFF" />
+                                            <TextBlock x:Name="PlayerLast" FontFamily="{StaticResource DisplayFont}" FontSize="30" Foreground="White" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock x:Name="PlayerLine" FontFamily="{StaticResource BoardFont}" FontSize="13" Foreground="#E6FFFFFF" Margin="0,4,0,0" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </DockPanel>
+                                </Border>
+                                <Rectangle Height="3" Fill="{StaticResource RinkStripe}" />
+
+                                <StackPanel Margin="20,6,20,20">
+                                    <TextBlock Text="BIO" Style="{StaticResource Overline}" Margin="0,14,0,4" />
+                                    <ItemsControl x:Name="BioFacts" ItemTemplate="{StaticResource FactTemplate}" ItemsPanel="{StaticResource TwoColumns}" />
+
+                                    <TextBlock Text="CONTRACT" Style="{StaticResource Overline}" Margin="0,16,0,4" />
+                                    <ItemsControl x:Name="ContractFacts" ItemTemplate="{StaticResource FactTemplate}" ItemsPanel="{StaticResource TwoColumns}" />
+                                    <WrapPanel x:Name="TradeChips" Margin="0,6,0,0" />
+
+                                    <TextBlock Text="DRAFT AND CAREER" Style="{StaticResource Overline}" Margin="0,16,0,4" />
+                                    <ItemsControl x:Name="DraftFacts" ItemTemplate="{StaticResource FactTemplate}" ItemsPanel="{StaticResource TwoColumns}" />
+
+                                    <TextBlock x:Name="RatingsTitle" Text="RATINGS" Style="{StaticResource Overline}" Margin="0,18,0,6" />
+                                    <ItemsControl x:Name="Ratings" ItemsPanel="{StaticResource TwoColumns}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate DataType="{x:Type local:FrRating}">
+                                                <Border Margin="0,0,8,6" Padding="10,6" CornerRadius="8" Background="{StaticResource Surface2}">
+                                                    <DockPanel>
+                                                        <TextBlock DockPanel.Dock="Right" Text="{Binding Value}" FontFamily="{StaticResource BoardFont}" FontSize="15" Foreground="{StaticResource Text}"
+                                                                   VerticalAlignment="Center" Margin="8,0,0,0" MinWidth="22" TextAlignment="Right" />
+                                                        <StackPanel>
+                                                            <TextBlock Text="{Binding Label}" FontSize="11.5" Foreground="{StaticResource TextDim}" TextTrimming="CharacterEllipsis" />
+                                                            <Grid Height="4" Margin="0,5,0,1">
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="{Binding Fill}" />
+                                                                    <ColumnDefinition Width="{Binding Rest}" />
+                                                                </Grid.ColumnDefinitions>
+                                                                <Border Grid.ColumnSpan="2" CornerRadius="2" Background="#14FFFFFF" />
+                                                                <Border CornerRadius="2" Background="{Binding Brush}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </DockPanel>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+
+                                    <TextBlock Text="CATEGORY RATINGS" Style="{StaticResource Overline}" Margin="0,14,0,6" />
+                                    <ItemsControl x:Name="CategoryRatings" ItemTemplate="{Binding ItemTemplate, ElementName=Ratings}" ItemsPanel="{StaticResource TwoColumns}" />
+
+                                    <TextBlock Text="X-FACTORS" Style="{StaticResource Overline}" Margin="0,14,0,6" />
+                                    <ItemsControl x:Name="XFactorList">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate DataType="{x:Type local:FrFact}">
+                                                <Border Margin="0,0,0,6" Padding="12,8" CornerRadius="8" Background="{StaticResource Surface2}" BorderBrush="{StaticResource AccentLine}" BorderThickness="1">
+                                                    <DockPanel>
+                                                        <Border DockPanel.Dock="Right" Style="{StaticResource Pill}" VerticalAlignment="Center">
+                                                            <TextBlock Text="{Binding Value}" FontSize="11" Foreground="{StaticResource Accent}" />
+                                                        </Border>
+                                                        <TextBlock Text="{Binding Label}" FontWeight="SemiBold" VerticalAlignment="Center" ToolTip="{Binding Hint}" />
+                                                    </DockPanel>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+
+                                    <Expander Header="Traits, style and growth" Margin="0,12,0,0" Foreground="{StaticResource TextDim}">
+                                        <ItemsControl x:Name="StyleFacts" ItemTemplate="{StaticResource FactTemplate}" ItemsPanel="{StaticResource TwoColumns}" Margin="0,8,0,0" />
+                                    </Expander>
+                                    <Expander Header="Appearance and ids" Margin="0,8,0,0" Foreground="{StaticResource TextDim}">
+                                        <ItemsControl x:Name="LookFacts" ItemTemplate="{StaticResource FactTemplate}" ItemsPanel="{StaticResource TwoColumns}" Margin="0,8,0,0" />
+                                    </Expander>
+                                    <Expander Header="Every field (offset, stored value, shown value)" Margin="0,8,0,0" Foreground="{StaticResource TextDim}">
+                                        <DataGrid x:Name="FieldGrid" Style="{StaticResource RowsGrid}" Margin="0,8,0,0" MaxHeight="420" FontFamily="{StaticResource MonoFont}" FontSize="11.5" />
+                                    </Expander>
+                                    <Expander Header="Record bytes" Margin="0,8,0,0" Foreground="{StaticResource TextDim}">
+                                        <Border Background="#0A0C10" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="8" Padding="12,10" Margin="0,8,0,0">
+                                            <TextBlock x:Name="PlayerHex" FontFamily="{StaticResource MonoFont}" FontSize="11" Foreground="{StaticResource TextDim}" LineHeight="17" />
+                                        </Border>
+                                    </Expander>
+                                </StackPanel>
+                            </StackPanel>
+                        </ScrollViewer>
+                        <TextBlock x:Name="PlayerEmpty" Text="Pick a player to see everything the save holds for him." Style="{StaticResource Caption}"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" Margin="30" />
+                    </Grid>
+                </Border>
+            </Grid>
+
+            <!-- ======================================================== teams -->
+            <Grid x:Name="TeamsView" Grid.Row="1" Visibility="Collapsed">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" MinWidth="420" />
+                    <ColumnDefinition Width="12" />
+                    <ColumnDefinition Width="430" MinWidth="340" />
+                </Grid.ColumnDefinitions>
+                <Border Style="{StaticResource Card}">
+                    <DockPanel>
+                        <DockPanel DockPanel.Dock="Top" Margin="14,12,14,10">
+                            <TextBox x:Name="TeamSearch" Style="{StaticResource SearchBox}" Tag="Find a team, city or arena" TextChanged="OnTeamFilter" />
+                        </DockPanel>
+                        <DataGrid x:Name="TeamGrid" Style="{StaticResource RowsGrid}" SelectionChanged="OnTeamPicked" FrozenColumnCount="3" />
+                    </DockPanel>
+                </Border>
+                <GridSplitter Grid.Column="1" HorizontalAlignment="Stretch" Background="Transparent" />
+                <Border Grid.Column="2" Style="{StaticResource Card}">
+                    <Grid>
+                        <DockPanel x:Name="TeamCard" Visibility="Collapsed">
+                            <StackPanel DockPanel.Dock="Top">
+                                <Border x:Name="TeamBanner" CornerRadius="12,12,0,0" Padding="20,16">
+                                    <DockPanel>
+                                        <TextBlock x:Name="TeamCardAbbr" DockPanel.Dock="Right" FontFamily="{StaticResource DisplayFont}" FontSize="34" Foreground="White" VerticalAlignment="Center" />
+                                        <StackPanel>
+                                            <TextBlock x:Name="TeamCardName" FontFamily="{StaticResource DisplayFont}" FontSize="24" Foreground="White" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock x:Name="TeamLine" FontFamily="{StaticResource BoardFont}" FontSize="13" Foreground="#E6FFFFFF" Margin="0,3,0,0" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </DockPanel>
+                                </Border>
+                                <Rectangle Height="3" Fill="{StaticResource RinkStripe}" />
+                                <StackPanel Margin="20,6,20,0">
+                                    <TextBlock Text="COLOURS" Style="{StaticResource Overline}" Margin="0,14,0,6" />
+                                    <ItemsControl x:Name="TeamColors">
+                                        <ItemsControl.ItemsPanel>
+                                            <ItemsPanelTemplate>
+                                                <WrapPanel />
+                                            </ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate DataType="{x:Type local:FrSwatch}">
+                                                <StackPanel Margin="0,0,10,8" Width="74" ToolTip="{Binding Field}">
+                                                    <Border Height="30" CornerRadius="6" Background="{Binding Brush}" BorderBrush="{StaticResource LineStrong}" BorderThickness="1" />
+                                                    <TextBlock Text="{Binding Label}" FontSize="10.5" Foreground="{StaticResource Muted}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock Text="{Binding Hex}" FontFamily="{StaticResource MonoFont}" FontSize="10" Foreground="{StaticResource Faint}" />
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <ItemsControl x:Name="TeamFacts" ItemTemplate="{StaticResource FactTemplate}" Margin="0,6,0,0" />
+                                    <TextBlock x:Name="TeamRosterTitle" Text="PLAYERS" Style="{StaticResource Overline}" Margin="0,14,0,6" />
+                                </StackPanel>
+                            </StackPanel>
+                            <ListBox x:Name="TeamPlayers" Background="Transparent" BorderThickness="0" Margin="12,0,12,12" ItemContainerStyle="{StaticResource RowItem}"
+                                     ScrollViewer.HorizontalScrollBarVisibility="Disabled" MouseDoubleClick="OnTeamPlayerOpen" ToolTip="Double-click to open the player">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate DataType="{x:Type local:FrPlayerChip}">
+                                        <DockPanel Margin="6,4">
+                                            <TextBlock DockPanel.Dock="Right" Text="{Binding Overall}" FontFamily="{StaticResource BoardFont}" FontSize="14" Foreground="{Binding OverallBrush}" VerticalAlignment="Center" />
+                                            <TextBlock DockPanel.Dock="Left" Text="{Binding Number}" FontFamily="{StaticResource BoardFont}" Foreground="{StaticResource Muted}" Width="34" VerticalAlignment="Center" />
+                                            <TextBlock DockPanel.Dock="Left" Text="{Binding Position}" Foreground="{StaticResource Accent}" Width="34" VerticalAlignment="Center" />
+                                            <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                        </DockPanel>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </DockPanel>
+                        <TextBlock x:Name="TeamEmpty" Text="Pick a team." Style="{StaticResource Caption}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Grid>
+                </Border>
+            </Grid>
+
+            <!-- ======================================================== rosters, GMs, picks, schedule, blocks: a grid with a filter -->
+            <Border x:Name="RowsView" Grid.Row="1" Style="{StaticResource Card}" Visibility="Collapsed">
+                <DockPanel>
+                    <DockPanel DockPanel.Dock="Top" Margin="14,12,14,10">
+                        <ComboBox x:Name="GridTeam" DockPanel.Dock="Right" Width="260" Height="40" Margin="10,0,0,0" DisplayMemberPath="Label" SelectionChanged="OnGridFilter" />
+                        <TextBox x:Name="GridSearch" DockPanel.Dock="Right" Width="280" Style="{StaticResource SearchBox}" Tag="Find in rows" TextChanged="OnGridFilter" />
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock x:Name="GridTitle" Foreground="{StaticResource Text}" FontSize="16" FontWeight="SemiBold" />
+                            <TextBlock x:Name="GridMeta" Style="{StaticResource Caption}" Margin="0,1,0,0" TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+                    </DockPanel>
+                    <DataGrid x:Name="RowGrid" Style="{StaticResource RowsGrid}" />
+                </DockPanel>
+            </Border>
+
+            <!-- ======================================================== every league table -->
+            <Grid x:Name="TablesView" Grid.Row="1" Visibility="Collapsed">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="270" />
+                    <ColumnDefinition Width="12" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Border Style="{StaticResource Card}">
+                    <DockPanel>
+                        <DockPanel DockPanel.Dock="Top" Margin="16,14,16,8">
+                            <TextBlock x:Name="TableCount" DockPanel.Dock="Right" Style="{StaticResource Caption}" VerticalAlignment="Center" />
+                            <TextBlock Text="TABLES" Style="{StaticResource Overline}" />
+                        </DockPanel>
+                        <ListBox x:Name="TableList" Background="Transparent" BorderThickness="0" Margin="6,0,6,8" SelectionChanged="OnTablePicked"
+                                 ItemContainerStyle="{StaticResource RowItem}" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate DataType="{x:Type local:FrTableRow}">
+                                    <StackPanel Margin="4,3">
+                                        <TextBlock Text="{Binding Name}" Foreground="{Binding NameBrush}" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{Binding Meta}" Style="{StaticResource Caption}" FontSize="11" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </DockPanel>
+                </Border>
+                <Border Grid.Column="2" Style="{StaticResource Card}">
+                    <DockPanel>
+                        <DockPanel DockPanel.Dock="Top" Margin="14,12,14,10">
+                            <TextBox x:Name="TableSearch" DockPanel.Dock="Right" Width="280" Style="{StaticResource SearchBox}" Tag="Find in rows" TextChanged="OnTableFilter" />
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock x:Name="TableTitle" Text="Pick a table" Foreground="{StaticResource Text}" FontSize="16" FontWeight="SemiBold" />
+                                <TextBlock x:Name="TableMeta" Style="{StaticResource Caption}" Margin="0,1,0,0" TextTrimming="CharacterEllipsis" />
+                            </StackPanel>
+                        </DockPanel>
+                        <DataGrid x:Name="TableGrid" Style="{StaticResource RowsGrid}" FontFamily="{StaticResource MonoFont}" />
+                    </DockPanel>
+                </Border>
+            </Grid>
+        </Grid>
+
+        <TextBlock x:Name="Busy" Grid.Row="1" Style="{StaticResource Caption}" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed" />
+    </Grid>
+</UserControl>

@@ -292,6 +292,9 @@ public sealed class ModService
     /// <summary>The legacy file names (databases among them), read from the game's index chunk.</summary>
     public Task<List<string>> LegacyNamesAsync() => Run(() => new Legacy(Index).Names);
 
+    /// <summary>A legacy text file (a database's meta XML…) as the game has it, without its byte-order mark.</summary>
+    public Task<string> LegacyTextAsync(string name) => Run(() => System.Text.Encoding.UTF8.GetString(new Legacy(Index).Read(name)).TrimStart('﻿'));
+
     /// <summary>Edits a database in the game: <paramref name="edit"/> gets it as the game has it now and returns what it changed.</summary>
     public async Task<ModEntry> SaveDbAsync(string name, Func<T3Db, string> edit, string source = "Database page")
     {
