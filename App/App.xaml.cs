@@ -27,6 +27,8 @@ public partial class App : Application
     ///   for the Tuning page --tusearch TEXT, --tugroup PATH, --turatings, --tucsv FILE, --tumatch (NHL 24: Match NHL 27, no dialogs);
     ///   for the Be A Pro page --bapdir SAVES (read another save folder), --bapslot NAME, --bapset "Overall=88;xf2=4:3" (not saved),
     ///   --bapadvanced, --bapscroll Y, --bapsave;
+    ///   for the Franchise page --frdir SAVES|SLOT (read another save folder or one slot), --frslot NAME,
+    ///   --frtab players|teams|rosters|gms|picks|schedule|tables|blocks, --frfind TEXT, --frselect N (select the Nth row), --frscroll Y (scroll the player card);
     ///   for the Arenas page --arena LEVEL|NAME, --aview broadcast|end|bowl|overhead|ice, --alook "YAW,PITCH,DIST[,HEIGHT]",
     ///   --anoglass, --anoice, --anoroof, --anoprops, --anojumbo, --agameads (the game's centre-ice ads, not the team's);
     ///   for NHL 24's Play page --p24pc DIR (another NHL24 PC folder), --p24set "GPU.vblank_frequency=120;GPU.window_*=1920x1080", --p24save, --p24scroll Y;

@@ -85,6 +85,8 @@ public partial class MainWindow : Window
         BeAProPage.StatusChanged += text => Status.Text = text;
         ArenasPage.StatusChanged += text => Status.Text = text;
         BeAProPage.Init(_settings, _titleId);
+        FranchisePage.StatusChanged += text => Status.Text = text;
+        FranchisePage.Init(_settings, _titleId);
         TeamsPage.StatusChanged += text => Status.Text = text;
         TexturePage.GoToMods += () => NavMods.IsChecked = true;
         SoundPage.GoToMods += () => NavMods.IsChecked = true;
@@ -92,7 +94,7 @@ public partial class MainWindow : Window
         VideoPage.ShowInExplorer += ShowAssetInExplorer;
         VideoPage.GoToMods += () => NavMods.IsChecked = true;
         if (App.Args.TryGetValue("page", out var page))
-            (page switch { "settings" => NavSettings, "play" => NavPlay, "textures" => NavTextures, "sounds" => NavSounds, "videos" => NavVideos, "mods" => NavMods, "roster" => NavRoster, "uniforms" => NavUniforms, "studio" => NavStudio, "unused" => NavUnused, "scorebug" => NavScorebug, "database" => NavDatabase, "tuning" => NavTuning, "beapro" => NavBeAPro, "arenas" => NavArenas, "teams" => NavTeams, _ => NavExplorer }).IsChecked = true;
+            (page switch { "settings" => NavSettings, "play" => NavPlay, "textures" => NavTextures, "sounds" => NavSounds, "videos" => NavVideos, "mods" => NavMods, "roster" => NavRoster, "uniforms" => NavUniforms, "studio" => NavStudio, "unused" => NavUnused, "scorebug" => NavScorebug, "database" => NavDatabase, "tuning" => NavTuning, "beapro" => NavBeAPro, "franchise" => NavFranchise, "arenas" => NavArenas, "teams" => NavTeams, _ => NavExplorer }).IsChecked = true;
         if (App.Args.TryGetValue("scroll", out var scroll) && double.TryParse(scroll, out double offset))
         {
             PlayPage.UpdateLayout();
@@ -220,6 +222,7 @@ public partial class MainWindow : Window
                 if (NavDatabase.IsChecked == true) _ = DatabasePage.Shown();
                 TeamsPage.SetMods(mods);
                 BeAProPage.SetMods(mods);
+                FranchisePage.SetMods(mods);
                 ArenasPage.SetMods(mods);
                 TuningPage.SetMods(mods);
                 if (NavArenas.IsChecked == true) _ = ArenasPage.Shown();
@@ -651,7 +654,7 @@ public partial class MainWindow : Window
         (sender as FrameworkElement)?.BringIntoView();
         // the page that's now showing glides in
         Motion.Enter(new FrameworkElement[] { ExplorerPage, TexturePage, SoundPage, VideoPage, ModsPage, RosterPage, UniformsPage, StudioPage, UnusedPage, ScorebugPage, Scorebug24Page,
-            DatabasePage, TuningPage, BeAProPage, ArenasPage, TeamsPage, PlayPage, Play24Page, SettingsPage }.FirstOrDefault(p => p.Visibility == Visibility.Visible));
+            DatabasePage, TuningPage, BeAProPage, FranchisePage, ArenasPage, TeamsPage, PlayPage, Play24Page, SettingsPage }.FirstOrDefault(p => p.Visibility == Visibility.Visible));
     }
 
     private void ShowPage(object sender)
@@ -676,6 +679,8 @@ public partial class MainWindow : Window
         if (sender == NavTuning) _ = TuningPage.Shown();
         BeAProPage.Visibility = sender == NavBeAPro ? Visibility.Visible : Visibility.Collapsed;
         if (sender == NavBeAPro) _ = BeAProPage.Shown();
+        FranchisePage.Visibility = sender == NavFranchise ? Visibility.Visible : Visibility.Collapsed;
+        if (sender == NavFranchise) _ = FranchisePage.Shown();
         ArenasPage.Visibility = sender == NavArenas ? Visibility.Visible : Visibility.Collapsed;
         if (sender == NavArenas) _ = ArenasPage.Shown();
         TeamsPage.Visibility = sender == NavTeams ? Visibility.Visible : Visibility.Collapsed;
@@ -845,7 +850,7 @@ public partial class MainWindow : Window
         if (NavExplorer == null) return;
         bool ps4 = _profile.Kind == GameKind.Nhl24;
         var all = new[] { NavPlay, NavExplorer, NavTextures, NavSounds, NavVideos, NavRoster, NavDatabase, NavTuning, NavTeams, NavArenas,
-            NavBeAPro, NavUniforms, NavStudio, NavUnused, NavScorebug, NavMods, NavSettings };
+            NavBeAPro, NavFranchise, NavUniforms, NavStudio, NavUnused, NavScorebug, NavMods, NavSettings };
         var nhl24 = new[] { NavPlay, NavExplorer, NavTextures, NavSounds, NavVideos, NavRoster, NavDatabase, NavTuning, NavTeams, NavUniforms, NavUnused, NavScorebug, NavMods, NavSettings };
         foreach (var nav in all)
             nav.Visibility = !ps4 || nhl24.Contains(nav) ? Visibility.Visible : Visibility.Collapsed;
@@ -882,6 +887,7 @@ public partial class MainWindow : Window
         PlayPage.Init(_settings, Game, _titleId, _title, _version);
         Play24Page.Init(_settings, Game, _titleId, _title, _version);
         BeAProPage.Init(_settings, _titleId);
+        FranchisePage.Init(_settings, _titleId);
         if (KitPaths.IsGame(Game))
             await LoadIndex(rebuild: false);
     }
@@ -1108,6 +1114,18 @@ public partial class MainWindow : Window
             if (a.ContainsKey("bapsave")) { await BeAProPage.SaveAsync(); await Task.Delay(1500); }
             await Task.Delay(800);
             if (a.TryGetValue("bapscroll", out var bsc) && double.TryParse(bsc, out double bsy)) { BeAProPage.ScrollTo(bsy); await Task.Delay(400); }
+        }
+        if (a.TryGetValue("page", out var frPage) && frPage == "franchise")
+        {
+            if (a.TryGetValue("frdir", out var frdir)) FranchisePage.SavesDirOverride = frdir;
+            await Task.Delay(2500);
+            // without a slot or tab the picker stays up
+            if (a.ContainsKey("frslot") || a.ContainsKey("frtab"))
+                await FranchisePage.Show(a.GetValueOrDefault("frslot"), a.GetValueOrDefault("frtab"), a.GetValueOrDefault("frfind"), a.GetValueOrDefault("frselect"));
+            else
+                await FranchisePage.Shown();
+            if (a.TryGetValue("frscroll", out var frs) && double.TryParse(frs, out double fry)) { FranchisePage.ScrollCard(fry); await Task.Delay(400); }
+            await Task.Delay(800);
         }
         if (a.TryGetValue("page", out var tPage) && tPage == "teams")
         {

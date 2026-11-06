@@ -212,6 +212,8 @@ public sealed class Settings
     public string Emulator { get; set; }
     /// <summary>The NHL24 PC folder (the one with nhl24_new.exe), when it isn't found by itself.</summary>
     public string Nhl24Pc { get; set; }
+    /// <summary>Save folders (…\_SaveData\PPSA34063) the Franchise page was pointed at, searched for franchise saves.</summary>
+    public List<string> FranchiseFolders { get; set; } = new();
 
     private static string File => System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NHL27Kit", "settings.json");
 
