@@ -325,7 +325,11 @@ public partial class RosterSyncView : UserControl
         };
     }
 
-    public void SetMods(ModService mods) => _mods = mods;
+    public void SetMods(ModService mods)
+    {
+        _mods = mods;
+        ShowBaseline();
+    }
 
     /// <summary>Starts or ends a fetch/apply: the buttons and the sources' boxes are locked while it runs.</summary>
     private void SetBusy(bool busy)
@@ -333,6 +337,7 @@ public partial class RosterSyncView : UserControl
         _busy = busy;
         foreach (var s in new[] { _ahlSource, _capSource, _linesSource }) s.CanToggle = !busy;
         FetchButton.IsEnabled = !busy;
+        ShowBaseline();
         SetButtons();
     }
 
@@ -394,6 +399,8 @@ public partial class RosterSyncView : UserControl
     public async Task FetchAsync()
     {
         if (_mods == null || _busy) return;
+        // step 1 first: recommend a base roster once, until one is in the game
+        if (!AskForBaseline()) return;
         // A check still running from before throws its result away.
         _replan.Stop();
         _planRun++;

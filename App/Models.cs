@@ -214,6 +214,10 @@ public sealed class Settings
     public string Nhl24Pc { get; set; }
     /// <summary>Save folders (…\_SaveData\PPSA34063) the Franchise page was pointed at, searched for franchise saves.</summary>
     public List<string> FranchiseFolders { get; set; } = new();
+    /// <summary>The shared roster (a RosterCustomN save folder) NHL Sync starts from, when one was picked.</summary>
+    public string BaselineRoster { get; set; }
+    /// <summary>The "start from a shared roster?" question was answered No: don't ask again.</summary>
+    public bool BaselineDeclined { get; set; }
 
     private static string File => System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NHL27Kit", "settings.json");
 

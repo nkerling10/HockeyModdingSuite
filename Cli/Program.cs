@@ -61,7 +61,18 @@ public static class Program
                 "picks-sync" => PicksSyncCmd(game, opts),
                 "contracts-sync" => ContractsSyncCmd(game, opts),
                 "retained-check" => RetainedCheckCmd(game, opts),
+                "save-player" => SavePlayerCmd(game, opts),
+                "texture-rgba" => TextureRgbaCmd(game, opts),
+                "roster-compare" => RosterCompareCmd(game, opts),
+                "move-player" => MovePlayerCmd(game, opts),
+                "roster-baseline" => RosterBaselineCmd(game, opts),
+                "roster-pack" => RosterPackCmd(game, opts),
+                "roster-check" => RosterCheckCmd(game, opts),
+                "roster-layer" => RosterLayerCmd(game, opts),
                 "create-players" => CreatePlayersCmd(game, opts),
+                "create-player" => CreatePlayerCmd(game, opts),
+                "add-team" => AddTeamCmd(game, opts),
+                "move-team" => MoveTeamCmd(game, opts),
                 "lines-sync" => LinesSyncCmd(game, opts),
                 "bc-test" => BcTestCmd(opts),
                 "retexture" => RetextureCmd(game, opts),
@@ -82,6 +93,9 @@ public static class Program
                 "legacy-set" => LegacySetCmd(game, opts),
                 "scorebug" => ScorebugCmd(game, opts),
                 "db-set" => DbSetCmd(game, opts),
+                "db-add" => DbAddCmd(game, opts),
+                "db-remove" => DbRemoveCmd(game, opts),
+                "loc-budget" => LocBudgetCmd(game, opts),
                 "kyty-releases" => KytyReleasesCmd(opts),
                 "mods" => ModsCmd(game, opts),
                 "apply-sound" => ApplySoundCmd(game, opts),
@@ -1197,6 +1211,49 @@ public static class Program
         return 0;
     }
 
+    /// <summary>
+    /// loc-budget [NAME=loc/eng_us.db] [--file DB] [--dump OUT.tsv] [--texts IN.txt]: room for language-string edits.
+    /// --dump writes every string: table, row, stringid, bytes it has room for (0 = stored once for several ids, can't be
+    /// edited alone), bytes its own text uses, text. --texts prints, for each line of IN, the bytes it would need in each
+    /// table (-1 = a character that table can't encode). Read-only.
+    /// </summary>
+    private static int LocBudgetCmd(string game, Options opts)
+    {
+        var index = OpenIndex(game, false);
+        var legacy = new Legacy(index);
+        string name = opts.Positional.FirstOrDefault() ?? "loc/eng_us.db";
+        var db = opts.Get("file") is { } file
+            ? new T3Db(File.ReadAllBytes(file), System.Text.Encoding.UTF8.GetString(legacy.Read(name[..^3] + "-meta.xml")).TrimStart('﻿'))
+            : legacy.OpenDb(name);
+        var tables = db.Tables.Where(t => t.HasCompressedStrings && t.WrittenRecords > 0).ToList();
+        T3Field Text(T3Table t) => t.Fields.FirstOrDefault(f => f.Name.Equals("sourcetext", StringComparison.OrdinalIgnoreCase)) ?? t.Fields.First(f => f.IsCompressed);
+        T3Field Id(T3Table t) => t.Fields.FirstOrDefault(f => f.Name.Equals("stringid", StringComparison.OrdinalIgnoreCase));
+        if (opts.Get("dump") is { } outPath)
+        {
+            using var w = new StreamWriter(outPath, false, new System.Text.UTF8Encoding(false));
+            w.WriteLine("table\trow\tstringid\thave\tneed\ttext");
+            foreach (var t in tables)
+            {
+                var tf = Text(t); var idf = Id(t);
+                for (int r = 0; r < t.WrittenRecords; r++)
+                {
+                    if (db.IsInvalid(t, r)) continue;
+                    string text = db.Get(t, r, tf)?.ToString() ?? "";
+                    var (need, have) = db.Budget(t, r, tf, text);
+                    w.WriteLine($"{t.Name}\t{r}\t{(idf != null ? db.Get(t, r, idf) : "")}\t{have}\t{need}\t{text.Replace('\t', ' ').Replace('\n', ' ')}");
+                }
+            }
+            Console.WriteLine($"wrote {outPath}");
+        }
+        if (opts.Get("texts") is { } inPath)
+        {
+            Console.WriteLine("text\t" + string.Join("\t", tables.Select(t => t.Name)));
+            foreach (var line in File.ReadAllLines(inPath).Where(l => l.Length > 0))
+                Console.WriteLine(line + "\t" + string.Join("\t", tables.Select(t => db.Budget(t, 0, Text(t), line).Need)));
+        }
+        return 0;
+    }
+
     /// <summary>db [NAME] [--table T] [--rows N] [--find TEXT]: the game's databases, read now from its files.</summary>
     private static int DbCmd(string game, Options opts)
     {
@@ -1361,6 +1418,82 @@ public static class Program
             }), dir).GetAwaiter().GetResult();
             Console.WriteLine($"installed: {exe} ({new FileInfo(exe).Length:N0} bytes)");
         }
+        return 0;
+    }
+
+    /// <summary>
+    /// db-add NAME --table T --add "f=v,f=v" [--add ...] [--from R]: appends rows to a table (in its spare room) as a
+    /// mod entry. Each new row starts as a copy of row R (default 0); the listed fields are then set. Rows whose key
+    /// values already exist are skipped. Afterwards the table is re-sorted by its key fields.
+    /// </summary>
+    private static int DbAddCmd(string game, Options opts)
+    {
+        RefuseWhileRunning();
+        var index = OpenIndex(game, false);
+        string name = opts.Positional.FirstOrDefault() ?? throw new ArgumentException("db-add needs a database name");
+        string tname = opts.Get("table") ?? throw new ArgumentException("db-add needs --table");
+        var adds = opts.All("add").ToList();
+        if (adds.Count == 0) throw new ArgumentException("db-add needs at least one --add \"field=value,...\"");
+        int from = int.Parse(opts.Get("from") ?? "0");
+        var entry = DbEditor.Save(index, Mods(), game, name, db =>
+        {
+            var t = db.Table(tname) ?? throw new ArgumentException($"no table {tname}");
+            T3Field F(string n) => t.Fields.FirstOrDefault(x => x.Name.Equals(n, StringComparison.OrdinalIgnoreCase)) ?? throw new ArgumentException($"{t.Name} has no field {n}");
+            object Parse(T3Field f, string v) => f.Type == T3FieldType.Integer ? int.Parse(v) : f.Type == T3FieldType.Float ? float.Parse(v, System.Globalization.CultureInfo.InvariantCulture) : v;
+            var keys = t.Fields.Where(f => f.Key).ToList();
+            string KeyOf(int row) => string.Join("|", keys.Select(k => db.Get(t, row, k)?.ToString()));
+            var existing = Enumerable.Range(0, t.WrittenRecords).Where(i => !db.IsInvalid(t, i)).Select(KeyOf).ToHashSet();
+            var template = db.RecordBytes(t, from);
+            var log = new List<string>();
+            foreach (var add in adds)
+            {
+                var pairs = add.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(p => p.Split('=', 2)).Select(p => (F(p[0].Trim()), p[1].Trim())).ToList();
+                if (t.WrittenRecords >= t.Records) throw new InvalidOperationException($"{t.Name} is full ({t.Records} rows)");
+                int row = t.WrittenRecords;
+                db.SetWritten(t, row + 1);
+                db.WriteRecord(t, row, template);
+                foreach (var (f, v) in pairs) db.Set(t, row, f, Parse(f, v));
+                string k = KeyOf(row);
+                if (keys.Count > 0 && !existing.Add(k)) { db.SetWritten(t, row); log.Add($"skipped {add} (key {k} exists)"); continue; }
+                log.Add($"added {add}");
+            }
+            if (keys.Count > 0)
+            {
+                var order = Enumerable.Range(0, t.WrittenRecords).OrderBy(i => db.IsInvalid(t, i) ? 1 : 0);
+                foreach (var key in keys) { var kk = key; order = order.ThenBy(i => db.IsInvalid(t, i) ? 0 : Convert.ToInt64(db.Get(t, i, kk))); }
+                var list = order.ToList();
+                if (!list.SequenceEqual(Enumerable.Range(0, t.WrittenRecords))) db.Reorder(t, list);
+            }
+            return $"{t.Name}: " + string.Join("; ", log) + $" (now {t.WrittenRecords} rows)";
+        }, Console.WriteLine, "Add rows");
+        Console.WriteLine($"{entry.Summary}\nstate: {Mods().State(entry, game)}");
+        return 0;
+    }
+
+    /// <summary>db-remove NAME --table T --where "field=value" [--where ...]: removes the rows matching any condition
+    /// (moved past the written count, the rest keep their order).</summary>
+    private static int DbRemoveCmd(string game, Options opts)
+    {
+        RefuseWhileRunning();
+        var index = OpenIndex(game, false);
+        string name = opts.Positional.FirstOrDefault() ?? throw new ArgumentException("db-remove needs a database name");
+        string tname = opts.Get("table") ?? throw new ArgumentException("db-remove needs --table");
+        var wheres = opts.All("where").ToList();
+        if (wheres.Count == 0) throw new ArgumentException("db-remove needs at least one --where \"field=value\"");
+        var entry = DbEditor.Save(index, Mods(), game, name, db =>
+        {
+            var t = db.Table(tname) ?? throw new ArgumentException($"no table {tname}");
+            T3Field F(string n) => t.Fields.FirstOrDefault(x => x.Name.Equals(n, StringComparison.OrdinalIgnoreCase)) ?? throw new ArgumentException($"{t.Name} has no field {n}");
+            var conds = wheres.Select(w => w.Split('=', 2)).Select(p => (F(p[0].Trim()), p[1].Trim())).ToList();
+            bool Match(int row) => !db.IsInvalid(t, row) && conds.Any(c => db.Get(t, row, c.Item1)?.ToString() == c.Item2);
+            var rows = Enumerable.Range(0, t.WrittenRecords).ToList();
+            var gone = rows.Where(Match).ToHashSet();
+            if (gone.Count == 0) return $"{t.Name}: nothing matched";
+            db.Reorder(t, rows.Where(r => !gone.Contains(r)).Concat(rows.Where(gone.Contains)).ToList());
+            db.SetWritten(t, t.WrittenRecords - gone.Count);
+            return $"{t.Name}: removed {string.Join("; ", wheres)} ({gone.Count} rows, now {t.WrittenRecords})";
+        }, Console.WriteLine, "Remove rows");
+        Console.WriteLine($"{entry.Summary}\nstate: {Mods().State(entry, game)}");
         return 0;
     }
 
@@ -3026,6 +3159,520 @@ public static class Program
     /// worked out from the game's data alone), scored against CapWages: the retaining team(s) and this season's retained
     /// dollars. Right, wrong (should never happen) or undetermined (shown as —).
     /// </summary>
+    /// <summary>
+    /// save-player SAVEDIR NAME: a player's art id, portrait flag, team and number as a save (franchise or roster slot)
+    /// holds them, from every table in its league database that has an artid, for checking what a save shows against
+    /// what nhl_game.db has. Read only.
+    /// </summary>
+    private static int SavePlayerCmd(string game, Options opts)
+    {
+        string dir = opts.Positional.ElementAtOrDefault(0) ?? throw new ArgumentException("save-player needs a save folder");
+        string name = opts.Positional.ElementAtOrDefault(1) ?? throw new ArgumentException("save-player needs a player name");
+        var index = OpenIndex(game, false);
+        string meta = System.Text.Encoding.UTF8.GetString(new Legacy(index).Read("gamemodes/database/t3db/nhl_game-meta.xml")).TrimStart('﻿');
+        // a saved roster (RosterCustomN): the roster database itself
+        if (Path.GetFileName(dir).StartsWith("RosterCustom", StringComparison.OrdinalIgnoreCase))
+        {
+            var db = RosterSave.Open(dir, meta);
+            Console.WriteLine($"roster save: {db.Tables.Count} tables");
+            // --dump FILE: the unpacked roster database, for the db command's --file
+            if (opts.Get("dump") is { } dump) { File.WriteAllBytes(dump, db.Data); Console.WriteLine($"wrote {dump}"); }
+            var teams = new Roster(db).Teams;
+            string TeamName(int t) => teams.TryGetValue(t, out var tm) && !string.IsNullOrEmpty(tm.Name) ? $"{tm.Name} ({t})" : t < 0 ? "no team" : $"team {t}";
+            // a player's roster rows (regular and Create-a-Player), by his players-table index
+            var rosterTeams = new Dictionary<int, List<int>>();
+            foreach (var (pt, rtn) in new[] { ("exhibitionplayers", Roster.RosterTable), ("customplayers", "customrostertable"), ("customplayers", Roster.RosterTable) })
+            {
+                var p = db.Table(pt); var pf = p.Fields.ToDictionary(x => x.Name);
+                var idOf = new Dictionary<int, int>();
+                for (int r = 0; r < p.WrittenRecords; r++) if (!db.IsInvalid(p, r)) idOf.TryAdd((int)db.Get(p, r, pf["index"]), (int)db.Get(p, r, pf["playerid"]));
+                var rt = db.Table(rtn); var rf = rt.Fields.ToDictionary(x => x.Name);
+                for (int r = 0; r < rt.WrittenRecords; r++)
+                    if (!db.IsInvalid(rt, r) && idOf.TryGetValue((int)db.Get(rt, r, rf["playerindex"]), out int id))
+                        (rosterTeams.TryGetValue(id, out var l) ? l : rosterTeams[id] = new List<int>()).Add((int)db.Get(rt, r, rf["team"]));
+            }
+            foreach (var bioName in new[] { Roster.BioTable, "customplayerbiotable" })
+            {
+                var bio = db.Table(bioName);
+                var bf = bio.Fields.ToDictionary(x => x.Name);
+                for (int r = 0; r < bio.WrittenRecords; r++)
+                {
+                    if (db.IsInvalid(bio, r)) continue;
+                    string full = $"{db.Get(bio, r, bf["firstname"])} {db.Get(bio, r, bf["lastname"])}";
+                    if (!full.Contains(name, StringComparison.OrdinalIgnoreCase)) continue;
+                    int id = (int)db.Get(bio, r, bf["game_id"]);
+                    Console.WriteLine($"{bio.Name}[{r}] {full} (game_id {id}): bio team {TeamName((int)db.Get(bio, r, bf["team"]))}, roster {string.Join(", ", rosterTeams.GetValueOrDefault(id, new()).Select(TeamName).DefaultIfEmpty("none"))}; artid {db.Get(bio, r, bf["artid"])}, hasportrait {db.Get(bio, r, bf["hasportrait"])}");
+                    // --rights: who holds his NHL rights (proteam), his draft and his contract
+                    if (opts.Has("rights"))
+                        Console.WriteLine("    " + string.Join(", ", bio.Fields.Where(f => f.Name is "proteam" || f.Name.StartsWith("draft") || f.Name.StartsWith("contract") && !f.Name.StartsWith("contractclause") || f.Name.StartsWith("extension") || f.Name is "birthyear" or "year" or "month" or "day")
+                            .OrderBy(f => f.Name).Select(f => $"{f.Name}={db.Get(bio, r, f)}" + (f.Name is "proteam" or "draftteam" && db.Get(bio, r, f) is int ti && ti >= 0 ? $" [{TeamName(ti)}]" : ""))));
+                }
+            }
+            return 0;
+        }
+        var save = FranchiseSave.Open(dir, meta);
+        foreach (var p in save.Players.Where(p => p.Name.Contains(name, StringComparison.OrdinalIgnoreCase)))
+            Console.WriteLine($"players block [{p.Index}] {p.Name}: game_id {p.Value("game_id")}, artid {p.Value("artid")}, audioid {p.Value("audioid")}, headid {p.Value("headid")}, team {p.CurrentTeam}, jersey {p.Value("jersey")}");
+        if (save.League == null) { Console.WriteLine("no league database in this save"); return 0; }
+        foreach (var t in save.League.Tables.Where(t => t.Fields.Any(f => f.Name == "artid")))
+        {
+            var f = t.Fields.ToDictionary(x => x.Name);
+            for (int r = 0; r < t.WrittenRecords; r++)
+            {
+                if (save.League.IsInvalid(t, r)) continue;
+                string first = f.TryGetValue("firstname", out var fn) ? save.League.Get(t, r, fn) as string : "", last = f.TryGetValue("lastname", out var ln) ? save.League.Get(t, r, ln) as string : "";
+                if (!$"{first} {last}".Contains(name, StringComparison.OrdinalIgnoreCase)) continue;
+                string V(string n) => f.TryGetValue(n, out var x) ? save.League.Get(t, r, x)?.ToString() : "-";
+                Console.WriteLine($"{t.Name}[{r}] {first} {last}: artid {V("artid")}, hasportrait {V("hasportrait")}, audioid {V("audioid")}, team {V("team")}, jersey {V("jersey")}");
+            }
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// texture-rgba NAME FILE: replaces a texture with raw RGBA8 pixels (FILE, exactly the texture's width × height × 4
+    /// bytes), as a mod entry like the app's, and applies it.
+    /// </summary>
+    private static int TextureRgbaCmd(string game, Options opts)
+    {
+        RefuseWhileRunning();
+        string name = opts.Positional.ElementAtOrDefault(0) ?? throw new ArgumentException("texture-rgba needs a texture name");
+        string file = opts.Positional.ElementAtOrDefault(1) ?? throw new ArgumentException("texture-rgba needs a raw RGBA file");
+        var index = OpenIndex(game, false);
+        var tocs = new TocCache(index);
+        var plan = Replacements.PlanTexture(index, name, File.ReadAllBytes(file), LocationIndex.Build(index, tocs), tocs, Console.WriteLine);
+        var mods = Mods();
+        var e = mods.Add("texture", name, file, $"{plan.Header.Format.Name} {plan.Header.Width}×{plan.Header.Height} from {Path.GetFileName(file)}", plan.Chunk.Patches, plan.Chunk.Notes);
+        mods.Apply(e, game, Console.WriteLine);
+        Console.WriteLine($"{name}: {e.Summary}; state {mods.State(e, game)}");
+        return 0;
+    }
+
+    /// <summary>
+    /// roster-compare SAVEDIR [--names N]: a saved roster (RosterCustomN) against the game's own nhl_game.db, read only:
+    /// each table's rows and how many differ, then the players by game id (in both, only in the save, only in the
+    /// game), and the save's Create-a-Player players.
+    /// </summary>
+    private static int RosterCompareCmd(string game, Options opts)
+    {
+        string dir = opts.Positional.ElementAtOrDefault(0) ?? throw new ArgumentException("roster-compare needs a save folder");
+        int show = int.TryParse(opts.Get("names"), out int nn) ? nn : 15;
+        var index = OpenIndex(game, false);
+        var legacy = new Legacy(index);
+        string meta = System.Text.Encoding.UTF8.GetString(legacy.Read("gamemodes/database/t3db/nhl_game-meta.xml")).TrimStart('﻿');
+        var save = RosterSave.Open(dir, meta);
+        var baseDb = legacy.OpenDb(Roster.Database);
+        Console.WriteLine($"save: {save.Tables.Count} tables; game: {baseDb.Tables.Count} tables");
+
+        byte[] Row(T3Db db, T3Table t, int r) => db.Data.AsSpan(t.RecordsStart + r * t.RecordSize, t.RecordSize).ToArray();
+        Console.WriteLine($"{"table",-40} {"game",7} {"save",7} {"same",7} {"differ",7} {"layout",8}");
+        foreach (var t in baseDb.Tables.OrderBy(t => t.Name))
+        {
+            var s = save.Table(t.Name);
+            if (s == null) { Console.WriteLine($"{t.Name,-40} {t.WrittenRecords,7} {"-",7}"); continue; }
+            bool layout = s.RecordSize == t.RecordSize && s.Fields.Count == t.Fields.Count;
+            int same = 0, differ = 0;
+            if (layout)
+                for (int r = 0; r < Math.Min(t.WrittenRecords, s.WrittenRecords); r++)
+                    if (Row(baseDb, t, r).AsSpan().SequenceEqual(Row(save, s, r))) same++; else differ++;
+            if (t.WrittenRecords != s.WrittenRecords || differ > 0 || !layout)
+                Console.WriteLine($"{t.Name,-40} {t.WrittenRecords,7} {s.WrittenRecords,7} {same,7} {differ,7} {(layout ? "same" : "DIFFERS"),8}");
+        }
+        foreach (var s in save.Tables.Where(s => baseDb.Table(s.Name) == null)) Console.WriteLine($"{s.Name,-40} {"-",7} {s.WrittenRecords,7}  (only in the save)");
+        foreach (var s in save.Tables.Where(s => s.HasCompressedStrings || s.StringsLength > 0))
+            if (baseDb.Table(s.Name) is { } g)
+                Console.WriteLine($"  strings: {s.Name}: game area {g.StringsLength:N0} bytes, save area {s.StringsLength:N0}; compressed {g.HasCompressedStrings}/{s.HasCompressedStrings}; "
+                    + $"fields {string.Join(",", s.Fields.Where(f => f.IsCompressed).Select(f => f.Name))}; same bytes {baseDb.Data.AsSpan(g.StringsStart, g.StringsLength).SequenceEqual(save.Data.AsSpan(s.StringsStart, s.StringsLength))}");
+
+        Dictionary<int, (int Row, string Name, int Team)> Bios(T3Db db, string table)
+        {
+            var t = db.Table(table);
+            var f = t.Fields.ToDictionary(x => x.Name);
+            var map = new Dictionary<int, (int, string, int)>();
+            for (int r = 0; r < t.WrittenRecords; r++)
+                if (!db.IsInvalid(t, r))
+                    map.TryAdd((int)db.Get(t, r, f["game_id"]), (r, $"{db.Get(t, r, f["firstname"])} {db.Get(t, r, f["lastname"])}".Trim(), (int)db.Get(t, r, f["team"])));
+            return map;
+        }
+        var gb = Bios(baseDb, Roster.BioTable);
+        var sb = Bios(save, Roster.BioTable);
+        var both = sb.Keys.Where(gb.ContainsKey).ToList();
+        int sameName = both.Count(id => gb[id].Name == sb[id].Name);
+        var onlySave = sb.Keys.Where(id => !gb.ContainsKey(id)).OrderBy(id => id).ToList();
+        var onlyGame = gb.Keys.Where(id => !sb.ContainsKey(id)).OrderBy(id => id).ToList();
+        Console.WriteLine($"\nbio players by game_id: {both.Count} in both ({sameName} same name, {both.Count - sameName} renamed), {onlySave.Count} only in the save, {onlyGame.Count} only in the game");
+        foreach (var id in both.Where(id => gb[id].Name != sb[id].Name).Take(show)) Console.WriteLine($"  renamed {id}: {gb[id].Name} -> {sb[id].Name}");
+        foreach (var id in onlySave.Take(show)) Console.WriteLine($"  only in save {id}: {sb[id].Name} (team {sb[id].Team})");
+        foreach (var id in onlyGame.Take(show)) Console.WriteLine($"  only in game {id}: {gb[id].Name} (team {gb[id].Team})");
+
+        // capacity: does every save table fit the game's room for rows?
+        foreach (var st in save.Tables)
+            if (baseDb.Table(st.Name) is { } gt && st.WrittenRecords > gt.Records)
+                Console.WriteLine($"  DOESN'T FIT: {st.Name} {st.WrittenRecords} rows, the game has room for {gt.Records}");
+        int maxGameReal = gb.Keys.Where(id => id < PlayerCreator.SpecialIdStart).Max(), maxSaveReal = sb.Keys.Where(id => id < PlayerCreator.SpecialIdStart).Max();
+        Console.WriteLine($"highest real game_id: game {maxGameReal}, save {maxSaveReal}; only-in-save ids >= 32000: {onlySave.Count(id => id >= 32000)}; only-in-game ids >= 32290 (HMS-created): {onlyGame.Count(id => id >= 32290)}");
+
+        var cap = save.Table("customplayerbiotable");
+        if (cap != null)
+        {
+            var cb = Bios(save, "customplayerbiotable");
+            var named = cb.Where(kv => kv.Value.Name.Length > 0).OrderBy(kv => kv.Key).ToList();
+            Console.WriteLine($"\nCreate-a-Player bios in the save: {named.Count} named of {cb.Count}");
+            var cpl = save.Table("customplayers");
+            var cf = cpl.Fields.ToDictionary(x => x.Name);
+            var idOfIndex = new Dictionary<int, int>();
+            for (int r = 0; r < cpl.WrittenRecords; r++) if (!save.IsInvalid(cpl, r)) idOfIndex.TryAdd((int)save.Get(cpl, r, cf["index"]), (int)save.Get(cpl, r, cf["playerid"]));
+            var onTeam = new Dictionary<int, int>();
+            foreach (var rtName in new[] { "customrostertable", Roster.RosterTable })
+            {
+                var rt = save.Table(rtName);
+                var rf = rt.Fields.ToDictionary(x => x.Name);
+                for (int r = 0; r < rt.WrittenRecords; r++)
+                    if (!save.IsInvalid(rt, r) && idOfIndex.TryGetValue((int)save.Get(rt, r, rf["playerindex"]), out int pid) && pid >= PlayerCreator.SpecialIdStart)
+                        onTeam.TryAdd(pid, (int)save.Get(rt, r, rf["team"]));
+            }
+            var teamsT = save.Table(Roster.TeamsTable);
+            var tf = teamsT.Fields.ToDictionary(x => x.Name);
+            var teamInfo = new Dictionary<int, (string Name, int League)>();
+            for (int r = 0; r < teamsT.WrittenRecords; r++)
+                if (!save.IsInvalid(teamsT, r)) teamInfo.TryAdd((int)save.Get(teamsT, r, tf["index"]), ((string)save.Get(teamsT, r, tf["teamname"]), (int)save.Get(teamsT, r, tf["league"])));
+            Console.WriteLine($"Create-a-Player players with a roster row: {onTeam.Count} (customplayers fields: {string.Join(",", cpl.Fields.Select(f => f.Name))})");
+            foreach (var g in onTeam.GroupBy(kv => teamInfo.TryGetValue(kv.Value, out var ti) ? ti.League : -9).OrderBy(g => g.Key))
+                Console.WriteLine($"  league {g.Key}: {g.Count()}, e.g. {string.Join(", ", g.Take(5).Select(kv => (cb.TryGetValue(kv.Key, out var b) ? b.Name : kv.Key.ToString()) + " @ " + (teamInfo.TryGetValue(kv.Value, out var ti) ? ti.Name : kv.Value.ToString())))}");
+            foreach (var kv in named.Take(show * 3)) Console.WriteLine($"  cap {kv.Key}: {kv.Value.Name} (team {kv.Value.Team})");
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// move-player GAMEID TEAM [--dry 1]: moves one player to a team (exhibitionteams index) the way NHL Sync moves
+    /// players: his roster row in both roster tables (team, key, line spots cleared), his bio team, and both teams'
+    /// lines rebuilt. His NHL rights (proteam) and contract are left alone. One mod entry, like any roster edit.
+    /// </summary>
+    private static int MovePlayerCmd(string game, Options opts)
+    {
+        int id = int.Parse(opts.Positional.ElementAtOrDefault(0) ?? throw new ArgumentException("move-player needs a game id"));
+        int to = int.Parse(opts.Positional.ElementAtOrDefault(1) ?? throw new ArgumentException("move-player needs a team index"));
+        SyncChange Change(T3Db db)
+        {
+            var roster = new Roster(db);
+            var p = roster.Players.FirstOrDefault(x => x.GameId == id) ?? throw new ArgumentException($"no player with game id {id}");
+            string Name(int t) => roster.Teams.TryGetValue(t, out var tm) ? tm.Name : $"team {t}";
+            if (!roster.Teams.ContainsKey(to)) throw new ArgumentException($"no team {to}");
+            // the team the game shows him on: his roster row's
+            var rt = db.Table(Roster.RosterTable);
+            int from = p.RosterRow >= 0 ? (int)db.Get(rt, p.RosterRow, rt.Fields.First(f => f.Name == "team")) : p.Team;
+            return new SyncChange
+            {
+                Kind = SyncKind.Join, GameId = p.GameId, Name = p.Name, Position = p.PositionDisplay, RosterRow = p.RosterRow, BioRow = p.BioRow,
+                PlayerIndex = p.PlayerIndex, FromTeam = from, ToTeam = to, FromTeamName = Name(from), ToTeamName = Name(to), Selected = true,
+            };
+        }
+        if (opts.Has("dry"))
+        {
+            var index0 = OpenIndex(game, false);
+            var db = new Legacy(index0).OpenDb(Roster.Database);
+            var c = Change(db);
+            Console.WriteLine($"{c.Name}: {c.Description}");
+            Console.WriteLine(RosterSync.Apply(db, new[] { c }) + " (in memory only)");
+            return 0;
+        }
+        RefuseWhileRunning();
+        var index = OpenIndex(game, false);
+        var entry = DbEditor.Save(index, Mods(), game, Roster.Database, db =>
+        {
+            var c = Change(db);
+            return $"{c.Name}: {c.Description}; " + RosterSync.Apply(db, new[] { c });
+        }, Console.WriteLine);
+        Console.WriteLine(entry.Summary.Length > 300 ? "…" + entry.Summary[^300..] : entry.Summary);
+        return 0;
+    }
+
+    /// <summary>
+    /// roster-baseline SAVEDIR [--write] [--check NAME;NAME…]: a shared roster (RosterCustomN) as the game's base roster
+    /// (RosterBaseline): what it changes, then the copy and the Create-a-Player conversion on an in-memory copy of the
+    /// game's roster, checked (checksums, every roster row's player, no duplicates, the named players' teams and rights).
+    /// --write applies the same to the game as one roster mod entry.
+    /// </summary>
+    private static int RosterBaselineCmd(string game, Options opts)
+    {
+        string dir = opts.Positional.ElementAtOrDefault(0) ?? throw new ArgumentException("roster-baseline needs a save folder");
+        var index = OpenIndex(game, false);
+        var legacy = new Legacy(index);
+        string meta = System.Text.Encoding.UTF8.GetString(legacy.Read("gamemodes/database/t3db/nhl_game-meta.xml")).TrimStart('﻿');
+        var db = legacy.OpenDb(Roster.Database);
+        // --stock PACK (dry runs): start from the game's own roster as exported to a pack, when the game has a roster
+        // entry applied (step 1 always starts from the game's own roster; --write restores the entry first)
+        if (opts.Get("stock") is { } stockPack) db = RosterPack.ToDb(stockPack, db, meta);
+        // a roster pack (folder of CSVs) or the roster save itself
+        bool pack = RosterPack.IsPack(dir);
+        var save = pack ? RosterPack.ToDb(dir, db, meta) : RosterSave.Open(dir, meta);
+        Console.WriteLine(pack ? $"roster pack {dir}" : $"roster save {dir}");
+
+        var plan = RosterBaseline.Plan(db, save, pack ? RosterPack.Manifest(dir).Tables.Select(t => t.Name).ToHashSet(StringComparer.OrdinalIgnoreCase) : null);
+        Console.WriteLine($"{plan.Tables.Count} tables to copy; {plan.Problems.Count} not copied" + (plan.Problems.Count > 0 ? ": " + string.Join("; ", plan.Problems) : ""));
+        Console.WriteLine($"players: {plan.PlayersBoth} in both, {plan.PlayersAdded} added, {plan.PlayersDropped} dropped (only in the game now)");
+        Console.WriteLine($"  dropped e.g. {string.Join(", ", plan.Dropped.Take(8))}");
+        if (plan.TeamsDropped.Count > 0) Console.WriteLine($"teams only in the game (dropped): {string.Join(", ", plan.TeamsDropped)}");
+        var conv = plan.Created.Where(c => c.Skip == null).ToList();
+        Console.WriteLine($"Create-a-Player on teams: {plan.Created.Count}; converted {conv.Count} ({conv.Count(c => c.MatchId >= 0)} copies of existing players, {conv.Count(c => c.MatchId < 0)} new); "
+            + string.Join(", ", plan.Created.Where(c => c.Skip != null).GroupBy(c => c.Skip).Select(g => $"{g.Count()} left ({g.Key})")));
+        foreach (var g in conv.GroupBy(c => c.League)) Console.WriteLine($"  league {g.Key}: {g.Count()} (e.g. {string.Join(", ", g.Take(4).Select(c => c.Name + " @ " + c.TeamName))})");
+        Console.WriteLine($"  copies: {string.Join(", ", conv.Where(c => c.MatchId >= 0).Take(12).Select(c => $"{c.Name} ({c.MatchTeam} -> {c.TeamName})"))}");
+
+        string Run(T3Db d)
+        {
+            // a pack, by default: the layered import step 1 uses (the whole-table copy below crashes franchise; kept with --whole for testing)
+            if (pack && !opts.Has("whole"))
+            {
+                var layered = RosterBaseline.ImportLayered(d, dir, meta);
+                if (layered.Problems.Count > 0) throw new InvalidDataException("References would point at nothing:\n" + string.Join("\n", layered.Problems));
+                return layered.Summary(Path.GetFileName(dir.TrimEnd('/', '\\')));
+            }
+            // --tables players|teams: one side of the roster only (players: RosterBaseline.PlayerTables; teams: the rest)
+            ISet<string> only = opts.Get("tables") switch
+            {
+                "players" => RosterBaseline.PlayerTables,
+                "teams" => RosterPack.Manifest(dir).Tables.Select(t => t.Name).Where(n => !RosterBaseline.PlayerTables.Contains(n)).ToHashSet(StringComparer.OrdinalIgnoreCase),
+                _ => null,
+            };
+            var notes = pack ? RosterBaseline.ImportPack(d, dir, null, only) : RosterBaseline.CopyTables(d, save);
+            // --copy-only: the pack's tables alone, no Create-a-Player conversion (to tell the two apart in testing)
+            var createdNow = RosterBaseline.Created(d);
+            if (!opts.Has("copy-only")) notes += "; " + RosterBaseline.ConvertCreated(d, createdNow);
+            // --drop-league N (testing): the converted Create-a-Player players on that league's teams taken off their rosters
+            if (int.TryParse(opts.Get("drop-league"), out int dropLeague))
+            {
+                var ids = createdNow.Where(c => c.Skip == null && c.League == dropLeague && c.MatchId < 0 && c.NewId >= 0).Select(c => c.NewId).ToHashSet();
+                notes += $"; {RosterBaseline.RemoveFromRosters(d, ids)} roster rows of {ids.Count} new league-{dropLeague} players removed";
+            }
+            if (RosterBaseline.RemoveOrphanStats(d) is { } cleaned) notes += "; " + cleaned;
+            return notes;
+        }
+
+        if (opts.Has("write"))
+        {
+            RefuseWhileRunning();
+            var entry = DbEditor.Save(index, Mods(), game, Roster.Database, Run, Console.WriteLine);
+            Console.WriteLine($"state: {Mods().State(entry, game)}");
+            db = legacy.OpenDb(Roster.Database);
+        }
+        else Console.WriteLine("\nin memory: " + Run(db));
+
+        // checks
+        var (ok, total) = db.CheckCrcs();
+        Console.WriteLine($"checksums {ok}/{total}");
+        var refs = RosterBaseline.CheckReferences(db);
+        Console.WriteLine(refs.Count == 0 ? "references: none point at a missing player or team" : "references pointing at nothing:\n  " + string.Join("\n  ", refs));
+        Console.WriteLine($"loose matches (name, birth year, rights): {string.Join(", ", plan.Created.Where(c => c.LooseMatch).Select(c => c.Name))}");
+        var pl = db.Table(Roster.PlayersTable); var pf = pl.Fields.ToDictionary(x => x.Name);
+        var cpl = db.Table(RosterBaseline.CapPlayers); var cpf = cpl.Fields.ToDictionary(x => x.Name);
+        var indexes = new HashSet<int>();
+        for (int r = 0; r < pl.WrittenRecords; r++) if (!db.IsInvalid(pl, r)) indexes.Add((int)db.Get(pl, r, pf["index"]));
+        for (int r = 0; r < cpl.WrittenRecords; r++) if (!db.IsInvalid(cpl, r)) indexes.Add((int)db.Get(cpl, r, cpf["index"]));
+        var rt = db.Table(Roster.RosterTable); var rf = rt.Fields.ToDictionary(x => x.Name);
+        int dangling = 0, rows = 0;
+        var perIndex = new Dictionary<int, int>();
+        for (int r = 0; r < rt.WrittenRecords; r++)
+        {
+            if (db.IsInvalid(rt, r)) continue;
+            rows++;
+            int pi = (int)db.Get(rt, r, rf["playerindex"]);
+            if (!indexes.Contains(pi)) dangling++;
+            perIndex[pi] = perIndex.GetValueOrDefault(pi) + 1;
+        }
+        Console.WriteLine($"roster rows {rows}: {dangling} pointing at no player, {perIndex.Count(kv => kv.Value > 1)} players on more than one row");
+        var roster = new Roster(db);
+        var dupes = roster.Players.Where(p => p.GameId < PlayerCreator.SpecialIdStart).GroupBy(p => (p.Name, BornOf(db, p))).Where(g => g.Count() > 1).ToList();
+        Console.WriteLine($"real players with the same name and birth date: {dupes.Count}" + (dupes.Count > 0 ? " e.g. " + string.Join(", ", dupes.Take(6).Select(g => g.Key.Name)) : ""));
+        string Team(int t) => roster.Teams.TryGetValue(t, out var tm) ? tm.Name : t < 0 ? "none" : $"team {t}";
+        foreach (string name in (opts.Get("check") ?? "Landon DuPont;Charlie Stramel;Keaton Verhoeff;Adam Benak").Split(';'))
+        {
+            var found = roster.Players.Where(p => p.Name.Equals(name, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (found.Count == 0) { Console.WriteLine($"  {name}: not a real player"); continue; }
+            var bio = db.Table(Roster.BioTable); var bf = bio.Fields.ToDictionary(x => x.Name);
+            foreach (var p in found)
+            {
+                int shown = p.RosterRow >= 0 ? (int)db.Get(rt, p.RosterRow, rf["team"]) : -1;
+                Console.WriteLine($"  {p.Name} ({p.GameId}): roster {Team(shown)}, bio team {Team(p.Team)}, rights {Team((int)db.Get(bio, p.BioRow, bf["proteam"]))}, contract status {db.Get(bio, p.BioRow, bf["contractstatus"])}, portrait {p.HasPortrait}, overall {p.Overall}");
+            }
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// roster-pack export SAVEDIR PACKDIR [--source NAME]: a roster save (RosterCustomN) as a roster pack (RosterPack).
+    /// roster-pack check PACKDIR SAVEDIR: imports the pack into a copy of the game's roster and compares every table,
+    /// byte for byte, with the save's: a faithful pack leaves none different. Read only.
+    /// </summary>
+    private static int RosterPackCmd(string game, Options opts)
+    {
+        string verb = opts.Positional.ElementAtOrDefault(0) ?? throw new ArgumentException("roster-pack export|check");
+        var index = OpenIndex(game, false);
+        var legacy = new Legacy(index);
+        string meta = System.Text.Encoding.UTF8.GetString(legacy.Read("gamemodes/database/t3db/nhl_game-meta.xml")).TrimStart('﻿');
+        if (verb == "export")
+        {
+            string save = opts.Positional.ElementAtOrDefault(1) ?? throw new ArgumentException("roster-pack export SAVEDIR PACKDIR");
+            string pack = opts.Positional.ElementAtOrDefault(2) ?? throw new ArgumentException("roster-pack export SAVEDIR PACKDIR");
+            var (date, version) = RosterSave.Info(save);
+            var m = RosterPack.Export(RosterSave.Open(save, meta), pack, new RosterPackManifest { Source = opts.Get("source") ?? "", RosterDate = date, GameVersion = version });
+            long bytes = Directory.GetFiles(pack, "*", SearchOption.AllDirectories).Sum(f => new FileInfo(f).Length);
+            Console.WriteLine($"{pack}: {m.Tables.Count} tables, {m.Tables.Sum(t => t.Rows):N0} rows, {bytes / 1048576.0:0.0} MB; roster {date}, game {version}");
+            return 0;
+        }
+        // roster-pack export-game PACKDIR: the game's own roster database as a pack (for comparing a roster with the stock one)
+        if (verb == "export-game")
+        {
+            string pack = opts.Positional.ElementAtOrDefault(1) ?? throw new ArgumentException("roster-pack export-game PACKDIR");
+            var m = RosterPack.Export(legacy.OpenDb(Roster.Database), pack, new RosterPackManifest { Source = "game", GameVersion = "" });
+            Console.WriteLine($"{pack}: {m.Tables.Count} tables, {m.Tables.Sum(t => t.Rows):N0} rows");
+            return 0;
+        }
+        if (verb == "check")
+        {
+            string pack = opts.Positional.ElementAtOrDefault(1) ?? throw new ArgumentException("roster-pack check PACKDIR SAVEDIR");
+            string save = opts.Positional.ElementAtOrDefault(2) ?? throw new ArgumentException("roster-pack check PACKDIR SAVEDIR");
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var fromPack = RosterPack.ToDb(pack, legacy.OpenDb(Roster.Database), meta);
+            Console.WriteLine($"imported in {sw.ElapsedMilliseconds} ms; checksums {fromPack.CheckCrcs().Ok}/{fromPack.CheckCrcs().Total}");
+            var src = RosterSave.Open(save, meta);
+            int same = 0, differ = 0;
+            foreach (var s in src.Tables)
+            {
+                var p = fromPack.Table(s.Name);
+                if (p == null) continue;
+                int bad = 0, firstBad = -1;
+                if (p.WrittenRecords != s.WrittenRecords) bad = -1;
+                else
+                    for (int r = 0; r < s.WrittenRecords; r++)
+                        if (!fromPack.RecordBytes(p, r).AsSpan().SequenceEqual(src.RecordBytes(s, r))) { bad++; if (firstBad < 0) firstBad = r; }
+                if (bad == 0) same++;
+                else
+                {
+                    differ++;
+                    string detail = "";
+                    if (firstBad >= 0)
+                    {
+                        var a = fromPack.RecordBytes(p, firstBad); var b = src.RecordBytes(s, firstBad);
+                        var at = Enumerable.Range(0, a.Length).Where(i => a[i] != b[i]).Take(6).Select(i => $"byte {i}: {a[i]:X2} vs {b[i]:X2}");
+                        detail = $" first at row {firstBad} ({string.Join(", ", at)})";
+                    }
+                    Console.WriteLine($"  DIFFERS {s.Name}: {(bad < 0 ? $"rows {p.WrittenRecords} vs {s.WrittenRecords}" : $"{bad} rows")}{detail}");
+                }
+            }
+            Console.WriteLine($"{same} tables identical to the save, {differ} differ");
+            return differ == 0 ? 0 : 1;
+        }
+        throw new ArgumentException("roster-pack export|check");
+    }
+
+    /// <summary>
+    /// roster-check [--pack DIR] [--file DB]: references in the roster database that point at nothing — every
+    /// playerindex field against the players tables, every game_id/playerid against the bios, every team field against
+    /// the teams — per table, with examples. --pack checks the pack applied to a copy of the game's roster instead. Read only.
+    /// </summary>
+    private static int RosterCheckCmd(string game, Options opts)
+    {
+        var index = OpenIndex(game, false);
+        var legacy = new Legacy(index);
+        string meta = System.Text.Encoding.UTF8.GetString(legacy.Read("gamemodes/database/t3db/nhl_game-meta.xml")).TrimStart('﻿');
+        var db = legacy.OpenDb(Roster.Database);
+        if (opts.Get("pack") is { } pack) db = RosterPack.ToDb(pack, db, meta);
+        if (opts.Get("save") is { } saveDir) db = RosterSave.Open(saveDir, meta);
+        HashSet<int> Values(string table, string field)
+        {
+            var set = new HashSet<int>();
+            var t = db.Table(table);
+            var f = t?.Fields.FirstOrDefault(x => x.Name == field);
+            if (f == null) return set;
+            for (int r = 0; r < t.WrittenRecords; r++) if (!db.IsInvalid(t, r)) set.Add((int)db.Get(t, r, f));
+            return set;
+        }
+        var indexes = Values(Roster.PlayersTable, "index"); indexes.UnionWith(Values("customplayers", "index"));
+        var ids = Values(Roster.BioTable, "game_id"); ids.UnionWith(Values("customplayerbiotable", "game_id"));
+        var teams = Values(Roster.TeamsTable, "index"); teams.UnionWith(Values("customteams", "index"));
+        Console.WriteLine($"{indexes.Count} player indexes, {ids.Count} player ids, {teams.Count} teams");
+        int problems = 0;
+        foreach (var t in db.Tables.OrderBy(t => t.Name))
+            foreach (var f in t.Fields.Where(f => f.Type == T3FieldType.Integer))
+            {
+                HashSet<int> valid; string what;
+                if (f.Name == "playerindex") { valid = indexes; what = "player index"; }
+                else if ((f.Name is "game_id" or "playerid") && !t.Name.EndsWith("biotable")) { valid = ids; what = "player id"; }
+                else if (f.Name is "team" or "teamid" or "proteam" or "draftteam" or "hometeam" or "awayteam" or "ahlaffiliate" or "originalteam" or "owner") { valid = teams; what = "team"; }
+                else continue;
+                var bad = new Dictionary<int, int>();
+                for (int r = 0; r < t.WrittenRecords; r++)
+                {
+                    if (db.IsInvalid(t, r)) continue;
+                    int v = (int)db.Get(t, r, f);
+                    if (v < 0 || valid.Contains(v)) continue;
+                    bad[v] = bad.GetValueOrDefault(v) + 1;
+                }
+                if (bad.Count == 0) continue;
+                problems += bad.Values.Sum();
+                Console.WriteLine($"  {t.Name}.{f.Name}: {bad.Values.Sum()} rows point at a missing {what}, e.g. {string.Join(", ", bad.Take(8).Select(kv => $"{kv.Key} (x{kv.Value})"))}");
+            }
+        Console.WriteLine(problems == 0 ? "no dangling references" : $"{problems} dangling references");
+        return 0;
+    }
+
+    /// <summary>
+    /// roster-layer PACKDIR TABLE[,TABLE…] [--write]: one layer of a roster pack onto the game's roster, existing players
+    /// only (rows matched by game_id; nothing added or removed), e.g. exhibitionskaterai,exhibitiongoalieai for ratings.
+    /// Without --write it runs on a copy and reports. For building a roster up from stock one layer at a time.
+    /// </summary>
+    private static int RosterLayerCmd(string game, Options opts)
+    {
+        string dir = opts.Positional.ElementAtOrDefault(0) ?? throw new ArgumentException("roster-layer PACKDIR TABLES");
+        var tables = (opts.Positional.ElementAtOrDefault(1) ?? throw new ArgumentException("roster-layer PACKDIR TABLES")).Split(',');
+        var index = OpenIndex(game, false);
+        var legacy = new Legacy(index);
+        string meta = System.Text.Encoding.UTF8.GetString(legacy.Read("gamemodes/database/t3db/nhl_game-meta.xml")).TrimStart('﻿');
+        var db = legacy.OpenDb(Roster.Database);
+        var source = RosterPack.ToDb(dir, db, meta);
+        // the table name "rosters" is the roster spots and lines (RosterBaseline.ApplyRosterSpots), the rest rows by game_id
+        string Run(T3Db d)
+        {
+            // tokens: "newplayers" (the roster's regular players the game lacks), "created" (its Create-a-Player tables,
+            // converted after the roster spots), "rosters" (spots and lines); anything else is a table taken by game_id
+            var tokens = new HashSet<string> { "rosters", "newplayers", "created" };
+            var plain = tables.Where(t => !tokens.Contains(t)).ToList();
+            string text = $"Roster layer ({string.Join(", ", tables)}): {RosterBaseline.ApplyLayer(d, source, plain, opts.Get("keep")?.Split(','))} rows";
+            if (tables.Contains("newplayers")) text += $"; {RosterBaseline.AddMissingPlayers(d, source)} regular players added";
+            if (tables.Contains("created"))
+                text += "; " + RosterPack.Import(dir, d, null, new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                    { "customplayerbiotable", "customplayers", "customskaterai", "customgoalieai", "customskaterequipment", "customgoalieequipment", "customfreeagents", "customrostertable" }).Count + " Create-a-Player tables";
+            if (tables.Contains("rosters")) text += "; " + RosterBaseline.ApplyRosterSpots(d, source, tables.Contains("created"));
+            if (tables.Contains("created"))
+            {
+                text += "; " + RosterBaseline.ConvertCreated(d, RosterBaseline.Created(d));
+                if (RosterBaseline.RemoveOrphanStats(d) is { } cleaned) text += "; " + cleaned;
+            }
+            return text + $" from {Path.GetFileName(dir.TrimEnd('/', '\\'))}";
+        }
+        if (opts.Has("write"))
+        {
+            RefuseWhileRunning();
+            var entry = DbEditor.Save(index, Mods(), game, Roster.Database, Run, Console.WriteLine);
+            Console.WriteLine($"state: {Mods().State(entry, game)}");
+            db = legacy.OpenDb(Roster.Database);
+        }
+        else Console.WriteLine("in memory: " + Run(db));
+        Console.WriteLine($"checksums {db.CheckCrcs().Ok}/{db.CheckCrcs().Total}");
+        var refs = RosterBaseline.CheckReferences(db);
+        Console.WriteLine(refs.Count == 0 ? "references: none point at a missing player or team" : string.Join("\n", refs));
+        return 0;
+    }
+
+    private static DateTime? BornOf(T3Db db, RosterPlayer p)
+    {
+        var bio = db.Table(Roster.BioTable); var bf = bio.Fields.ToDictionary(x => x.Name);
+        int y = (int)db.Get(bio, p.BioRow, bf["year"]), m = (int)db.Get(bio, p.BioRow, bf["month"]), d = (int)db.Get(bio, p.BioRow, bf["day"]);
+        return y > 0 && m is >= 0 and < 12 && d >= 0 && d < DateTime.DaysInMonth(1900 + y, m + 1) ? new DateTime(1900 + y, m + 1, d + 1) : null;
+    }
+
     private static int RetainedCheckCmd(string game, Options opts)
     {
         var index = OpenIndex(game, false);
@@ -3069,6 +3716,128 @@ public static class Program
                 Console.WriteLine($"  {verdict,-7} {p.Name,-24} {team.Abbr} {a.CurrentDollars / 1000}k, {(Roster.Field(db.Table(Roster.BioTable), "contractlength") is { } lf ? (int)db.Get(db.Table(Roster.BioTable), p.BioRow, lf) : 0)}y  shows: {got,-26} CapWages: {want}");
             }
         Console.WriteLine($"right {right}, partial {partial}, undetermined {unknown}, WRONG {wrong}; retained on CapWages but not flagged in the game {notRetained}");
+        return 0;
+    }
+
+    /// <summary>
+    /// create-player --first F --last L --born YYYY-MM-DD --pos C|LW|RW|LD|RD|G --shoots L|R --team INDEX
+    ///   [--height IN] [--weight LB] [--city CITY] [--country USA] [--region MN] [--number N]
+    ///   [--draft YEAR:TEAM:ROUND:OVERALL] [--proteam INDEX] [--dry 1]
+    /// Creates one player by hand in nhl_game.db (as the roster sync's creator does: a template's ratings and gear, a generic
+    /// face, a roster row on --team). --team may be any exhibition team index (e.g. a college team that isn't in franchise).
+    /// --proteam sets the NHL club holding his rights (a drafted, unsigned prospect playing elsewhere). Saved as a mod.
+    /// </summary>
+    /// <summary>
+    /// add-team --from IDX --index NEW --name "Full Name" --nickname "..." --city "..." --abbr ABR --artabbr ABR
+    /// [--art ID] [--league N] [--primary 0xRRGGBB] [--secondary 0xRRGGBB] [--dry 1]: adds a new exhibition team cloned
+    /// from team IDX (TeamCreator): its own team, strategy, jersey and equipment rows, in the tables' spare room.
+    /// </summary>
+    private static int AddTeamCmd(string game, Options opts)
+    {
+        string Need(string k) => opts.Get(k) ?? throw new ArgumentException($"add-team needs --{k}");
+        static int Num(string s) => s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? Convert.ToInt32(s[2..], 16) : int.Parse(s);
+        int from = int.Parse(Need("from"));
+        var nt = new TeamCreator.NewTeam(int.Parse(Need("index")), Need("name"), opts.Get("nickname") ?? Need("name"), Need("city"),
+            Need("abbr"), opts.Get("artabbr") ?? Need("abbr"), opts.Get("art") is { } a ? int.Parse(a) : -1,
+            opts.Get("league") is { } l ? int.Parse(l) : -1,
+            opts.Get("primary") is { } p ? Num(p) : null, opts.Get("secondary") is { } s ? Num(s) : null);
+
+        string Edit(T3Db db)
+        {
+            var t = db.Table("exhibitionteams");
+            var fi = t.Fields.First(f => f.Name == "index");
+            int src = Enumerable.Range(0, t.WrittenRecords).First(i => Convert.ToInt32(db.Get(t, i, fi)) == from);
+            var fixedNt = nt with
+            {
+                ArtId = nt.ArtId >= 0 ? nt.ArtId : Convert.ToInt32(db.Get(t, src, t.Fields.First(f => f.Name == "artid"))),
+                League = nt.League >= 0 ? nt.League : Convert.ToInt32(db.Get(t, src, t.Fields.First(f => f.Name == "league")))
+            };
+            Console.WriteLine(TeamCreator.Create(db, from, fixedNt));
+            return $"Added team {nt.Index} {nt.TeamName} (cloned from {from})";
+        }
+
+        var index = OpenIndex(game, false);
+        if (opts.Has("dry"))
+        {
+            var db = new Legacy(index).OpenDb(Roster.Database);
+            Console.WriteLine(Edit(db));
+            var (ok, total) = db.CheckCrcs();
+            Console.WriteLine($"in memory only (--dry): CRCs {ok}/{total}");
+            return 0;
+        }
+        RefuseWhileRunning();
+        var entry = DbEditor.Save(index, Mods(), game, Roster.Database, Edit, Console.WriteLine, "Add team");
+        Console.WriteLine($"state: {Mods().State(entry, game)}");
+        return 0;
+    }
+
+    /// <summary>move-team --from OLD --to NEW [--dry 1]: gives an exhibition team a new index (TeamCreator.Move), e.g. out
+    /// of 400-599, which the game reserves for create-a-team teams.</summary>
+    private static int MoveTeamCmd(string game, Options opts)
+    {
+        int from = int.Parse(opts.Get("from") ?? throw new ArgumentException("move-team needs --from"));
+        int to = int.Parse(opts.Get("to") ?? throw new ArgumentException("move-team needs --to"));
+        var index = OpenIndex(game, false);
+        if (opts.Has("dry"))
+        {
+            var db = new Legacy(index).OpenDb(Roster.Database);
+            Console.WriteLine(TeamCreator.Move(db, from, to));
+            var (ok, total) = db.CheckCrcs();
+            Console.WriteLine($"in memory only (--dry): CRCs {ok}/{total}");
+            return 0;
+        }
+        RefuseWhileRunning();
+        var entry = DbEditor.Save(index, Mods(), game, Roster.Database, db => TeamCreator.Move(db, from, to), Console.WriteLine, "Move team");
+        Console.WriteLine($"state: {Mods().State(entry, game)}");
+        return 0;
+    }
+
+    private static int CreatePlayerCmd(string game, Options opts)
+    {
+        string Need(string k) => opts.Get(k) ?? throw new ArgumentException($"create-player needs --{k}");
+        string pos = Need("pos").ToUpperInvariant();
+        int primary = pos switch { "C" => 0, "LW" => 1, "RW" => 2, "LD" => 3, "RD" => 4, "G" => 5, _ => throw new ArgumentException($"unknown --pos {pos}") };
+        var born = DateTime.ParseExact(Need("born"), "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+        int team = int.Parse(Need("team"));
+        DraftInfo draft = DraftInfo.Undrafted;
+        if (opts.Get("draft") is { } ds)
+        {
+            var d = ds.Split(':');
+            draft = new DraftInfo(int.Parse(d[0]), d[1], int.Parse(d[2]), int.Parse(d[3]));
+        }
+        var bio = new PlayerBio(Need("first"), Need("last"), int.TryParse(opts.Get("number"), out int num) ? num : -1, pos, Need("shoots").ToUpperInvariant(),
+            int.TryParse(opts.Get("height"), out int hin) ? hin : 0, int.TryParse(opts.Get("weight"), out int wlb) ? wlb : 0,
+            born, opts.Get("city") ?? "", draft, "create-player")
+        { Primary = primary, Secondary = -1, BirthCountry = opts.Get("country") ?? "", BirthRegion = opts.Get("region") ?? "" };
+        int proteam = int.TryParse(opts.Get("proteam"), out int pt) ? pt : int.MinValue;
+        var change = new SyncChange { Kind = SyncKind.Missing, Name = bio.Name, Position = pos, ToTeam = team, Bio = bio, Selected = true };
+        if (PlayerCreator.Problem(change) is { } problem) throw new ArgumentException(problem);
+
+        string Edit(T3Db db)
+        {
+            var made = PlayerCreator.Create(db, new[] { change });
+            if (made.Created.Count == 0) throw new InvalidOperationException("not created: " + string.Join("; ", made.Skipped.Select(s => $"{s.Name}: {s.Reason}")));
+            var p = made.Created[0];
+            var bt = db.Table(Roster.BioTable);
+            int row = new Roster(db).Find(p.GameId).BioRow;
+            if (proteam != int.MinValue) db.Set(bt, row, bt.Fields.First(f => f.Name == "proteam"), proteam);
+            Console.WriteLine($"created {p.Name}: game_id {p.GameId}, player index {p.PlayerIndex}, team {p.Team} ({p.TeamName}), art {p.ArtId}, template {p.Template}" +
+                              (proteam != int.MinValue ? $", proteam {proteam}" : ""));
+            return $"Created {p.Name} (game_id {p.GameId}) on {p.TeamName}";
+        }
+
+        var index = OpenIndex(game, false);
+        if (opts.Has("dry"))
+        {
+            var db = new Legacy(index).OpenDb(Roster.Database);
+            Console.WriteLine(Edit(db));
+            var (ok, total) = db.CheckCrcs();
+            Console.WriteLine($"in memory only (--dry): CRCs {ok}/{total}");
+            return 0;
+        }
+        RefuseWhileRunning();
+        var entry = DbEditor.Save(index, Mods(), game, Roster.Database, Edit, Console.WriteLine, "Create player");
+        Console.WriteLine($"state: {Mods().State(entry, game)}");
         return 0;
     }
 

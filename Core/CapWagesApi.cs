@@ -21,6 +21,8 @@ public sealed record CapPlayer(string First, string Last, DateTime? Born, string
     public string Pos { get; init; } = "";
     /// <summary>Games he has played at each position ("LW" → 96, "RW" → 46, "C" → 3); empty when CapWages has none.</summary>
     public IReadOnlyDictionary<string, int> PositionGames { get; init; } = new Dictionary<string, int>();
+    /// <summary>His CapWages player page (capwages.com/players/{Slug}); "" when the team page gives none.</summary>
+    public string Slug { get; init; } = "";
 }
 
 /// <summary>A draft pick a team's page lists: real draft year, round, the original team's full name, and whether the team traded it away.</summary>
@@ -151,7 +153,7 @@ public static class CapWagesApi
                 if (full.Length == 0) continue;
                 int comma = full.IndexOf(',');
                 string last = comma > 0 ? full[..comma].Trim() : full, first = comma > 0 ? full[(comma + 1)..].Trim() : "";
-                ahl.Add(new CapPlayer(first, last, ParseDate(Str(p, "born")), "ahl", "", Array.Empty<CapContract>()) { Pos = Str(p, "pos") });
+                ahl.Add(new CapPlayer(first, last, ParseDate(Str(p, "born")), "ahl", "", Array.Empty<CapContract>()) { Pos = Str(p, "pos"), Slug = Str(p, "slug") });
             }
         return new CapTeam(abbr, name, players, picks) { AhlPlayers = ahl, Buyouts = ParseBuyouts(pp, abbr) };
     }
@@ -213,7 +215,7 @@ public static class CapWagesApi
         if (p.TryGetProperty("positions", out var ps) && ps.ValueKind == JsonValueKind.Object)
             foreach (var g in ps.EnumerateObject())
                 if (g.Value.ValueKind == JsonValueKind.Number) games[g.Name] = g.Value.GetInt32();
-        return new CapPlayer(first, last, ParseDate(Str(p, "born")), section, Str(p, "termsDetails"), contracts) { Pos = Str(p, "pos"), PositionGames = games };
+        return new CapPlayer(first, last, ParseDate(Str(p, "born")), section, Str(p, "termsDetails"), contracts) { Pos = Str(p, "pos"), PositionGames = games, Slug = Str(p, "slug") };
     }
 
     private static CapSeason ParseSeason(JsonElement d)
@@ -245,6 +247,59 @@ public static class CapWagesApi
         foreach (var fmt in new[] { "MMM d, yyyy", "MMMM d, yyyy" })
             if (DateTime.TryParseExact(t, fmt, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)) return d;
         return null;
+    }
+
+    /// <summary>One NHL team's page (by abbreviation, "MIN"): its NHL contracts and its AHL affiliate's AHL contracts.</summary>
+    public static async Task<CapTeam> TeamAsync(string abbr, CancellationToken ct = default)
+    {
+        var (a, slug) = Teams.FirstOrDefault(t => string.Equals(t.Abbr, abbr, StringComparison.OrdinalIgnoreCase));
+        if (a == null) throw new ArgumentException($"No CapWages team for {abbr}.");
+        return Parse(await GetAsync(Base + slug, ct), a);
+    }
+
+    public const string PlayerBase = "https://capwages.com/players/";
+
+    /// <summary>
+    /// A player's photo from his CapWages page (capwages.com/players/{slug}): its "headshot", which is NHL.com's own
+    /// headshot (assets.nhle.com/mugs/…, a 336×336 PNG on a transparent background, the same shoot the game's portraits
+    /// come from), else its "imageUrl" (an EliteProspects photo, not on a transparent background). Null when it has neither.
+    /// </summary>
+    public static async Task<(string Url, bool Nhl)?> HeadshotAsync(string slug, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(slug)) return null;
+        var m = Regex.Match(await GetAsync(PlayerBase + slug, ct), "<script id=\"__NEXT_DATA__\"[^>]*>(.*?)</script>", RegexOptions.Singleline);
+        if (!m.Success) throw new InvalidOperationException($"CapWages' page for {slug} has no data block: the site's layout may have changed.");
+        using var doc = JsonDocument.Parse(m.Groups[1].Value);
+        string head = Find(doc.RootElement, "headshot"), image = Find(doc.RootElement, "imageUrl");
+        return head.Length > 0 ? (head, true) : image.Length > 0 ? (image, false) : null;
+    }
+
+    /// <summary>The first string value named <paramref name="name"/> anywhere under <paramref name="e"/>; "" when none.</summary>
+    private static string Find(JsonElement e, string name)
+    {
+        switch (e.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (var p in e.EnumerateObject())
+                {
+                    if (p.Name == name && p.Value.ValueKind == JsonValueKind.String && p.Value.GetString() is { Length: > 0 } s) return s;
+                    if (Find(p.Value, name) is { Length: > 0 } inner) return inner;
+                }
+                break;
+            case JsonValueKind.Array:
+                foreach (var x in e.EnumerateArray())
+                    if (Find(x, name) is { Length: > 0 } inner) return inner;
+                break;
+        }
+        return "";
+    }
+
+    /// <summary>Downloads a file (a headshot) as bytes.</summary>
+    public static async Task<byte[]> BytesAsync(string url, CancellationToken ct = default)
+    {
+        using var r = await Http.GetAsync(url, ct);
+        r.EnsureSuccessStatusCode();
+        return await r.Content.ReadAsByteArrayAsync(ct);
     }
 
     private static async Task<string> GetAsync(string url, CancellationToken ct)

@@ -160,6 +160,13 @@
                         <TextBlock Text="Reload" Margin="8,0,0,0" />
                     </StackPanel>
                 </Button>
+                <Button x:Name="PortraitsButton" Margin="10,0,0,0" Click="OnPortraits"
+                        ToolTip="Add portraits from NHL.com (via CapWages) for the selected team's players who have none">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE77B;" Style="{StaticResource Icon}" FontSize="13" />
+                        <TextBlock Text="Portraits" Margin="8,0,0,0" />
+                    </StackPanel>
+                </Button>
                 <Button x:Name="SyncButton" Style="{StaticResource Primary}" Margin="10,0,0,0" Click="OnSyncClick" ToolTip="Bring the game's rosters up to date with the NHL">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE895;" Style="{StaticResource Icon}" FontSize="13" />

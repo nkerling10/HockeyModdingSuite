@@ -100,6 +100,20 @@ public partial class RosterPage : UserControl
     /// <summary>Applies the ticked sync changes (scripted runs).</summary>
     public Task SyncApplyAsync() => SyncView.ApplyAsync();
 
+    /// <summary>Opens NHL Sync without fetching and previews a base roster folder (scripted runs). Nothing is written.</summary>
+    public async Task<string> BaselinePreviewAsync(string dir)
+    {
+        _syncMode = true;
+        ModePlayers.IsChecked = false;
+        ModeText.IsChecked = false;
+        ModeLines.IsChecked = false;
+        ModePicks.IsChecked = false;
+        await ApplyModeAsync();
+        SyncView.UseBaseline(dir);
+        await SyncView.PreviewBaselineAsync();
+        return SyncView.BaselineText;
+    }
+
     /// <summary>Flips the tick of the first sync row whose name contains <paramref name="name"/> (scripted runs).</summary>
     public bool SyncTick(string name) => SyncView.TickByName(name);
 
@@ -148,7 +162,8 @@ public partial class RosterPage : UserControl
             (_xfAbilities, _tierNames) = await Task.Run(() => (XFactors.Abilities(loc), XFactors.TierNames(loc)));
         }
         catch (Exception ex) when (ex is System.IO.IOException or System.IO.InvalidDataException) { }
-        _players = roster.Players.Where(p => p.RatingsTable != null && p.Name.Length > 0)
+        // the game's own template players (game ids 50000+: game modes, player classes, Create-a-Player slots) aren't listed
+        _players = roster.Players.Where(p => p.RatingsTable != null && p.Name.Length > 0 && p.GameId < PlayerCreator.SpecialIdStart)
             .OrderByDescending(p => p.Overall).ThenBy(p => p.LastName).Select(p => new PlayerRow(p)).ToList();
         _teams = roster.Teams.Values.Where(t => !string.IsNullOrEmpty(t.Name)).OrderBy(t => t.Name).ToList();
 

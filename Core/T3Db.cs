@@ -434,7 +434,9 @@ public sealed class T3Db
         t.WrittenRecords = count;
         var (from, pos) = CrcSpans().First(s => s.CrcPos == t.CrcHeaderPos);
         BinaryPrimitives.WriteInt32LittleEndian(Data.AsSpan(pos), Crc(Data.AsSpan(from, pos - from)));
-        FixCrc(t);
+        // the records CRC covers the whole table: in a batch it's computed once at the end, not per added row
+        if (_batch != null) _batch.Add(t);
+        else FixCrc(t);
     }
 
     /// <summary>A copy of a record's bytes.</summary>

@@ -1193,6 +1193,8 @@ public partial class MainWindow : Window
             await RosterPage.LinesAsync(lteam, a.GetValueOrDefault("rlinespick"), a.ContainsKey("rlinesauto"), a.ContainsKey("rlinessave"));
             await Task.Delay(1200);
         }
+        // --rbaseline DIR: NHL Sync's base roster card previewing that roster (nothing is written)
+        if (a.TryGetValue("rbaseline", out var rbase)) { await Task.Delay(2500); File.WriteAllText(Path.Combine(Path.GetTempPath(), "hms-baseline.txt"), await RosterPage.BaselinePreviewAsync(rbase) ?? ""); await Task.Delay(500); }
         if (a.TryGetValue("rsync", out var rsync))
         {
             await Task.Delay(2500);
@@ -1202,6 +1204,13 @@ public partial class MainWindow : Window
             if (a.TryGetValue("rsynctick", out var tick)) { RosterPage.SyncTick(tick); await Task.Delay(300); }
             if (a.TryGetValue("rsyncshow", out var show)) RosterPage.SyncShow(show);
             if (a.ContainsKey("rsyncapply")) { await RosterPage.SyncApplyAsync(); await Task.Delay(800); }
+        }
+        // --rteam NAME: pick that team; --rportraits dry|write: look up (and with write, add) its missing portraits
+        if (a.TryGetValue("rteam", out var rteam)) { await Task.Delay(2500); RosterPage.SelectTeam(rteam); await Task.Delay(500); }
+        if (a.TryGetValue("rportraits", out var rport))
+        {
+            string said = await RosterPage.PortraitsAsync(write: rport == "write", ask: false);
+            if (said != null) File.AppendAllText(Path.Combine(Path.GetTempPath(), "hms-portraits.txt"), said + Environment.NewLine);
         }
         if (a.TryGetValue("rsearch", out var rsearch))
         {
