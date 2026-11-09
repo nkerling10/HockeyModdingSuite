@@ -172,7 +172,9 @@
                                   IsChecked="True" Checked="OnSizes" Unchecked="OnSizes" Foreground="{StaticResource TextDim}" />
                         <Border CornerRadius="9" Padding="3" Background="{StaticResource Surface2}" HorizontalAlignment="Left">
                             <StackPanel Orientation="Horizontal">
-                                <RadioButton x:Name="KindAll" Style="{StaticResource Segment}" GroupName="SyncKind" Content="All" IsChecked="True" Checked="OnFilter" />
+                                <RadioButton x:Name="KindReview" Style="{StaticResource Segment}" GroupName="SyncKind" Content="Review" IsChecked="True" Checked="OnFilter"
+                                             ToolTip="Only the changes that need you: everything else is applied automatically" />
+                                <RadioButton x:Name="KindAll" Style="{StaticResource Segment}" GroupName="SyncKind" Content="All" Checked="OnFilter" />
                                 <RadioButton x:Name="KindMove" Style="{StaticResource Segment}" GroupName="SyncKind" Content="Trades" Checked="OnFilter" />
                                 <RadioButton x:Name="KindJoin" Style="{StaticResource Segment}" GroupName="SyncKind" Content="Call-ups" Checked="OnFilter" />
                                 <RadioButton x:Name="KindUpdate" Style="{StaticResource Segment}" GroupName="SyncKind" Content="Info" Checked="OnFilter" />

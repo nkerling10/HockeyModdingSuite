@@ -60,7 +60,16 @@ public static class DbEditor
             throw;
         }
         string summary = string.IsNullOrEmpty(history) ? what : history + "; " + what;
-        if (summary.Length > 600) summary = "…" + summary[^599..];
+        if (summary.Length > 600)
+        {
+            // the history is trimmed from the front, but a base roster (NHL Sync step 1) stays named at the start: it's
+            // how the sync page knows the roster is built on one
+            int at = summary.IndexOf("Baseline roster", StringComparison.Ordinal);
+            string lead = at >= 0 ? summary[at..(summary.IndexOf(';', at) is int end && end > at ? end : summary.Length)] : null;
+            if (lead != null && lead.Length > 200) lead = lead[..200];
+            int keep = 599 - (lead == null ? 0 : lead.Length + 3);
+            summary = lead == null ? "…" + summary[^599..] : lead + "; …" + summary[^keep..];
+        }
         var entry = store.Add(Kind, name, source, summary, plan.Patches, plan.Notes.Where(n => n.StartsWith("left") || n.Contains("shared")));
         store.Apply(entry, game, log);
         return entry;

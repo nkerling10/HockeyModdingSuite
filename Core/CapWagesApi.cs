@@ -21,6 +21,8 @@ public sealed record CapPlayer(string First, string Last, DateTime? Born, string
     public string Pos { get; init; } = "";
     /// <summary>Games he has played at each position ("LW" → 96, "RW" → 46, "C" → 3); empty when CapWages has none.</summary>
     public IReadOnlyDictionary<string, int> PositionGames { get; init; } = new Dictionary<string, int>();
+    /// <summary>His status on the team page: "NHL", "Minor", "IR", "LTIR", "SEIR" (season-ending IR), "Suspended"…; "" when none.</summary>
+    public string Status { get; init; } = "";
     /// <summary>His CapWages player page (capwages.com/players/{Slug}); "" when the team page gives none.</summary>
     public string Slug { get; init; } = "";
 }
@@ -215,7 +217,7 @@ public static class CapWagesApi
         if (p.TryGetProperty("positions", out var ps) && ps.ValueKind == JsonValueKind.Object)
             foreach (var g in ps.EnumerateObject())
                 if (g.Value.ValueKind == JsonValueKind.Number) games[g.Name] = g.Value.GetInt32();
-        return new CapPlayer(first, last, ParseDate(Str(p, "born")), section, Str(p, "termsDetails"), contracts) { Pos = Str(p, "pos"), PositionGames = games, Slug = Str(p, "slug") };
+        return new CapPlayer(first, last, ParseDate(Str(p, "born")), section, Str(p, "termsDetails"), contracts) { Pos = Str(p, "pos"), PositionGames = games, Slug = Str(p, "slug"), Status = Str(p, "status") };
     }
 
     private static CapSeason ParseSeason(JsonElement d)

@@ -1203,6 +1203,8 @@ public partial class MainWindow : Window
             // --rsynctick NAME: flip that row's tick; --rsyncshow KIND: the filter to shoot after its re-check (--wait)
             if (a.TryGetValue("rsynctick", out var tick)) { RosterPage.SyncTick(tick); await Task.Delay(300); }
             if (a.TryGetValue("rsyncshow", out var show)) RosterPage.SyncShow(show);
+            // --rsyncdump FILE: every sync row as text
+            if (a.TryGetValue("rsyncdump", out var dump)) File.WriteAllText(dump, RosterPage.SyncDump());
             if (a.ContainsKey("rsyncapply")) { await RosterPage.SyncApplyAsync(); await Task.Delay(800); }
         }
         // --rteam NAME: pick that team; --rportraits dry|write: look up (and with write, add) its missing portraits

@@ -117,6 +117,9 @@ public partial class RosterPage : UserControl
     /// <summary>Flips the tick of the first sync row whose name contains <paramref name="name"/> (scripted runs).</summary>
     public bool SyncTick(string name) => SyncView.TickByName(name);
 
+    /// <summary>The sync list as text (scripted runs).</summary>
+    public string SyncDump() => SyncView.DumpRows();
+
     /// <summary>Shows one kind of sync row (scripted runs).</summary>
     public void SyncShow(string kind) => SyncView.ShowKind(kind);
 

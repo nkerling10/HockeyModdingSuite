@@ -79,4 +79,56 @@ public static class LineupCallUps
         }
         return changes.OrderBy(c => c.ToTeamName).ThenBy(c => c.Name).ToList();
     }
+
+    /// <summary>
+    /// Players CapWages has on an NHL team's roster or inactive list (injured, long-term injured, season-ending injured,
+    /// suspended) whom no roster list places and who aren't on that team in the game: moved back to it. NHL.com's team
+    /// rosters leave such players out, and a shared roster may park them on an alumni team (Ryan Ellis on Nashville's
+    /// alumni, Torey Krug and Alex Pietrangelo on St. Louis', Logan Couture on San Jose's, 2026-11-09), so in franchise
+    /// they'd be missing from the team that still pays them. Ticked: CapWages is the one source that places them, and the
+    /// lines leave them scratched (they aren't in a DailyFaceoff lineup).
+    /// </summary>
+    public static List<SyncChange> FromCapWages(T3Db db, IReadOnlyList<CapTeam> cap, IReadOnlyList<NhlPlayer> api,
+        IReadOnlyList<(AhlTeam Team, List<AhlPlayer> Players)> ahl)
+    {
+        var changes = new List<SyncChange>();
+        if (cap == null) return changes;
+        var codes = RosterSync.TeamIndex(db);
+        var nhlTeams = codes.Values.ToHashSet();
+        var roster = new Roster(db);
+        var matcher = new PlayerMatcher(db, roster);
+        string TeamName(int i) => roster.Teams.TryGetValue(i, out var tm) && !string.IsNullOrEmpty(tm.Name) ? tm.Name : $"team {i}";
+        // players a roster list places are left to the roster compare
+        var placed = new HashSet<int>();
+        foreach (var a in api ?? Array.Empty<NhlPlayer>())
+            if (matcher.Find(a.First, a.Last, a.Born).Player is { } p) placed.Add(p.GameId);
+        foreach (var (_, players) in ahl ?? Array.Empty<(AhlTeam, List<AhlPlayer>)>())
+            foreach (var a in players)
+                if (matcher.Find(a.First, a.Last, a.Born).Player is { } p) placed.Add(p.GameId);
+        var rt = db.Table(Roster.RosterTable);
+        var rf = rt.Fields.ToDictionary(x => x.Name);
+        var seen = new HashSet<int>();
+        foreach (var team in cap)
+        {
+            if (!codes.TryGetValue(team.Abbr, out int to)) continue;
+            foreach (var cp in team.Players.Where(x => x.Section is "roster" or "inactive"))
+            {
+                var (p, nameOnly) = matcher.Find(cp.First, cp.Last, cp.Born);
+                if (p == null || nameOnly || placed.Contains(p.GameId) || !seen.Add(p.GameId)) continue;
+                int from = p.RosterRow >= 0 ? (int)db.Get(rt, p.RosterRow, rf["team"]) : p.Team;
+                if (from == to) continue;
+                string status = cp.Status.Length > 0 ? cp.Status : cp.Section;
+                changes.Add(new SyncChange
+                {
+                    Kind = nhlTeams.Contains(from) ? SyncKind.Move : SyncKind.Join,
+                    GameId = p.GameId, Name = p.Name, Position = p.PositionDisplay, RosterRow = p.RosterRow, BioRow = p.BioRow, PlayerIndex = p.PlayerIndex,
+                    FromTeam = from, ToTeam = to, FromTeamName = from >= 0 ? TeamName(from) : "Free agent", ToTeamName = TeamName(to),
+                    OldNumber = p.RosterRow >= 0 ? (int)db.Get(rt, p.RosterRow, rf["jersey"]) : -1,
+                    Lineup = $"CapWages has him on {team.Abbr}'s {(cp.Section == "inactive" ? "inactive list" : "roster")} ({status}); no roster list places him  ·  he stays scratched",
+                    Selected = true,
+                });
+            }
+        }
+        return changes.OrderBy(c => c.ToTeamName).ThenBy(c => c.Name).ToList();
+    }
 }

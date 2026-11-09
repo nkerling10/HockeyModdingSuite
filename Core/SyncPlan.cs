@@ -70,7 +70,10 @@ public static class SyncPlan
     public static (List<SyncChange> CallUps, string Summary) ApplyLineupCallUps(T3Db db, IReadOnlyList<(string Abbr, LineTeam Team, string Error)> lines,
         List<NhlPlayer> api, List<(AhlTeam Team, List<AhlPlayer> Players)> ahl, IReadOnlyList<CapTeam> cap, IReadOnlyDictionary<int, bool> ticks, bool othersByDefault)
     {
-        var callUps = LineupCallUps.Compare(db, lines, api, ahl, cap);
+        var callUps = lines == null ? new List<SyncChange>() : LineupCallUps.Compare(db, lines, api, ahl, cap);
+        // and players only CapWages places (injured, long-term injured, suspended), once per player
+        var have = callUps.Select(c => c.GameId).ToHashSet();
+        callUps.AddRange(LineupCallUps.FromCapWages(db, cap, api, ahl).Where(c => have.Add(c.GameId)));
         var picked = callUps.Where(c => ticks.TryGetValue(c.GameId, out bool t) ? t : othersByDefault && c.Selected).ToList();
         return (callUps, picked.Count > 0 ? RosterSync.Apply(db, picked) : null);
     }

@@ -84,17 +84,31 @@ public sealed class Roster
         // roster row by player id: exhibitionrostertable.playerindex → exhibitionplayers.index → playerid
         var players = db.Table(PlayersTable);
         var idOfIndex = new Dictionary<int, int>();
+        var versionOfIndex = new Dictionary<int, int>();
         var indexOfId = new Dictionary<int, int>();
+        bool hasVersion = Field(players, "table") != null;
         foreach (int r in Rows(players))
         {
             int index = Int(players, r, "index"), id = Int(players, r, "playerid");
             idOfIndex[index] = id;
+            versionOfIndex[index] = hasVersion ? Int(players, r, "table") : 0;
             indexOfId.TryAdd(id, index);
         }
+        // A player can have several roster rows: one per version of him (club, All-Star, alumni, national and event teams),
+        // in any order (a shared roster's order isn't the game's). His row is the one on his bio team (the club; NHL Sync
+        // keeps it current); else his club version's first row; else his first row.
         var roster = db.Table(RosterTable);
-        var rosterOf = new Dictionary<int, int>();
+        var rowsOf = new Dictionary<int, List<int>>();
         foreach (int r in Rows(roster))
-            if (idOfIndex.TryGetValue(Int(roster, r, "playerindex"), out int id) && !rosterOf.ContainsKey(id)) rosterOf[id] = r;
+            if (idOfIndex.TryGetValue(Int(roster, r, "playerindex"), out int id))
+                (rowsOf.TryGetValue(id, out var l) ? l : rowsOf[id] = new List<int>()).Add(r);
+        int RosterRowOf(int id, int bioTeam)
+        {
+            if (!rowsOf.TryGetValue(id, out var rows)) return -1;
+            foreach (int r in rows) if (Int(roster, r, "team") == bioTeam) return r;
+            foreach (int r in rows) if (versionOfIndex.GetValueOrDefault(Int(roster, r, "playerindex")) == 0) return r;
+            return rows[0];
+        }
 
         var bio = db.Table(BioTable);
         foreach (int r in Rows(bio))
@@ -102,13 +116,14 @@ public sealed class Roster
             int id = Int(bio, r, "game_id");
             ratings.TryGetValue(id, out var rt);
             int team = Int(bio, r, "team");
-            int rosterRow = rosterOf.GetValueOrDefault(id, -1);
+            int rosterRow = RosterRowOf(id, team);
             Players.Add(new RosterPlayer
             {
                 GameId = id, BioRow = r,
                 RatingsTable = rt.Item1, RatingsRow = rt.Item1 == null ? -1 : rt.Item2,
                 RosterRow = rosterRow,
-                PlayerIndex = indexOfId.GetValueOrDefault(id, -1),
+                // the index of the version his row is for (his club self), else his first
+                PlayerIndex = rosterRow >= 0 ? Int(roster, rosterRow, "playerindex") : indexOfId.GetValueOrDefault(id, -1),
                 FirstName = Str(bio, r, "firstname"), LastName = Str(bio, r, "lastname"),
                 Team = team, TeamAbbr = Teams.TryGetValue(team, out var tm) ? tm.Abbr : "FA",
                 Position = Int(bio, r, "position"),

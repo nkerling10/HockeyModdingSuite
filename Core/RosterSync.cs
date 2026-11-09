@@ -49,6 +49,10 @@ public sealed class SyncChange
     public bool NameOnly { get; init; }
     /// <summary>A call-up from a DailyFaceoff lineup that the NHL's roster lists missed (LineupCallUps): why, for the row's note. Null otherwise.</summary>
     public string Lineup { get; init; }
+    /// <summary>Why this change is held (unticked): another source has him where he is now, so moving him would only be
+    /// undone by the next sync (CapWages lists him on the NHL team's roster or injured list, or he's in its DailyFaceoff
+    /// lineup, while NHL.com's or TheAHL.com's roster list is behind). Null when it isn't held.</summary>
+    public string Hold { get; set; }
     /// <summary>His birth date in the game (null when it isn't a real date) and in the source (null when it gives none).</summary>
     public DateTime? OldBorn { get; init; }
     public DateTime? NewBorn { get; init; }

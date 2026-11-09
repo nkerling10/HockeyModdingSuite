@@ -162,10 +162,11 @@ public sealed class SyncRow : Observable
         }) :
         $"{Change.Position}" + (Change.Ahl is { } h ? $"  ·  AHL id {h.Id}" + (h.Born is { } b ? $"  ·  born {b:yyyy-MM-dd}" : "") : Change.Api is { } a ? $"  ·  NHL id {a.Id}" + (a.Born is { } b2 ? $"  ·  born {b2:yyyy-MM-dd}" : "") : $"  ·  game id {Change.GameId}");
     public string Description => IsPosition ? Pos.Description : IsNameCall ? Call.Description : IsLines ? Line.Description : IsPick ? Pick.Description : IsContract ? Contract.Description : Change.Description;
-    public bool CanApply => IsPosition ? Pos.CanApply : IsNameCall ? Call.CanApply : IsLines ? Line.Ready : IsPick ? Pick.CanApply : IsContract ? Contract.CanApply : Change.CanApply || Change.CanCreate;
+    public bool CanApply => IsPosition ? Pos.CanApply : IsNameCall ? Call.CanApply : IsLines ? Line.Ready : IsPick ? Pick.CanApply : IsContract ? Contract.CanApply : Change.Hold == null && (Change.CanApply || Change.CanCreate);
     public string Note => IsPosition ? (Pos.NameOnly ? "Matched by name only: the birth dates differ. Check it's the same player.  ·  " : "") + Pos.Source :
         IsNameCall ? "The game has a commentary recording of this name; he has none set." : IsLines ? Line.Source : IsPick ? "" :
         IsContract ? (Contract.NameOnly ? "Matched by name only: the birth dates differ. Check it's the same player." : Contract.Source) :
+        Change.Hold != null ? Change.Hold :
         Change.Lineup != null ? Change.Lineup :
         Change.NameOnly ? "Matched by name only: the birth dates differ. Check it's the same player." :
         Change.Kind == SyncKind.Join && Change.NeedsNewRow ? "In the game as a free agent with no roster row — Sync will create one." :
@@ -216,6 +217,31 @@ public sealed class SyncRow : Observable
 
     /// <summary>Puts back the tick a rebuilt row had, without telling the page: it isn't the user ticking it, so it must
     /// not start another check (which would rebuild the rows and put the tick back again, endlessly).</summary>
+    /// <summary>
+    /// A held roster change: another source has the player where he is, so nothing is done and the row isn't listed.
+    /// </summary>
+    public bool IsHeld => IsPlayer && Change.Hold != null;
+
+    /// <summary>
+    /// A change that needs the user: it's unticked until confirmed. Everything else (trades, call-ups, numbers, sizes,
+    /// contracts and clauses, same-group positions, name calls, lines, picks, new players) is applied automatically.
+    /// </summary>
+    public bool NeedsReview =>
+        IsPlayer ? !IsHeld && (Change.NameOnly || Change.Kind == SyncKind.Left || Change.Lineup != null && !Selected || Change.Kind == SyncKind.Missing && !Change.CanCreate)
+        : IsPosition ? Pos.NameOnly || Pos.CrossesGroup
+        : IsContract ? Contract.NameOnly || !Contract.IsTeam && Contract.Old.Length > 0 && Contract.New.Length == 0
+        : IsLines ? !Line.Ready
+        : false;
+
+    /// <summary>The row's note changed (a hold was set after it was built).</summary>
+    public void NoteChanged()
+    {
+        Raise(nameof(Note));
+        // a held change can't be ticked (CanApply false): its box goes grey and empty
+        Raise(nameof(CanApply));
+        if (_selected && !CanApply) { _selected = false; Raise(nameof(Selected)); }
+    }
+
     public void Restore(bool selected)
     {
         if (_selected != (selected && CanApply)) { _selected = selected && CanApply; Raise(nameof(Selected)); }
@@ -477,10 +503,14 @@ public partial class RosterSyncView : UserControl
 
             await capTask;
             await linesTask;
+            // the roster lists against CapWages and DailyFaceoff: don't send down a player they have on his NHL team
+            HoldNhlPlayers();
 
             // Last: contracts, picks and lines against the rosters as Apply will leave them.
             await PlanAsync();
             _fetched = true;
+            // the list again, now that the fetch is over (its empty-list text said it was reading)
+            ApplyFilter();
             ShowSummary();
             FilterBar.IsEnabled = true;
         }
@@ -624,13 +654,53 @@ public partial class RosterSyncView : UserControl
         foreach (var c in changes)
             if (c.Kind == SyncKind.Missing && BioKey(c) is { } key && _bios.TryGetValue(key, out var bio)) { c.Bio = bio; c.Selected = c.CanCreate; }
         _rows = changes.Select(PlayerRow).ToList();
+        // a re-compare after the fetch (sizes, AHL, after Apply): CapWages and DailyFaceoff are already read
+        if (_fetched) HoldNhlPlayers();
         _abbrOf = RosterSync.TeamIndex(db).GroupBy(kv => kv.Value).ToDictionary(g => g.Key, g => g.First().Key);
         ApplyFilter();
     }
 
+    /// <summary>
+    /// Holds (unticks, with the reason in the note) every "left the NHL" row and every AHL move out of an NHL team whose
+    /// player CapWages has on that team's NHL roster or injured list, or who is in its DailyFaceoff lineup. NHL.com's team
+    /// rosters leave out some injured and recently recalled players, and TheAHL.com keeps listing some recalled ones, so
+    /// following them would send a player down for the next sync to call him back up (Trey Taylor, Philip Tomasino).
+    /// </summary>
+    private void HoldNhlPlayers()
+    {
+        var cap = CapOn ? _cap : null;
+        var lines = LinesOn ? _lines : null;
+        if ((cap == null && lines == null) || _abbrOf.Count == 0) return;
+        string Key(string name) => RosterSync.Norm(name);
+        var onCap = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var t in cap ?? new List<CapTeam>())
+            onCap[t.Abbr] = t.Players.Where(p => p.Section is "roster" or "inactive")
+                .GroupBy(p => Key(p.First + p.Last)).ToDictionary(g => g.Key, g => g.First().Section);
+        var inLineup = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (abbr, team, error) in lines ?? new List<(string, LineTeam, string)>())
+            if (team != null && error == null)
+                inLineup[abbr] = team.Spots.Where(s => s.Category is "ev" or "pp" or "pk").Select(s => Key(s.Name)).ToHashSet();
+        foreach (var r in _rows)
+        {
+            var c = r.Change;
+            bool outOfNhl = c.Kind == SyncKind.Left || c.IsAhl && c.Kind == SyncKind.Move;
+            if (!outOfNhl || !_abbrOf.TryGetValue(c.FromTeam, out var abbr)) continue;
+            string k = Key(c.Name);
+            var why = new List<string>();
+            if (onCap.TryGetValue(abbr, out var capNames) && capNames.TryGetValue(k, out var section))
+                why.Add(section == "inactive" ? $"CapWages has him on {abbr}'s injured or inactive list" : $"CapWages has him on {abbr}'s NHL roster");
+            if (inLineup.TryGetValue(abbr, out var lineup) && lineup.Contains(k)) why.Add($"he's in {abbr}'s DailyFaceoff lineup");
+            if (why.Count == 0) continue;
+            c.Hold = $"Held: {string.Join(", and ", why)}. {(c.IsAhl ? "TheAHL.com" : "NHL.com")}'s roster list is behind, so he stays on {abbr}.";
+            r.Restore(false);
+            r.NoteChanged();
+        }
+        SetButtons();
+    }
+
     /// <summary>The ticked roster rows (trades, call-ups, info, left), keyed as Apply matches them on its fresh compare.</summary>
     private HashSet<(int GameId, SyncKind Kind, int ToTeam, bool IsAhl)> PickedMoves() =>
-        _rows.Where(r => r.Selected && r.Change.Kind != SyncKind.Missing).Select(r => (r.Change.GameId, r.Change.Kind, r.Change.ToTeam, r.Change.IsAhl)).ToHashSet();
+        _rows.Where(r => r.Selected && r.Change.Kind != SyncKind.Missing && r.Change.Hold == null).Select(r => (r.Change.GameId, r.Change.Kind, r.Change.ToTeam, r.Change.IsAhl)).ToHashSet();
 
     /// <summary>The ticked players to create, by source id, with their bios (a fresh compare's rows have none).</summary>
     private Dictionary<string, PlayerBio> PickedCreates() =>
@@ -663,7 +733,9 @@ public partial class RosterSyncView : UserControl
         bool capOn = CapOn && _cap != null, linesOn = LinesOn && _lines != null, namesOn = _api != null;
         bool redoPlayers = full || scope.Players;
         if (!capOn) ClearCap(keepPages: true);
-        if (!linesOn) { _lineRows = new List<SyncRow>(); _lineupRows = new List<SyncRow>(); }
+        if (!linesOn) _lineRows = new List<SyncRow>();
+        // call-ups come from DailyFaceoff lineups and from CapWages
+        if (!linesOn && !capOn) _lineupRows = new List<SyncRow>();
         if (!namesOn) _nameRows = new List<SyncRow>();
         if (!capOn && !linesOn && !namesOn) { ShowCapStages(); ShowLinesStage(); ApplyFilter(); return; }
 
@@ -696,7 +768,7 @@ public partial class RosterSyncView : UserControl
             {
                 var players = SyncPlan.ApplyPlayers(db, api, ahl, sizes, picked, toCreate, capOn ? cap : null, compared);
                 // lineup players the NHL's roster lists missed, called up as ticked before anything else is compared
-                var lineup = linesOn ? SyncPlan.ApplyLineupCallUps(db, lineupLines, api, ahl, capOn ? cap : null, lineupTicks, othersByDefault: true).CallUps : null;
+                var lineup = linesOn || capOn ? SyncPlan.ApplyLineupCallUps(db, lineupLines, api, ahl, capOn ? cap : null, lineupTicks, othersByDefault: true).CallUps : null;
                 var contracts = capOn ? ContractSync.Compare(db, cap).Where(c => !players.Created.Contains(c.GameId)).ToList() : null;
                 List<PositionChange> positions = null;
                 if (capOn)
@@ -756,6 +828,8 @@ public partial class RosterSyncView : UserControl
                         .OrderBy(r => r.Change.ToTeamName).ThenBy(r => r.Change.Name).ToList();
                 }
             }
+            else if (capOn && result.lineup != null)
+                _lineupRows = result.lineup.Select(c => Keep(PlayerRow(c), lineupTicks.TryGetValue(c.GameId, out var s) ? s : null)).ToList();
             ApplyFilter();
             ShowCapStages();
             ShowLinesStage();
@@ -875,9 +949,12 @@ public partial class RosterSyncView : UserControl
 
     private string Counts()
     {
-        int N(SyncKind k) => _rows.Count(r => !r.Change.IsAhl && r.Change.Kind == k);
-        int A(SyncKind k) => _rows.Count(r => r.Change.IsAhl && r.Change.Kind == k);
-        string s = $"{N(SyncKind.Move)} trades, {N(SyncKind.Join)} call-ups/signings, {N(SyncKind.Update)} info changes, " +
+        var all = _rows.Concat(_lineupRows).Concat(_nameRows).Concat(_contractRows).Concat(_positionRows).Concat(_pickRows).Concat(_lineRows).ToList();
+        int held = all.Count(r => r.IsHeld), review = all.Count(r => r.NeedsReview), auto = all.Count(r => !r.IsHeld && !r.NeedsReview && r.Selected);
+        string lead = $"{auto} changes go in automatically, {review} need your review (the Review list)" + (held > 0 ? $", {held} held (other sources have the player where he is)" : "") + ". ";
+        int N(SyncKind k) => _rows.Count(r => !r.IsHeld && !r.Change.IsAhl && r.Change.Kind == k);
+        int A(SyncKind k) => _rows.Count(r => !r.IsHeld && r.Change.IsAhl && r.Change.Kind == k);
+        string s = lead + $"{N(SyncKind.Move)} trades, {N(SyncKind.Join)} call-ups/signings, {N(SyncKind.Update)} info changes, " +
                    $"{N(SyncKind.Left)} no longer on an NHL roster, {N(SyncKind.Missing)} not in the game.";
         if (_rows.Any(r => r.Change.IsAhl))
             s += $" AHL: {A(SyncKind.Join)} call-ups, {A(SyncKind.Move)} moves, {A(SyncKind.Update)} info changes, {A(SyncKind.Missing)} not in the game.";
@@ -938,8 +1015,10 @@ public partial class RosterSyncView : UserControl
         bool picksOnly = KindPicks.IsChecked == true, contractsOnly = KindContracts.IsChecked == true, linesOnly = KindLines.IsChecked == true,
              positionsOnly = KindPositions.IsChecked == true;
         string q = SyncSearch.Text.Trim();
-        var rows = _rows.Concat(_lineupRows).Concat(_nameRows).Concat(_contractRows).Concat(_positionRows).Concat(_pickRows).Concat(_lineRows).Where(r =>
-            (picksOnly ? r.IsPick : contractsOnly ? r.IsContract : linesOnly ? r.IsLines : positionsOnly ? r.IsPosition :
+        bool reviewOnly = KindReview.IsChecked == true;
+        // held rows have nothing to do: never listed (counted in the status line)
+        var rows = _rows.Concat(_lineupRows).Concat(_nameRows).Concat(_contractRows).Concat(_positionRows).Concat(_pickRows).Concat(_lineRows).Where(r => !r.IsHeld).Where(r =>
+            (reviewOnly ? r.NeedsReview : picksOnly ? r.IsPick : contractsOnly ? r.IsContract : linesOnly ? r.IsLines : positionsOnly ? r.IsPosition :
              kind == null || r.IsPlayer && r.Change.Kind == kind || r.IsNameCall && kind == SyncKind.Update) &&
             (q.Length == 0 || (!r.IsPlayer ? r.SearchText.Contains(q, StringComparison.OrdinalIgnoreCase)
                 : r.Name.Contains(q, StringComparison.OrdinalIgnoreCase) || r.Description.Contains(q, StringComparison.OrdinalIgnoreCase)
@@ -947,7 +1026,7 @@ public partial class RosterSyncView : UserControl
         ChangeList.ItemsSource = rows;
         EmptyText.Text = _busy && !_fetched ? "Reading the sources…" :
             _api == null && _cap == null && _lines == null ? "Press Fetch & compare to compare the game with today's NHL and AHL." :
-            "Nothing here: the game already matches.";
+            reviewOnly ? "Nothing needs your review: Apply writes every change listed under All." : "Nothing here: the game already matches.";
         EmptyText.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         SetButtons();
     }
@@ -1105,7 +1184,7 @@ public partial class RosterSyncView : UserControl
                 var summaries = players.Summaries;
                 var created = players.Created;
                 // lineup call-ups right after the roster changes, matched afresh; only the ticked rows go in
-                if (lines != null && pickedLineup > 0 && SyncPlan.ApplyLineupCallUps(db, lines, api, ahl, cap, lineupTicks, othersByDefault: false).Summary is { } lineupSummary)
+                if ((lines != null || cap != null) && pickedLineup > 0 && SyncPlan.ApplyLineupCallUps(db, lines, api, ahl, cap, lineupTicks, othersByDefault: false).Summary is { } lineupSummary)
                     summaries.Add("Lineup call-ups: " + lineupSummary);
                 // Contracts after the roster moves (a traded player's retention depends on his new team), re-compared
                 // fresh against the database being saved: the ticked ones, and every new player's (he starts unsigned).
@@ -1168,6 +1247,11 @@ public partial class RosterSyncView : UserControl
         finally { SetBusy(false); }
     }
 
+    /// <summary>Every row as text, one per line (scripted runs): kind, tick, review/held, name, description, note.</summary>
+    public string DumpRows() => string.Join(Environment.NewLine,
+        _rows.Concat(_lineupRows).Concat(_nameRows).Concat(_contractRows).Concat(_positionRows).Concat(_pickRows).Concat(_lineRows)
+            .Select(r => $"{r.KindText}	{(r.Selected ? "[x]" : "[ ]")}	{(r.IsHeld ? "HELD" : r.NeedsReview ? "REVIEW" : "auto")}	{r.Name}	{r.Description}	{r.Note}"));
+
     /// <summary>Flips the tick of the first row shown whose name contains <paramref name="name"/> (scripted runs); false when none.</summary>
     public bool TickByName(string name)
     {
@@ -1180,6 +1264,6 @@ public partial class RosterSyncView : UserControl
     /// <summary>Shows one kind of change (scripted runs): move, join, update, left, missing, contracts, picks, lines.</summary>
     public void ShowKind(string kind)
     {
-        (kind switch { "move" => KindMove, "join" => KindJoin, "update" => KindUpdate, "left" => KindLeft, "missing" => KindMissing, "contracts" => KindContracts, "picks" => KindPicks, "positions" => KindPositions, "lines" => KindLines, _ => KindAll }).IsChecked = true;
+        (kind switch { "review" => KindReview, "move" => KindMove, "join" => KindJoin, "update" => KindUpdate, "left" => KindLeft, "missing" => KindMissing, "contracts" => KindContracts, "picks" => KindPicks, "positions" => KindPositions, "lines" => KindLines, _ => KindAll }).IsChecked = true;
     }
 }
