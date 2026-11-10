@@ -85,6 +85,7 @@ On a **copy** of the game database: the ticked roster changes are applied and th
 | F1 | DailyFaceoff + CapWages | **Call-ups**: lineup players the NHL list missed, and players CapWages has on an NHL roster / injured / suspended list whom no list places |
 | F2 | CapWages | **Contracts**: each player's deal, clauses, two-way, extension; team retained salary; team buyouts |
 | F3 | CapWages | **Positions**: primary/secondary from where he has played (forward ↔ defence switches go to Review) |
+| F3b | NHL.com roster lists + CapWages player pages (already read, nothing new downloaded) | **Existing players' bios**: name spelling, birthplace, country and province/state, shoots/catches; AHL players also their draft. Name changes wait for review (NHL.com and CapWages often use the short form). Runs before the lines, which find players by name |
 | F4 | CapWages | **Draft picks**: who owns each pick |
 | F5 | Game files | **Name calls**: players with no play-by-play name who have a recording |
 | F6 | DailyFaceoff | **Lines**: each NHL team's lines, PP, PK, goalie (a team whose lineup has a player not on it is left alone) |
@@ -104,9 +105,10 @@ One roster mod entry, in this order, each part re-compared fresh against the dat
 3. Call-ups from lineups / CapWages
 4. Contracts (ticked, plus every new player's)
 5. Positions (ticked, plus every new player's), before lines because lines are built by position
-6. Name calls
-7. Lines
-8. Draft picks
+6. Existing players' bios (ticked)
+7. Name calls
+8. Lines
+9. Draft picks
 
 Afterwards: retained-salary notes refreshed, then everything is compared again to show what's left.
 
@@ -114,6 +116,6 @@ Afterwards: retained-salary notes refreshed, then everything is compared again t
 
 ## Gaps you raised (not built yet)
 
-- **Existing players' bios aren't fully validated.** For players already in the game, only **number, height, weight and birth date** (plus positions and contracts via CapWages) are compared. Birthplace, country, shot/catches, draft year/round/pick/team and name spelling are only written for **new** players. Misspelled names are corrected in the base roster pack (Kurtz, Khazheev, William Zellers, 2026-11-10). Full validation of existing NHL players would need each player's NHL.com (or CapWages) page, ~800 more reads per sync (cached).
+- **Existing players' bios** are now checked (F3b), except NHL players' draft info, which would need ~800 more page reads per sync and isn't worth it.
 - **Existing NHL players' heights/weights** come from NHL.com's roster list; AHL players' from CapWages.
 - The command-line `roster-sync` / `ahl-sync` still use TheAHL.com's details for AHL players.

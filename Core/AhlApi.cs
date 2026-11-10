@@ -12,6 +12,9 @@ public sealed record AhlPlayer(int Id, string First, string Last, int Number, st
     /// <summary>His CapWages player page when AhlCapWages found him there ("" when CapWages doesn't list him: a tryout or
     /// ECHL deal). With it, his birth date, height and weight are CapWages', not the AHL feed's.</summary>
     public string CapSlug { get; init; } = "";
+    /// <summary>His whole bio from his CapWages page (AhlCapWages.SizesAsync), or null when it wasn't read: what BioSync
+    /// checks an existing AHL player's birthplace, country, shot, draft and name against.</summary>
+    public PlayerBio CapBio { get; init; }
 }
 
 /// <summary>One AHL team, as the feed's teamsForSeason view lists it (id, feed team_code, name).</summary>

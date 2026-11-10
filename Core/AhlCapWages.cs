@@ -58,16 +58,17 @@ public static class AhlCapWages
         Action<int, int> progress = null, CancellationToken ct = default)
     {
         var slugs = rosters.SelectMany(r => r.Players).Select(p => p.CapSlug).Where(s => s.Length > 0).Distinct().ToList();
-        var sizes = new Dictionary<string, (int H, int W)>();
+        var bios = new Dictionary<string, PlayerBio>();
         int done = 0;
         foreach (var slug in slugs)
         {
             bool cached = CapWagesApi.IsCached(slug);
-            try { if (await CapWagesApi.BioAsync(slug, ct) is { } b) sizes[slug] = (b.HeightIn, b.WeightLb); }
+            try { if (await CapWagesApi.BioAsync(slug, ct) is { } b) bios[slug] = b; }
             catch (Exception e) when (e is not OperationCanceledException) { }
             progress?.Invoke(++done, slugs.Count);
             if (!cached) await Task.Delay(250, ct);
         }
-        return rosters.Select(r => (r.Team, r.Players.Select(p => sizes.TryGetValue(p.CapSlug, out var s) ? p with { HeightIn = s.H, WeightLb = s.W } : p).ToList())).ToList();
+        // his size, and the whole bio for BioSync's check of an existing player
+        return rosters.Select(r => (r.Team, r.Players.Select(p => bios.TryGetValue(p.CapSlug, out var b) ? p with { HeightIn = b.HeightIn, WeightLb = b.WeightLb, CapBio = b } : p).ToList())).ToList();
     }
 }

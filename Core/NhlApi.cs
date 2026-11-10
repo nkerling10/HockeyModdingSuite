@@ -8,6 +8,8 @@ public sealed record NhlPlayer(int Id, string First, string Last, string Team, i
                                int HeightIn, int WeightLb, DateTime? Born, string BirthCity, string BirthCountry, string Headshot)
 {
     public string Name => $"{First} {Last}";
+    /// <summary>Province or state for players born in Canada or the USA ("ON", "MN"), from the roster list; "" otherwise.</summary>
+    public string BirthRegion { get; init; } = "";
 }
 
 /// <summary>
@@ -44,7 +46,7 @@ public static class NhlApi
                     p.TryGetProperty("heightInInches", out var h) && h.ValueKind == JsonValueKind.Number ? h.GetInt32() : 0,
                     p.TryGetProperty("weightInPounds", out var w) && w.ValueKind == JsonValueKind.Number ? w.GetInt32() : 0,
                     DateTime.TryParse(Str(p, "birthDate"), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var b) ? b : null,
-                    Text(p, "birthCity"), Str(p, "birthCountry"), Str(p, "headshot")));
+                    Text(p, "birthCity"), Str(p, "birthCountry"), Str(p, "headshot")) { BirthRegion = Text(p, "birthStateProvince") });
         }
         return list;
     }

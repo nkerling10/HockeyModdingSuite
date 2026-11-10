@@ -342,7 +342,7 @@ public static class PlayerCreator
         return near[(int)(seed % (uint)near.Count)];
     }
 
-    private static int DraftTeam(Dictionary<string, int> byCode, string abbr)
+    internal static int DraftTeam(Dictionary<string, int> byCode, string abbr)
     {
         string a = (abbr ?? "").ToUpperInvariant() switch { "ARI" or "PHX" => "UTA", "ATL" => "WPG", "MDA" => "ANA", var x => x };
         return byCode.TryGetValue(a, out int i) ? i : -1;
@@ -361,7 +361,7 @@ public static class PlayerCreator
     }
 
     /// <summary>"EDMONTON" -> "Edmonton" (some AHL pages write the city in capitals); any other spelling is kept as it is.</summary>
-    private static string CityCase(string city)
+    internal static string CityCase(string city)
     {
         city = (city ?? "").Trim();
         return city.Any(char.IsLower) || !city.Any(char.IsLetter) ? city
@@ -369,7 +369,7 @@ public static class PlayerCreator
     }
 
     /// <summary>The text cut to at most <paramref name="max"/> UTF-8 bytes, never in the middle of a character.</summary>
-    private static string Fit(string s, int max)
+    internal static string Fit(string s, int max)
     {
         s ??= "";
         while (Encoding.UTF8.GetByteCount(s) > max) s = s[..^1];

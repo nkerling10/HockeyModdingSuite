@@ -175,6 +175,19 @@ public static class MissingPlayers
     /// North America has state = intlcountry. Decoded from 757 NHL players matched against the NHL API.
     /// (-1, -1) when the country is unknown.
     /// </summary>
+    public static string CountryText(int country, int state)
+    {
+        if (country == 0) return state is >= 1 and <= 13 ? $"{Provinces[state - 1]}, CAN" : "CAN";
+        if (country == 14) return state >= 15 && state - 15 < States.Length ? $"{States[state - 15]}, USA" : "USA";
+        // a province or state number stored as the country (some of the game's own players): say which
+        if (country is >= 1 and <= 13) return $"{Provinces[country - 1]} (as country)";
+        if (country >= 15 && country - 15 < States.Length) return $"{States[country - 15]} (as country)";
+        foreach (var code in new[] { "DNK", "FIN", "NOR", "SWE", "BLR", "EST", "KAZ", "LVA", "LTU", "RUS", "UKR", "AUT", "CZE", "GBR", "FRA",
+                                     "DEU", "HUN", "ITA", "NLD", "POL", "SVK", "SVN", "CHE", "CHN", "JPN", "KOR" })
+            if (GameCountry(code, "").Country == country) return code;
+        return country == 127 ? "other" : $"country {country}";
+    }
+
     public static (int Country, int State) GameCountry(string country, string region)
     {
         switch ((country ?? "").ToUpperInvariant())
