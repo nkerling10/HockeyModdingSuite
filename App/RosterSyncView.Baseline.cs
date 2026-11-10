@@ -27,6 +27,7 @@ public partial class RosterSyncView
         string dir = _settings.BaselineRoster;
         bool picked = !string.IsNullOrEmpty(dir) && Directory.Exists(dir);
         BaselinePath.Text = picked ? dir : "No roster chosen. NHL Sync uses the game's own roster.";
+        BaselineName.Text = picked ? Path.GetFileName(dir.TrimEnd('\\', '/')) : "the game's own roster";
         BaselineState.Text = BaselineApplied ? "· in the game" : picked ? "· not applied yet" : "";
         BaselinePreview.IsEnabled = picked && !_baselineBusy && !_busy;
         BaselineApply.IsEnabled = picked && !_baselineBusy && !_busy;
@@ -101,6 +102,7 @@ public partial class RosterSyncView
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or NotSupportedException)
         {
             BaselineDetails.Text = "Couldn't make the roster pack: " + ex.Message;
+            ShowBaselineMore(true);
             return null;
         }
         finally
@@ -146,6 +148,7 @@ public partial class RosterSyncView
             BaselineDetails.Visibility = Visibility.Visible;
             BaselineDetails.Text = $"The game's roster has changes in it now ({Short(applied.Summary)}). Use as base roster restores the game's own roster first, then builds this one onto it. "
                 + "To preview first, restore the roster entry on the Mods page.";
+            ShowBaselineMore(true);
             return null;
         }
         _baselineBusy = true;
@@ -170,6 +173,7 @@ public partial class RosterSyncView
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or InvalidOperationException)
         {
             BaselineDetails.Text = "Couldn't read that roster: " + ex.Message;
+            ShowBaselineMore(true);
             return null;
         }
         finally
@@ -260,7 +264,8 @@ public partial class RosterSyncView
                 return summary;
             }, "Base roster");
             _baselinePlan = null;
-            BaselineDetails.Text = summary + ".\n\nNext: Fetch & compare (step 2) to bring it up to date. New players have no portraits yet: the Portraits button on the Roster page adds them a team at a time.";
+            BaselineDetails.Visibility = Visibility.Visible;
+            BaselineDetails.Text = summary +".\n\nNext: Fetch & compare (step 2) to bring it up to date. New players have no portraits yet: the Portraits button on the Roster page adds them a team at a time.";
             StatusChanged?.Invoke(summary + ". The Mods page can restore the game's roster.");
             Applied?.Invoke();
             // anything compared before is against the old roster

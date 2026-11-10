@@ -24,6 +24,8 @@ public sealed class SyncChange
     public NhlPlayer Api { get; init; }
     /// <summary>The AHL player, for changes from CompareAhl. Null for NHL changes; Api is null for AHL changes.</summary>
     public AhlPlayer Ahl { get; init; }
+    /// <summary>A Left change for a player the game has on an AHL team whom no AHL or NHL roster list has (RosterSync.AhlStragglers).</summary>
+    public bool FromAhl { get; init; }
     /// <summary>True when this change came from an AHL roster (any AHL team), not an NHL roster.</summary>
     public bool IsAhl => Ahl != null;
     public int GameId { get; init; } = -1;
@@ -36,9 +38,17 @@ public sealed class SyncChange
     /// <summary>True when the player is in the game (bio + players row) but has no roster row yet: Apply creates one.</summary>
     public bool NeedsNewRow => RosterRow < 0;
     public int FromTeam { get; init; } = -1;
-    public int ToTeam { get; init; } = -1;
+    /// <summary>Where he goes. Settable for a Left change, whose destination LeftNhl works out from CapWages after the compare.</summary>
+    public int ToTeam { get; set; } = -1;
     public string FromTeamName { get; init; }
-    public string ToTeamName { get; init; }
+    public string ToTeamName { get; set; }
+    /// <summary>A Left change that releases him (LeftNhl: no roster and no contract anywhere): Apply takes him off his team
+    /// and makes him a free agent (no roster row, no team, no contract, on the game's free-agent list).</summary>
+    public bool Release { get; set; }
+    /// <summary>Why a Left change goes where it goes (LeftNhl, from CapWages), for the row's note. Null when nothing was worked out.</summary>
+    public string Where { get; set; }
+    /// <summary>A Left change LeftNhl is sure of (CapWages says where he is): ticked and applied without review.</summary>
+    public bool Settled { get; set; }
     public int OldNumber { get; init; } = -1;
     public int NewNumber { get; init; } = -1;
     public int OldHeight { get; init; }
@@ -64,7 +74,7 @@ public sealed class SyncChange
     /// <summary>Ticked by default: moves, joins and number changes are; departures and unmatched players aren't.</summary>
     public bool Selected { get; set; }
 
-    public bool CanApply => Kind != SyncKind.Missing && BioRow >= 0 && ToTeam >= 0 && (RosterRow >= 0 || PlayerIndex >= 0);
+    public bool CanApply => Kind != SyncKind.Missing && BioRow >= 0 && (Release ? RosterRow >= 0 : ToTeam >= 0 && (RosterRow >= 0 || PlayerIndex >= 0));
     /// <summary>A Missing player whose bio is complete enough to create him (PlayerCreator.Problem says why not).</summary>
     public bool CanCreate => Kind == SyncKind.Missing && PlayerCreator.Problem(this) == null;
     public bool NumberChanges => NewNumber >= 0 && NewNumber != OldNumber;
@@ -75,7 +85,7 @@ public sealed class SyncChange
         SyncKind.Move => $"{FromTeamName} → {ToTeamName}" + Extra(),
         SyncKind.Join => $"{FromTeamName} → {ToTeamName}" + Extra(),
         SyncKind.Update => Extra().TrimStart(' ', '·'),
-        SyncKind.Left => $"not on {FromTeamName}'s NHL roster" + (ToTeam >= 0 ? $" → {ToTeamName}" : ""),
+        SyncKind.Left => $"not on {FromTeamName}'s {(FromAhl ? "AHL" : "NHL")} roster" +(Release ? " → released (free agent)" : ToTeam >= 0 ? $" → {ToTeamName}" : ""),
         _ => $"on {(Api?.Team ?? Ahl?.TeamName ?? "?")}'s roster, not in the game",
     };
 
@@ -198,7 +208,7 @@ public static class RosterSync
         foreach (var a in api)
         {
             if (!teams.TryGetValue(a.Team, out int to)) continue;
-            var (p, nameOnly) = matcher.Find(a.First, a.Last, a.Born);
+            var (p, nameOnly) = matcher.Find(a.First, a.Last, a.Born, to);
             // Already matched by the AHL compare (CompareCombined runs it first): skip outright, don't
             // call him Missing and don't build an NHL change for him — his AHL change already covers him.
             if (p != null && alreadyMatched != null && alreadyMatched.Contains(p.GameId)) continue;
@@ -247,7 +257,41 @@ public static class RosterSync
                 OldNumber = JerseyOf(p.RosterRow),
             });
         }
+        // the players this compare placed count as matched for whoever compares next (CompareCombined's AHL straggler check)
+        alreadyMatched?.UnionWith(matched);
         return changes.OrderBy(c => c.Kind).ThenBy(c => c.ToTeamName ?? c.FromTeamName).ThenBy(c => c.Name).ToList();
+    }
+
+    /// <summary>
+    /// Players the game has on one of <paramref name="ahlTeams"/> (AHL teams whose current roster was read) whom neither
+    /// that roster nor any other AHL or NHL roster list has (<paramref name="matched"/>): a Left change each, from the AHL,
+    /// with nowhere to go until LeftNhl places him from CapWages (an injured AHL player is held there, a player who went
+    /// to junior or Europe goes to his club, one no one has under contract is released). Without this a player stays on
+    /// an AHL team in the game long after he left it.
+    /// </summary>
+    public static List<SyncChange> AhlStragglers(T3Db db, ISet<int> ahlTeams, ISet<int> matched)
+    {
+        var roster = new Roster(db);
+        var rt = db.Table(Roster.RosterTable);
+        var pf = rt.Fields.First(f => f.Name == "playerindex");
+        var tables = RosterTables(db);
+        string TeamName(int i) => roster.Teams.TryGetValue(i, out var tm) && !string.IsNullOrEmpty(tm.Name) ? tm.Name : $"team {i}";
+        var changes = new List<SyncChange>();
+        foreach (var p in roster.Players.Where(p => p.RosterRow >= 0 && !matched.Contains(p.GameId)))
+        {
+            // what the game shows: the online roster copy's row, else the exhibition one
+            int pi = (int)db.Get(rt, p.RosterRow, pf);
+            var (t, r) = tables.AsEnumerable().Reverse().Where(x => x.RowOf.ContainsKey(pi)).Select(x => (x.Table, x.RowOf[pi])).DefaultIfEmpty((rt, p.RosterRow)).First();
+            int team = (int)db.Get(t, r, t.Fields.First(f => f.Name == "team"));
+            if (!ahlTeams.Contains(team)) continue;
+            changes.Add(new SyncChange
+            {
+                Kind = SyncKind.Left, FromAhl = true, GameId = p.GameId, Name = p.Name, Position = p.PositionName, RosterRow = p.RosterRow, BioRow = p.BioRow,
+                PlayerIndex = p.PlayerIndex, FromTeam = team, FromTeamName = TeamName(team),
+                OldNumber = (int)db.Get(t, r, t.Fields.First(f => f.Name == "jersey")),
+            });
+        }
+        return changes.OrderBy(c => c.FromTeamName).ThenBy(c => c.Name).ToList();
     }
 
     /// <summary>
@@ -323,7 +367,7 @@ public static class RosterSync
         var matched = new HashSet<int>();
         foreach (var a in api)
         {
-            var (p, nameOnly) = matcher.Find(a.First, a.Last, a.Born);
+            var (p, nameOnly) = matcher.Find(a.First, a.Last, a.Born, ahlTeam);
             // Already matched to another AHL team (shared set from CompareAllAhl): skip, don't call him Missing.
             if (p != null && alreadyMatched != null && alreadyMatched.Contains(p.GameId)) continue;
             if (p == null || matched.Contains(p.GameId))
@@ -400,7 +444,9 @@ public static class RosterSync
     /// Missing by the NHL compare (the skip only applies to players who were actually matched), and likewise
     /// for the AHL side — Missing rows can't be applied, so they can't ping-pong.
     /// </summary>
-    public static (List<SyncChange> Changes, List<string> SkippedAhlTeams) CompareCombined(T3Db db, IReadOnlyList<NhlPlayer> api, IReadOnlyList<(AhlTeam Team, List<AhlPlayer> Players)> allAhl, bool sizes = false)
+    /// <param name="stragglers">Also list the players the game has on an AHL team whose roster was read but whom no roster
+    /// list has (AhlStragglers). Only worth it with CapWages read, which is what places them.</param>
+    public static (List<SyncChange> Changes, List<string> SkippedAhlTeams) CompareCombined(T3Db db, IReadOnlyList<NhlPlayer> api, IReadOnlyList<(AhlTeam Team, List<AhlPlayer> Players)> allAhl, bool sizes = false, bool stragglers = false)
     {
         var matched = new HashSet<int>();
         var (ahlChanges, skipped) = CompareAllAhl(db, allAhl, sizes, matched);
@@ -408,6 +454,11 @@ public static class RosterSync
         var changes = new List<SyncChange>(nhlChanges.Count + ahlChanges.Count);
         changes.AddRange(nhlChanges);
         changes.AddRange(ahlChanges);
+        if (stragglers)
+        {
+            var read = allAhl.Select(r => ResolveAhlTeamIndex(db, r.Team.Name)).Where(i => i >= 0).ToHashSet();
+            changes.AddRange(AhlStragglers(db, read, matched));
+        }
         return (changes, skipped);
     }
 
@@ -429,6 +480,7 @@ public static class RosterSync
         var touched = new HashSet<int>();
         var createdPis = new HashSet<int>();
         var full = new List<string>();
+        var releases = new List<(int Pi, SyncChange C)>();
         bool ArrivesIn(T3Table t, Dictionary<int, int> rowOf, int pi, SyncChange c) =>
             rowOf.TryGetValue(pi, out int at) ? (int)db.Get(t, at, t.Fields.First(f => f.Name == "team")) != c.ToTeam : c.RosterRow < 0;
         int moved = 0, numbers = 0, sizes = 0, births = 0;
@@ -458,6 +510,12 @@ public static class RosterSync
                 SetIn(bio, c.BioRow, bf["month"], born.Month - 1);
                 SetIn(bio, c.BioRow, bf["day"], born.Day - 1);
                 births++;
+            }
+            // released: his rows go after the loop (removing rows moves the rows other changes point at)
+            if (c.Release)
+            {
+                releases.Add((pi, c));
+                continue;
             }
             // a team with 40 players takes no more: he stays where he is, the other changes still go in
             if (tables.Any(x => ArrivesIn(x.Table, x.RowOf, pi, c) && !HasFreeSlot(db, x.Table, c.ToTeam)))
@@ -534,6 +592,11 @@ public static class RosterSync
                 if (wroteSize) sizes++;
             }
         }
+        foreach (var (pi, c) in releases)
+        {
+            ReleasePlayer(db, pi, c.BioRow);
+            touched.Add(c.FromTeam);
+        }
         // every team that gained or lost a player gets its lines built again from its players
         foreach (var (t, _) in tables)
         {
@@ -541,7 +604,52 @@ public static class RosterSync
             SortByKey(db, t);
         }
         string left = full.Count == 0 ? "" : $"; {full.Count} not moved, their team has 40 players ({string.Join(", ", full.Take(5))}{(full.Count > 5 ? ", ..." : "")})";
-        return $"Roster sync: {moved} moved, {numbers} numbers, {sizes} heights/weights, {births} birth dates, {createdPis.Count} new roster rows, lines rebuilt for {touched.Count} teams{left}";
+        string released = releases.Count == 0 ? "" : $", {releases.Count} released ({string.Join(", ", releases.Take(5).Select(r => r.C.Name))}{(releases.Count > 5 ? ", ..." : "")})";
+        return $"Roster sync: {moved} moved{released}, {numbers} numbers, {sizes} heights/weights, {births} birth dates, {createdPis.Count} new roster rows, lines rebuilt for {touched.Count} teams{left}";
+    }
+
+    public const string FreeAgentsTable = "exhibitionfreeagents";
+
+    /// <summary>
+    /// Makes a player a free agent the way the game's own are stored (Evander Kane in the stock roster): his roster row
+    /// (<paramref name="pi"/>, the row the compare read) leaves both roster tables, his bio has no team, no NHL club and no
+    /// contract, and his players index is on the free-agent list. His other versions (national, All-Star, alumni) stay.
+    /// </summary>
+    private static void ReleasePlayer(T3Db db, int pi, int bioRow)
+    {
+        foreach (var (t, _) in RosterTables(db))
+        {
+            var pf = t.Fields.First(f => f.Name == "playerindex");
+            var gone = Enumerable.Range(0, t.WrittenRecords).Where(r => !db.IsInvalid(t, r) && (int)db.Get(t, r, pf) == pi).ToHashSet();
+            if (gone.Count == 0) continue;
+            var keep = Enumerable.Range(0, t.WrittenRecords).Where(r => !gone.Contains(r)).Select(r => db.RecordBytes(t, r)).ToList();
+            db.SetWritten(t, keep.Count);
+            for (int r = 0; r < keep.Count; r++) db.WriteRecord(t, r, keep[r]);
+        }
+        var bio = db.Table(Roster.BioTable);
+        foreach (var f in bio.Fields)
+        {
+            int? v = f.Name switch
+            {
+                "team" or "proteam" or "contractstatus" => -1,
+                "contractlength" or "contractdollars" or "contractis2way" or "contractismultiyear" or "extensionlength" or "extensiondollars" or "extensionis2way" => 0,
+                _ when f.Name.StartsWith("contractclause") => 0,
+                _ => null,
+            };
+            if (v is { } x && x >= f.RangeLow && x <= f.RangeLow + (1L << f.Depth) - 1) db.Set(bio, bioRow, f, x);
+        }
+        var fa = db.Table(FreeAgentsTable);
+        if (fa == null) return;
+        // the list is kept in playerindex order (as the game ships it): he goes in at his place
+        var ff = fa.Fields.First(f => f.Name == "playerindex");
+        var rows = Enumerable.Range(0, fa.WrittenRecords).Where(r => !db.IsInvalid(fa, r)).ToList();
+        if (rows.Any(r => (int)db.Get(fa, r, ff) == pi) || rows.Count == 0 || fa.WrittenRecords >= fa.Records) return;
+        var bytes = rows.Select(r => db.RecordBytes(fa, r)).ToList();
+        int at = rows.Count(r => (int)db.Get(fa, r, ff) < pi);
+        bytes.Insert(at, (byte[])bytes[0].Clone());
+        db.SetWritten(fa, bytes.Count);
+        for (int r = 0; r < bytes.Count; r++) db.WriteRecord(fa, r, bytes[r]);
+        db.Set(fa, at, ff, pi);
     }
 
     /// <summary>

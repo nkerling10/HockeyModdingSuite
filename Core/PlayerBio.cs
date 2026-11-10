@@ -46,10 +46,13 @@ public sealed record PlayerBio(string First, string Last, int Number, string Pos
 /// <summary>Looks up the full bio of the players a sync found missing from the game.</summary>
 public static class MissingPlayers
 {
-    /// <summary>The player's bio from his own page (the NHL API for NHL roster players, the AHL feed for AHL ones), with
-    /// the game's primary/secondary positions filled in.</summary>
+    /// <summary>The player's bio from his own page (the NHL API for NHL roster players; CapWages for AHL ones it lists,
+    /// else the AHL feed), with the game's primary/secondary positions filled in.</summary>
     public static async Task<PlayerBio> BioAsync(SyncChange c, CancellationToken ct = default)
     {
+        // an AHL player CapWages lists: his whole bio from CapWages, his number from the AHL roster he's on
+        if (c.Api == null && c.Ahl is { CapSlug.Length: > 0 } ca && await CapWagesApi.BioAsync(ca.CapSlug, ct) is { Primary: >= 0 } cb)
+            return cb with { Number = ca.Number is >= 0 and <= 99 ? ca.Number : cb.Number };
         PlayerBio bio;
         if (c.Api != null) bio = await NhlApi.BioAsync(c.Api.Id, ct);
         else if (c.Ahl is { Id: > 0 } a) bio = await AhlApi.BioAsync(a.Id, ct);

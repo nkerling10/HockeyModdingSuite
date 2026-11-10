@@ -123,8 +123,21 @@ public partial class RosterPage : UserControl
     /// <summary>Shows one kind of sync row (scripted runs).</summary>
     public void SyncShow(string kind) => SyncView.ShowKind(kind);
 
+    /// <summary>Opens NHL Sync's progress list and step 1's details (scripted screenshots).</summary>
+    public async Task SyncOpenPanels(bool progress, bool details)
+    {
+        _syncMode = true;
+        ModePlayers.IsChecked = false;
+        ModeText.IsChecked = false;
+        ModeLines.IsChecked = false;
+        ModePicks.IsChecked = false;
+        await ApplyModeAsync();
+        SyncView.OpenPanels(progress, details);
+    }
+
     /// <summary>Scrolls the profile to the retained salary section (scripted runs).</summary>
     public void ShowRetained() => RetainedSection.BringIntoView();
+    public void ShowIdentity() => IdentityFields.BringIntoView();
 
     public void SelectIndex(int n)
     {
@@ -244,6 +257,10 @@ public partial class RosterPage : UserControl
         Add(identity, bio, p.BioRow, "lastname");
         Add(identity, bio, p.BioRow, "nickname");
         Add(identity, bio, p.BioRow, "birthplace");
+        // the birth date, stored as year - 1900, month - 1, day - 1
+        Add(identity, bio, p.BioRow, "year", 1900, minValue: 1900, maxValue: 2030);
+        Add(identity, bio, p.BioRow, "month", 1, minValue: 1, maxValue: 12);
+        Add(identity, bio, p.BioRow, "day", 1, minValue: 1, maxValue: 31);
         Add(identity, db.Table(Roster.RosterTable), p.RosterRow, "jersey");
         Add(identity, bio, p.BioRow, "height", 54);
         Add(identity, bio, p.BioRow, "weight", 120);

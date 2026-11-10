@@ -2,29 +2,74 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:local="clr-namespace:NHL27Kit.App">
-    <Grid>
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-        </Grid.RowDefinitions>
+    <UserControl.Resources>
+        <!-- one row of the progress list: what is read or checked, where from, how far -->
+        <DataTemplate x:Key="StageRow" DataType="{x:Type local:SyncStage}">
+            <Grid Margin="0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <Ellipse x:Name="Dot" Width="8" Height="8" VerticalAlignment="Center" Fill="{StaticResource Faint}" StrokeThickness="1.5" Margin="0,0,9,0" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock x:Name="Label" Text="{Binding Label}" FontSize="12.5" Foreground="{StaticResource TextDim}" />
+                    <TextBlock Text="{Binding Source}" FontSize="11" Foreground="{StaticResource Faint}" Margin="8,0,0,0" VerticalAlignment="Center"
+                               Visibility="{Binding Source, Converter={StaticResource NonEmptyVisible}}" />
+                </StackPanel>
+                <TextBlock x:Name="Detail" Grid.Column="2" Text="{Binding Detail}" FontSize="12" Foreground="{StaticResource Muted}" Margin="12,0,0,0"
+                           TextAlignment="Right" TextTrimming="CharacterEllipsis" MaxWidth="330" ToolTip="{Binding Detail}" VerticalAlignment="Center" />
+                <ProgressBar x:Name="Bar" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Height="3" Margin="0,3,0,0" Minimum="0" Maximum="100"
+                             Value="{Binding Percent, Mode=OneWay}" Foreground="{StaticResource Accent}" Visibility="Collapsed" />
+            </Grid>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding State}" Value="Waiting">
+                    <Setter TargetName="Dot" Property="Fill" Value="Transparent" />
+                    <Setter TargetName="Dot" Property="Stroke" Value="{StaticResource Accent}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding State}" Value="Running">
+                    <Setter TargetName="Dot" Property="Fill" Value="{StaticResource Accent}" />
+                    <Setter TargetName="Detail" Property="Foreground" Value="{StaticResource Accent}" />
+                    <Setter TargetName="Label" Property="Foreground" Value="{StaticResource Text}" />
+                    <Setter TargetName="Bar" Property="Visibility" Value="Visible" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding HasPercent}" Value="False">
+                    <Setter TargetName="Bar" Property="Visibility" Value="Collapsed" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding State}" Value="Done">
+                    <Setter TargetName="Dot" Property="Fill" Value="{StaticResource Good}" />
+                    <Setter TargetName="Detail" Property="Foreground" Value="{StaticResource Good}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding State}" Value="Failed">
+                    <Setter TargetName="Dot" Property="Fill" Value="{StaticResource Danger}" />
+                    <Setter TargetName="Detail" Property="Foreground" Value="{StaticResource Danger}" />
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+    </UserControl.Resources>
 
-        <!-- sources, fetch, filters -->
-        <StackPanel>
-        <!-- stage 1: a shared roster as the game's base roster (RosterBaseline) -->
-        <Border x:Name="BaselineCard" Style="{StaticResource Card}" Padding="16,12" Margin="0,0,0,10">
+    <!-- The whole page scrolls when the window is short (a remote desktop): the changes list keeps at least 300 px
+         (FitChanges) instead of being squeezed out under steps 1 and 2. -->
+    <ScrollViewer x:Name="PageScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False">
+    <StackPanel>
+        <StackPanel x:Name="TopPanel">
+        <!-- step 1: a shared roster as the game's base roster (RosterBaseline): one line, details folded -->
+        <Border x:Name="BaselineCard" Style="{StaticResource Card}" Padding="16,10" Margin="0,0,0,10"
+                ToolTip="Recommended: start from a shared roster (a RosterCustom save) with its ratings, gear and created prospects. Its tables replace the game's roster, and its Create-a-Player players become real players, so they show up in franchise. NHL Sync (step 2) then brings it up to date.">
             <StackPanel>
                 <DockPanel>
-                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
-                        <Button x:Name="BaselinePick" Padding="12,6" Click="OnBaselinePick" ToolTip="Pick a RosterCustom save folder (a shared roster)">
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Style="{StaticResource Ghost}" Padding="10,6" Click="OnBaselineMore">
+                            <TextBlock x:Name="BaselineMoreText" Text="Details" />
+                        </Button>
+                        <Button x:Name="BaselinePick" Padding="12,6" Margin="8,0,0,0" Click="OnBaselinePick" ToolTip="Pick a roster pack, or a RosterCustom save (a shared roster) to make one from">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE8B7;" Style="{StaticResource Icon}" FontSize="13" />
                                 <TextBlock Text="Choose roster…" Margin="8,0,0,0" />
-                            </StackPanel>
-                        </Button>
-                        <Button x:Name="BaselinePreview" Padding="12,6" Margin="8,0,0,0" Click="OnBaselinePreview" IsEnabled="False" ToolTip="Show what using this roster would change. Nothing is written.">
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="&#xE7B3;" Style="{StaticResource Icon}" FontSize="13" />
-                                <TextBlock Text="Preview" Margin="8,0,0,0" />
                             </StackPanel>
                         </Button>
                         <Button x:Name="BaselineApply" Style="{StaticResource Primary}" Padding="12,6" Margin="8,0,0,0" Click="OnBaselineApply" IsEnabled="False"
@@ -35,17 +80,13 @@
                             </StackPanel>
                         </Button>
                     </StackPanel>
-                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
-                        <StackPanel Orientation="Horizontal">
-                            <Border CornerRadius="999" Padding="7,1" Background="{StaticResource Surface2}" VerticalAlignment="Center" Margin="0,0,8,0">
-                                <TextBlock Text="STEP 1" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource Accent}" />
-                            </Border>
-                            <TextBlock Text="Base roster" Foreground="{StaticResource Text}" FontSize="15" FontWeight="SemiBold" />
-                            <TextBlock x:Name="BaselineState" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="10,0,0,0" />
-                        </StackPanel>
-                        <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,3,0,0"
-                                   Text="Recommended: start from a shared roster (a RosterCustom save) with its ratings, gear and created prospects. Its tables replace the game's roster, and its Create-a-Player players become real players, so they show up in franchise. NHL Sync (step 2) then brings it up to date." />
-                        <TextBlock x:Name="BaselinePath" Style="{StaticResource Caption}" FontFamily="Consolas" TextTrimming="CharacterEllipsis" Margin="0,4,0,0" />
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,16,0">
+                        <Border CornerRadius="999" Padding="7,1" Background="{StaticResource Surface2}" VerticalAlignment="Center" Margin="0,0,8,0">
+                            <TextBlock Text="STEP 1" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource Accent}" />
+                        </Border>
+                        <TextBlock Text="Base roster" Foreground="{StaticResource Text}" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" />
+                        <TextBlock x:Name="BaselineName" Foreground="{StaticResource TextDim}" FontSize="13" VerticalAlignment="Center" Margin="10,0,0,0" TextTrimming="CharacterEllipsis" />
+                        <TextBlock x:Name="BaselineState" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="8,0,0,0" />
                     </StackPanel>
                 </DockPanel>
                 <!-- what step 1 is doing while it reads, previews or writes -->
@@ -56,135 +97,95 @@
                     </DockPanel>
                     <ProgressBar x:Name="BaselineProgress" Height="6" Margin="0,5,0,0" Minimum="0" Maximum="100" Foreground="{StaticResource Accent}" />
                 </StackPanel>
-                <TextBox x:Name="BaselineDetails" Visibility="Collapsed" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
-                         MaxHeight="190" Margin="0,10,0,0" FontFamily="Consolas" FontSize="11.5" />
+                <!-- folded: the pack's folder, Preview, and what the last preview or import did -->
+                <StackPanel x:Name="BaselineMore" Visibility="Collapsed" Margin="0,10,0,0">
+                    <DockPanel>
+                        <Button x:Name="BaselinePreview" DockPanel.Dock="Right" Padding="12,5" Click="OnBaselinePreview" IsEnabled="False" ToolTip="Show what using this roster would change. Nothing is written.">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE7B3;" Style="{StaticResource Icon}" FontSize="13" />
+                                <TextBlock Text="Preview" Margin="8,0,0,0" />
+                            </StackPanel>
+                        </Button>
+                        <TextBlock x:Name="BaselinePath" Style="{StaticResource Caption}" FontFamily="Consolas" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="0,0,12,0" />
+                    </DockPanel>
+                    <TextBox x:Name="BaselineDetails" Visibility="Collapsed" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                             MaxHeight="190" Margin="0,8,0,0" FontFamily="Consolas" FontSize="11.5" />
+                </StackPanel>
             </StackPanel>
         </Border>
-        <Border Style="{StaticResource Card}" Padding="16,14" Margin="0,0,0,14">
+
+        <!-- step 2: fetch everything, with the progress of each download and check -->
+        <Border Style="{StaticResource Card}" Padding="16,12" Margin="0,0,0,10">
             <StackPanel>
                 <DockPanel>
-                    <Button x:Name="FetchButton" DockPanel.Dock="Right" Style="{StaticResource Primary}" Padding="14,7" VerticalAlignment="Top" Click="OnFetch">
-                        <StackPanel Orientation="Horizontal">
-                            <TextBlock Text="&#xE895;" Style="{StaticResource Icon}" FontSize="13" />
-                            <TextBlock x:Name="FetchLabel" Text="Fetch &amp; compare" Margin="8,0,0,0" />
-                        </StackPanel>
-                    </Button>
-                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
-                        <StackPanel Orientation="Horizontal">
-                            <Border CornerRadius="999" Padding="7,1" Background="{StaticResource Surface2}" VerticalAlignment="Center" Margin="0,0,8,0">
-                                <TextBlock Text="STEP 2" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource Accent}" />
-                            </Border>
-                            <TextBlock Text="Sync with the NHL" Foreground="{StaticResource Text}" FontSize="15" FontWeight="SemiBold" />
-                        </StackPanel>
-                        <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,3,0,0"
-                                   Text="The ticked sources are read at the same time. Rosters are compared first and the new players' bios looked up; contracts, picks and lines are checked last, against the rosters as Apply will leave them. Nothing in the game changes until you press Apply." />
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Style="{StaticResource Ghost}" Padding="10,6" Click="OnShowProgress">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock x:Name="ProgressToggleIcon" Text="&#xE70D;" Style="{StaticResource Icon}" FontSize="11" />
+                                <TextBlock x:Name="ProgressToggleText" Text="Show sources &amp; progress" Margin="7,0,0,0" />
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="CancelButton" Padding="12,6" Margin="8,0,0,0" Click="OnCancel" Visibility="Collapsed"
+                                ToolTip="Stop reading and checking. Nothing in the game is changed, and the list is cleared.">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE711;" Style="{StaticResource Icon}" FontSize="12" />
+                                <TextBlock Text="Cancel" Margin="8,0,0,0" />
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="FetchButton" Style="{StaticResource Primary}" Padding="14,6" Margin="8,0,0,0" Click="OnFetch"
+                                ToolTip="Read every source and compare the game with them. Nothing in the game changes until you press Apply.">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE895;" Style="{StaticResource Icon}" FontSize="13" />
+                                <TextBlock x:Name="FetchLabel" Text="Fetch &amp; compare" Margin="8,0,0,0" />
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,16,0">
+                        <Border CornerRadius="999" Padding="7,1" Background="{StaticResource Surface2}" VerticalAlignment="Center" Margin="0,0,8,0">
+                            <TextBlock Text="STEP 2" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource Accent}" />
+                        </Border>
+                        <TextBlock Text="Sync with the NHL and AHL" Foreground="{StaticResource Text}" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" />
                     </StackPanel>
                 </DockPanel>
 
-                <!-- one card per source: where the data comes from, what it gives the game, and each step's progress -->
-                <ItemsControl x:Name="SourceList" Margin="0,12,-10,0" Focusable="False">
-                    <ItemsControl.ItemsPanel>
-                        <ItemsPanelTemplate>
-                            <UniformGrid Columns="4" />
-                        </ItemsPanelTemplate>
-                    </ItemsControl.ItemsPanel>
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate DataType="{x:Type local:SyncSource}">
-                            <Border x:Name="Card" CornerRadius="8" Padding="12,10,12,9" Margin="0,0,10,0" BorderThickness="1"
-                                    Background="{StaticResource Surface2}" BorderBrush="{StaticResource Line}" ToolTip="{Binding Tip}">
-                                <StackPanel>
-                                    <DockPanel>
-                                        <CheckBox x:Name="Box" DockPanel.Dock="Left" IsChecked="{Binding IsOn}" IsEnabled="{Binding CanToggle}"
-                                                  VerticalAlignment="Center" Margin="0,0,6,0" ToolTip="Read this source" />
-                                        <Border x:Name="Badge" DockPanel.Dock="Right" CornerRadius="999" Padding="7,1" VerticalAlignment="Center"
-                                                Background="{StaticResource Surface3}" Visibility="{Binding StateText, Converter={StaticResource NonEmptyVisible}}">
-                                            <TextBlock x:Name="BadgeText" Text="{Binding StateText}" FontSize="9.5" FontWeight="Bold" Foreground="{StaticResource Muted}" />
-                                        </Border>
-                                        <TextBlock Text="{Binding Name}" Foreground="{StaticResource Text}" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                                    </DockPanel>
-                                    <TextBlock Text="{Binding Host}" FontFamily="Consolas" FontSize="11" Foreground="{StaticResource Faint}" Margin="0,2,0,0" TextTrimming="CharacterEllipsis" />
-                                    <TextBlock Text="{Binding Provides}" FontSize="11.5" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,5,0,8" MinHeight="30" />
-                                    <Border Height="1" Background="{StaticResource Line}" Margin="0,0,0,6" />
-                                    <ItemsControl x:Name="Steps" ItemsSource="{Binding Steps}" Focusable="False">
-                                        <ItemsControl.ItemTemplate>
-                                            <DataTemplate DataType="{x:Type local:SyncStage}">
-                                                <DockPanel Margin="0,2" ToolTip="{Binding Detail}">
-                                                    <Ellipse x:Name="Dot" DockPanel.Dock="Left" Width="7" Height="7" VerticalAlignment="Center" Fill="{StaticResource Faint}" StrokeThickness="1.5" />
-                                                    <TextBlock x:Name="Label" DockPanel.Dock="Left" Text="{Binding Label}" Margin="7,0,10,0" FontSize="12" Foreground="{StaticResource TextDim}" />
-                                                    <TextBlock x:Name="Detail" Text="{Binding Detail}" FontSize="12" Foreground="{StaticResource Muted}" TextAlignment="Right" TextTrimming="CharacterEllipsis" />
-                                                </DockPanel>
-                                                <DataTemplate.Triggers>
-                                                    <DataTrigger Binding="{Binding State}" Value="Waiting">
-                                                        <Setter TargetName="Dot" Property="Fill" Value="Transparent" />
-                                                        <Setter TargetName="Dot" Property="Stroke" Value="{StaticResource Accent}" />
-                                                    </DataTrigger>
-                                                    <DataTrigger Binding="{Binding State}" Value="Running">
-                                                        <Setter TargetName="Dot" Property="Fill" Value="{StaticResource Accent}" />
-                                                        <Setter TargetName="Detail" Property="Foreground" Value="{StaticResource Accent}" />
-                                                    </DataTrigger>
-                                                    <DataTrigger Binding="{Binding State}" Value="Done">
-                                                        <Setter TargetName="Dot" Property="Fill" Value="{StaticResource Good}" />
-                                                        <Setter TargetName="Detail" Property="Foreground" Value="{StaticResource Good}" />
-                                                    </DataTrigger>
-                                                    <DataTrigger Binding="{Binding State}" Value="Failed">
-                                                        <Setter TargetName="Dot" Property="Fill" Value="{StaticResource Danger}" />
-                                                        <Setter TargetName="Detail" Property="Foreground" Value="{StaticResource Danger}" />
-                                                    </DataTrigger>
-                                                </DataTemplate.Triggers>
-                                            </DataTemplate>
-                                        </ItemsControl.ItemTemplate>
-                                    </ItemsControl>
-                                </StackPanel>
-                            </Border>
-                            <DataTemplate.Triggers>
-                                <DataTrigger Binding="{Binding Optional}" Value="False">
-                                    <Setter TargetName="Box" Property="Visibility" Value="Collapsed" />
-                                </DataTrigger>
-                                <DataTrigger Binding="{Binding IsOn}" Value="False">
-                                    <Setter TargetName="Steps" Property="Opacity" Value="0.45" />
-                                </DataTrigger>
-                                <DataTrigger Binding="{Binding State}" Value="Running">
-                                    <Setter TargetName="Card" Property="BorderBrush" Value="{StaticResource AccentLine}" />
-                                    <Setter TargetName="Badge" Property="Background" Value="{StaticResource AccentSoft}" />
-                                    <Setter TargetName="BadgeText" Property="Foreground" Value="{StaticResource Accent}" />
-                                </DataTrigger>
-                                <DataTrigger Binding="{Binding State}" Value="Done">
-                                    <Setter TargetName="Card" Property="BorderBrush" Value="{StaticResource Good}" />
-                                    <Setter TargetName="Badge" Property="Background" Value="{StaticResource GoodSoft}" />
-                                    <Setter TargetName="BadgeText" Property="Foreground" Value="{StaticResource Good}" />
-                                </DataTrigger>
-                                <DataTrigger Binding="{Binding State}" Value="Failed">
-                                    <Setter TargetName="Card" Property="BorderBrush" Value="{StaticResource Danger}" />
-                                    <Setter TargetName="Badge" Property="Background" Value="{StaticResource DangerSoft}" />
-                                    <Setter TargetName="BadgeText" Property="Foreground" Value="{StaticResource Danger}" />
-                                </DataTrigger>
-                            </DataTemplate.Triggers>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-                <TextBlock x:Name="FetchStatus" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,10,0,0"
-                           Text="Press Fetch &amp; compare to read the ticked sources." />
+                <!-- what is read (and where from), then what is checked: open while a fetch runs -->
+                <Grid x:Name="ProgressPanel" Visibility="Collapsed" Margin="0,12,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="24" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="READ" FontSize="10" FontWeight="Bold" Foreground="{StaticResource Faint}" Margin="0,0,0,4" />
+                        <ItemsControl x:Name="ReadList" ItemTemplate="{StaticResource StageRow}" Focusable="False" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <TextBlock Text="CHECKED" FontSize="10" FontWeight="Bold" Foreground="{StaticResource Faint}" Margin="0,0,0,4" />
+                        <ItemsControl x:Name="CheckList" ItemTemplate="{StaticResource StageRow}" Focusable="False" />
+                    </StackPanel>
+                </Grid>
 
-                <StackPanel x:Name="FilterBar" Margin="0,12,0,0" IsEnabled="True">
+                <TextBlock x:Name="FetchStatus" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,10,0,0"
+                           Text="Press Fetch &amp; compare to read NHL.com, TheAHL.com, CapWages and DailyFaceoff and compare the game with them." />
+
+                <StackPanel x:Name="FilterBar" Margin="0,10,0,0" IsEnabled="True">
                     <DockPanel>
-                        <TextBox x:Name="SyncSearch" DockPanel.Dock="Right" Width="220" Style="{StaticResource SearchBox}" Tag="Name or team" TextChanged="OnFilter" />
-                        <CheckBox x:Name="SizesBox" DockPanel.Dock="Right" Content="Sync heights &amp; weights" VerticalAlignment="Center" Margin="0,0,16,0"
-                                  IsChecked="True" Checked="OnSizes" Unchecked="OnSizes" Foreground="{StaticResource TextDim}" />
+                        <TextBox x:Name="SyncSearch" DockPanel.Dock="Right" Width="220" Style="{StaticResource SearchBox}" Tag="Name or team" TextChanged="OnFilter" Margin="12,0,0,0" />
                         <Border CornerRadius="9" Padding="3" Background="{StaticResource Surface2}" HorizontalAlignment="Left">
-                            <StackPanel Orientation="Horizontal">
+                            <WrapPanel>
                                 <RadioButton x:Name="KindReview" Style="{StaticResource Segment}" GroupName="SyncKind" Content="Review" IsChecked="True" Checked="OnFilter"
                                              ToolTip="Only the changes that need you: everything else is applied automatically" />
                                 <RadioButton x:Name="KindAll" Style="{StaticResource Segment}" GroupName="SyncKind" Content="All" Checked="OnFilter" />
                                 <RadioButton x:Name="KindMove" Style="{StaticResource Segment}" GroupName="SyncKind" Content="Trades" Checked="OnFilter" />
                                 <RadioButton x:Name="KindJoin" Style="{StaticResource Segment}" GroupName="SyncKind" Content="Call-ups" Checked="OnFilter" />
                                 <RadioButton x:Name="KindUpdate" Style="{StaticResource Segment}" GroupName="SyncKind" Content="Info" Checked="OnFilter" />
-                                <RadioButton x:Name="KindLeft" Style="{StaticResource Segment}" GroupName="SyncKind" Content="Left NHL" Checked="OnFilter" />
+                                <RadioButton x:Name="KindLeft" Style="{StaticResource Segment}" GroupName="SyncKind" Content="Off a roster" Checked="OnFilter" />
                                 <RadioButton x:Name="KindMissing" Style="{StaticResource Segment}" GroupName="SyncKind" Content="Not in game" Checked="OnFilter" />
                                 <RadioButton x:Name="KindContracts" Style="{StaticResource Segment}" GroupName="SyncKind" Content="Contracts" Checked="OnFilter" />
                                 <RadioButton x:Name="KindPositions" Style="{StaticResource Segment}" GroupName="SyncKind" Content="Positions" Checked="OnFilter" />
                                 <RadioButton x:Name="KindPicks" Style="{StaticResource Segment}" GroupName="SyncKind" Content="Picks" Checked="OnFilter" />
                                 <RadioButton x:Name="KindLines" Style="{StaticResource Segment}" GroupName="SyncKind" Content="Lines" Checked="OnFilter" />
-                            </StackPanel>
+                            </WrapPanel>
                         </Border>
                     </DockPanel>
                 </StackPanel>
@@ -193,7 +194,7 @@
         </StackPanel>
 
         <!-- changes -->
-        <Border Grid.Row="1" Style="{StaticResource Card}">
+        <Border x:Name="ChangesCard" Style="{StaticResource Card}" Height="300">
             <DockPanel>
                 <DockPanel DockPanel.Dock="Bottom" Margin="16,10,16,14">
                     <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
@@ -242,5 +243,6 @@
                 </Grid>
             </DockPanel>
         </Border>
-    </Grid>
+    </StackPanel>
+    </ScrollViewer>
 </UserControl>

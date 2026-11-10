@@ -31,14 +31,23 @@ public sealed class PlayerMatcher
     }
 
     /// <summary>The game player for this name and birth date, and whether he was matched by name only; (null, false) when none.</summary>
-    public (RosterPlayer Player, bool NameOnly) Find(string first, string last, DateTime? born)
+    /// <param name="team">The team the source lists him with: (4) when nothing else matches, the only player on it with
+    /// that last name and a first name one starts the other ("Ben" / "Benjamin" Berard, whose game birth date was wrong
+    /// too), flagged NameOnly like (3). -1 skips it.</param>
+    public (RosterPlayer Player, bool NameOnly) Find(string first, string last, DateTime? born, int team = -1)
     {
         var cands = _byName.GetValueOrDefault(Key(first, last)) ?? new List<RosterPlayer>();
         var p = cands.FirstOrDefault(c => Born(c) == born);
         if (p == null && born != null)
             p = _byLast.GetValueOrDefault(RosterSync.Norm(last))?.FirstOrDefault(c => Born(c) == born);
         if (p != null) return (p, false);
-        return cands.Count == 1 ? (cands[0], true) : (null, false);
+        if (cands.Count == 1) return (cands[0], true);
+        string f = RosterSync.Norm(first);
+        if (team >= 0 && f.Length >= 3 && _byLast.GetValueOrDefault(RosterSync.Norm(last)) is { } same
+            && same.Where(c => c.Team == team && RosterSync.Norm(c.FirstName) is { Length: >= 3 } cf && cf != f && (cf.StartsWith(f) || f.StartsWith(cf)))
+                .Take(2).ToList() is { Count: 1 } one)
+            return (one[0], true);
+        return (null, false);
     }
 
     /// <summary>The player's birth date as the bio stores it (year - 1900, month - 1, day - 1); null when it isn't a real date.</summary>

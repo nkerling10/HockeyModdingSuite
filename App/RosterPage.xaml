@@ -181,7 +181,9 @@
         </DockPanel>
 
         <!-- ============================================================ NHL sync -->
-        <local:RosterSyncView x:Name="SyncView" Grid.Row="1" Grid.RowSpan="2" Visibility="Collapsed" />
+        <!-- row 2 only (the search row above is hidden in sync mode): spanning the Auto row would let that row grow to
+             the sync page's whole height, pushing its bottom (the changes list, Apply) off a short window instead of scrolling -->
+        <local:RosterSyncView x:Name="SyncView" Grid.Row="2" Visibility="Collapsed" />
         <local:LinesView x:Name="LinesView" Grid.Row="1" Grid.RowSpan="2" Visibility="Collapsed" />
         <local:DraftPicksView x:Name="PicksView" Grid.Row="1" Grid.RowSpan="2" Visibility="Collapsed" />
 

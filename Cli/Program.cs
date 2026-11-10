@@ -3352,13 +3352,27 @@ public static class Program
     private static int MovePlayerCmd(string game, Options opts)
     {
         int id = int.Parse(opts.Positional.ElementAtOrDefault(0) ?? throw new ArgumentException("move-player needs a game id"));
-        int to = int.Parse(opts.Positional.ElementAtOrDefault(1) ?? throw new ArgumentException("move-player needs a team index"));
+        string toArg = opts.Positional.ElementAtOrDefault(1) ?? throw new ArgumentException("move-player needs a team index or release");
+        bool release = toArg.Equals("release", StringComparison.OrdinalIgnoreCase);
+        int to = release ? -1 : int.Parse(toArg);
         SyncChange Change(T3Db db)
         {
             var roster = new Roster(db);
             var p = roster.Players.FirstOrDefault(x => x.GameId == id) ?? throw new ArgumentException($"no player with game id {id}");
             string Name(int t) => roster.Teams.TryGetValue(t, out var tm) ? tm.Name : $"team {t}";
-            if (!roster.Teams.ContainsKey(to)) throw new ArgumentException($"no team {to}");
+            if (!release && !roster.Teams.ContainsKey(to)) throw new ArgumentException($"no team {to}");
+            if (release)
+            {
+                // released as NHL Sync releases a player no one has: off his team, a free agent with no contract
+                var rt0 = db.Table(Roster.RosterTable);
+                if (p.RosterRow < 0) throw new ArgumentException($"{p.Name} has no roster row: he's already a free agent");
+                int from0 = (int)db.Get(rt0, p.RosterRow, rt0.Fields.First(f => f.Name == "team"));
+                return new SyncChange
+                {
+                    Kind = SyncKind.Left, GameId = p.GameId, Name = p.Name, Position = p.PositionDisplay, RosterRow = p.RosterRow, BioRow = p.BioRow,
+                    PlayerIndex = p.PlayerIndex, FromTeam = from0, FromTeamName = Name(from0), Release = true, Selected = true,
+                };
+            }
             // the team the game shows him on: his roster row's
             var rt = db.Table(Roster.RosterTable);
             int from = p.RosterRow >= 0 ? (int)db.Get(rt, p.RosterRow, rt.Fields.First(f => f.Name == "team")) : p.Team;
@@ -3374,7 +3388,22 @@ public static class Program
             var db = new Legacy(index0).OpenDb(Roster.Database);
             var c = Change(db);
             Console.WriteLine($"{c.Name}: {c.Description}");
+            int pi = c.RosterRow >= 0 ? (int)db.Get(db.Table(Roster.RosterTable), c.RosterRow, db.Table(Roster.RosterTable).Fields.First(f => f.Name == "playerindex")) : c.PlayerIndex;
             Console.WriteLine(RosterSync.Apply(db, new[] { c }) + " (in memory only)");
+            // after: his rows, bio and free-agent entry, and the database's checksums
+            foreach (var name in new[] { Roster.RosterTable, RosterSync.OnlineRosterTable, RosterSync.FreeAgentsTable })
+            {
+                var t = db.Table(name);
+                var pf = t.Fields.First(f => f.Name == "playerindex");
+                var teamF = t.Fields.FirstOrDefault(f => f.Name == "team");
+                var hits = Enumerable.Range(0, t.WrittenRecords).Where(r => !db.IsInvalid(t, r) && (int)db.Get(t, r, pf) == pi).ToList();
+                Console.WriteLine($"  {name}: index {pi} in {hits.Count} row(s)" + (teamF != null && hits.Count > 0 ? $", team {string.Join(",", hits.Select(r => db.Get(t, r, teamF)))}" : ""));
+            }
+            var bio = db.Table(Roster.BioTable);
+            Console.WriteLine("  bio: " + string.Join(", ", new[] { "team", "proteam", "contractstatus", "contractlength", "contractdollars", "contractis2way" }
+                .Select(n => $"{n}={db.Get(bio, c.BioRow, bio.Fields.First(f => f.Name == n))}")));
+            var (ok, total) = db.CheckCrcs();
+            Console.WriteLine($"  checksums {ok}/{total}");
             return 0;
         }
         RefuseWhileRunning();

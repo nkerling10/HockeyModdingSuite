@@ -21,11 +21,12 @@ public static class SyncPlan
     /// given when contracts are synced too (a new player's NHL club comes from his CapWages deal), else null.
     /// <paramref name="compared"/>: the list's own changes, when <paramref name="db"/> is a fresh read of the same game
     /// database they were compared against (the preview), which saves the 7-second compare; Apply leaves it null and
-    /// compares afresh against the database it saves.
+    /// compares afresh against the database it saves. <paramref name="left"/>: where the list placed each "left the NHL"
+    /// player (LeftNhl.Plan), put on the fresh compare's Left changes so they match the ticked rows.
     /// </summary>
     public static PlayerResult ApplyPlayers(T3Db db, List<NhlPlayer> api, List<(AhlTeam Team, List<AhlPlayer> Players)> ahl, bool sizes,
         ISet<(int GameId, SyncKind Kind, int ToTeam, bool IsAhl)> picked, IReadOnlyDictionary<string, PlayerBio> toCreate, IReadOnlyList<CapTeam> cap,
-        IReadOnlyList<SyncChange> compared = null)
+        IReadOnlyList<SyncChange> compared = null, IReadOnlyDictionary<int, LeftPlan> left = null)
     {
         var summaries = new List<string>();
         var created = new HashSet<int>();
@@ -35,7 +36,9 @@ public static class SyncPlan
         // set — see CompareCombined), so the list can't hold two changes for the same player that overwrite each
         // other. Safety net: if a duplicate somehow remains, keep one change per player, preferring the AHL one.
         List<SyncChange> fresh = compared?.ToList()
-            ?? (ahl != null ? RosterSync.CompareCombined(db, api, ahl, sizes).Changes : RosterSync.Compare(db, api, sizes));
+            ?? (ahl != null ? RosterSync.CompareCombined(db, api, ahl, sizes, stragglers: left is { Count: > 0 }).Changes : RosterSync.Compare(db, api, sizes));
+        // where each "left the NHL" player goes, as CapWages placed him for the list (an AHL affiliate, a junior club, released)
+        LeftNhl.Use(fresh, left);
         var missing = fresh.Where(c => c.Kind == SyncKind.Missing && BioKey(c) is { } k && toCreate.ContainsKey(k)).ToList();
         foreach (var c in missing) c.Bio = toCreate[BioKey(c)];
         fresh = fresh.Where(c => c.Kind != SyncKind.Missing && picked.Contains((c.GameId, c.Kind, c.ToTeam, c.IsAhl))).ToList();

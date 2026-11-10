@@ -27,6 +27,12 @@ public sealed record CapPlayer(string First, string Last, DateTime? Born, string
     public string Slug { get; init; } = "";
 }
 
+/// <summary>One row of a player's stats on his CapWages page: season ("2026-27"), team ("Saginaw Spirit"), league ("OHL"), games.</summary>
+public sealed record CapStat(string Season, string Team, string League, int Games);
+
+/// <summary>A player's CapWages page, as CapWagesApi.PageAsync reads it.</summary>
+public sealed record CapPage(string Slug, string Name, DateTime? Born, string Status, string TeamAbbr, IReadOnlyList<CapStat> Stats);
+
 /// <summary>A draft pick a team's page lists: real draft year, round, the original team's full name, and whether the team traded it away.</summary>
 public sealed record CapPick(int Year, int Round, string OriginalTeam, bool TradedAway);
 
@@ -44,6 +50,10 @@ public sealed record CapTeam(string Abbr, string Name, IReadOnlyList<CapPlayer> 
     /// <summary>The affiliate's players on AHL contracts (the page's "AHL Contracts" table: name, birth date, one position, no
     /// NHL contract). Kept apart from Players so contracts and picks never see them; only their positions are used.</summary>
     public IReadOnlyList<CapPlayer> AhlPlayers { get; init; } = Array.Empty<CapPlayer>();
+
+    /// <summary>The unsigned draft picks whose rights the team holds (the page's "reserves" list: name, birth date, position,
+    /// slug; Section "reserve", Status "Prospect", no contract). Only used to find a player's page; never contracts or picks.</summary>
+    public IReadOnlyList<CapPlayer> Reserves { get; init; } = Array.Empty<CapPlayer>();
 }
 
 /// <summary>
@@ -145,19 +155,27 @@ public static class CapWagesApi
                 bool away = p.TryGetProperty("isTradedAway", out var ta) && ta.ValueKind == JsonValueKind.True;
                 picks.Add(new CapPick(year, r.GetInt32(), Str(p, "team"), away));
             }
-        // the AHL affiliate's AHL-contract players (pageProps.ahlClub.players)
-        var ahl = new List<CapPlayer>();
-        if (pp.TryGetProperty("ahlClub", out var club) && club.ValueKind == JsonValueKind.Object
-            && club.TryGetProperty("players", out var ap) && ap.ValueKind == JsonValueKind.Array)
-            foreach (var p in ap.EnumerateArray())
+        // a list of { name "Last, First", born, pos, slug } as players with no contract
+        List<CapPlayer> Listed(JsonElement arr, string section, string status)
+        {
+            var list = new List<CapPlayer>();
+            foreach (var p in arr.EnumerateArray())
             {
                 string full = Str(p, "name");
                 if (full.Length == 0) continue;
                 int comma = full.IndexOf(',');
                 string last = comma > 0 ? full[..comma].Trim() : full, first = comma > 0 ? full[(comma + 1)..].Trim() : "";
-                ahl.Add(new CapPlayer(first, last, ParseDate(Str(p, "born")), "ahl", "", Array.Empty<CapContract>()) { Pos = Str(p, "pos"), Slug = Str(p, "slug") });
+                list.Add(new CapPlayer(first, last, ParseDate(Str(p, "born")), section, "", Array.Empty<CapContract>()) { Pos = Str(p, "pos"), Slug = Str(p, "slug"), Status = status });
             }
-        return new CapTeam(abbr, name, players, picks) { AhlPlayers = ahl, Buyouts = ParseBuyouts(pp, abbr) };
+            return list;
+        }
+        // the AHL affiliate's AHL-contract players (pageProps.ahlClub.players)
+        var ahl = pp.TryGetProperty("ahlClub", out var club) && club.ValueKind == JsonValueKind.Object
+            && club.TryGetProperty("players", out var ap) && ap.ValueKind == JsonValueKind.Array ? Listed(ap, "ahl", "") : new List<CapPlayer>();
+        // unsigned draft picks whose rights the team holds (pageProps.reserves): L.J. Mooney (MTL, at college), Egor Surin
+        // (NSH, in the KHL); their slugs are often not what their names suggest ("l.j.-mooney")
+        var reserves = pp.TryGetProperty("reserves", out var rs) && rs.ValueKind == JsonValueKind.Array ? Listed(rs, "reserve", "Prospect") : new List<CapPlayer>();
+        return new CapTeam(abbr, name, players, picks) { AhlPlayers = ahl, Reserves = reserves, Buyouts = ParseBuyouts(pp, abbr) };
     }
 
     /// <summary>
@@ -246,7 +264,8 @@ public static class CapWagesApi
     public static DateTime? ParseDate(string s)
     {
         string t = (s ?? "").Replace(".", "").Replace("Sept ", "Sep ").Trim();
-        foreach (var fmt in new[] { "MMM d, yyyy", "MMMM d, yyyy" })
+        // "Jul. 22, 2002", "July 22, 2002", and a few pages' "Mar 15 2002" (no comma: Cooper Gay)
+        foreach (var fmt in new[] { "MMM d, yyyy", "MMMM d, yyyy", "MMM d yyyy", "MMMM d yyyy" })
             if (DateTime.TryParseExact(t, fmt, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)) return d;
         return null;
     }
@@ -269,11 +288,143 @@ public static class CapWagesApi
     public static async Task<(string Url, bool Nhl)?> HeadshotAsync(string slug, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(slug)) return null;
-        var m = Regex.Match(await GetAsync(PlayerBase + slug, ct), "<script id=\"__NEXT_DATA__\"[^>]*>(.*?)</script>", RegexOptions.Singleline);
-        if (!m.Success) throw new InvalidOperationException($"CapWages' page for {slug} has no data block: the site's layout may have changed.");
-        using var doc = JsonDocument.Parse(m.Groups[1].Value);
+        using var doc = JsonDocument.Parse(await PlayerDataAsync(slug, ct));
         string head = Find(doc.RootElement, "headshot"), image = Find(doc.RootElement, "imageUrl");
         return head.Length > 0 ? (head, true) : image.Length > 0 ? (image, false) : null;
+    }
+
+    /// <summary>
+    /// Where player pages are kept between syncs, on this machine only (never in the repo or shipped): one file per
+    /// player, used again for <see cref="PlayerPageMaxAge"/>. A sync reads hundreds of AHL players' pages; most don't
+    /// change from one day to the next. Null turns the cache off.
+    /// </summary>
+    public static string PlayerCacheDir { get; set; } =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HockeyModdingSuite", "cache", "capwages-players");
+    public static TimeSpan PlayerPageMaxAge { get; set; } = TimeSpan.FromHours(20);
+
+    /// <summary>True when the player's page is in the cache and fresh (reading it costs no request).</summary>
+    public static bool IsCached(string slug) => CachePath(slug) is { } p && File.Exists(p) && DateTime.UtcNow - File.GetLastWriteTimeUtc(p) < PlayerPageMaxAge;
+
+    private static string CachePath(string slug) =>
+        PlayerCacheDir == null || string.IsNullOrWhiteSpace(slug) || slug.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ? null : Path.Combine(PlayerCacheDir, slug + ".json");
+
+    /// <summary>A player page's embedded data (its __NEXT_DATA__ JSON), from the cache when fresh, else downloaded and kept.</summary>
+    public static async Task<string> PlayerDataAsync(string slug, CancellationToken ct = default)
+    {
+        string path = CachePath(slug);
+        if (path != null && IsCached(slug))
+            try { return await File.ReadAllTextAsync(path, ct); } catch (IOException) { }
+        var m = Regex.Match(await GetAsync(PlayerBase + slug, ct), "<script id=\"__NEXT_DATA__\"[^>]*>(.*?)</script>", RegexOptions.Singleline);
+        if (!m.Success) throw new InvalidOperationException($"CapWages' page for {slug} has no data block: the site's layout may have changed.");
+        string json = m.Groups[1].Value;
+        if (path != null)
+            try { Directory.CreateDirectory(PlayerCacheDir); await File.WriteAllTextAsync(path, json, ct); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        return json;
+    }
+
+    /// <summary>
+    /// A player's bio from his CapWages page, for creating him: name, number (his NHL one; an AHL player's comes from
+    /// the AHL roster instead), positions ("RW, LW" → RW with LW as the second, never a forward and a defenceman
+    /// together), shot, height, weight, birth date and place ("Eden Prairie, Minnesota, USA", "Brunico, ITA") and his
+    /// NHL draft. Null when the page has no player.
+    /// </summary>
+    public static async Task<PlayerBio> BioAsync(string slug, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(slug)) return null;
+        using var doc = JsonDocument.Parse(await PlayerDataAsync(slug, ct));
+        if (!doc.RootElement.TryGetProperty("props", out var props) || !props.TryGetProperty("pageProps", out var pp)
+            || !pp.TryGetProperty("player", out var p) || p.ValueKind != JsonValueKind.Object) return null;
+        string full = Str(p, "name");
+        int comma = full.IndexOf(',');
+        string last = comma > 0 ? full[..comma].Trim() : full, first = comma > 0 ? full[(comma + 1)..].Trim() : "";
+        string shoots = Str(p, "shootsCatches");
+        var listed = Str(p, "pos").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList();
+        string official = Str(p, "officialPosition");
+        int Code(string pos) => pos switch
+        {
+            "C" => 0, "LW" or "L" => 1, "RW" or "R" => 2, "LD" => 3, "RD" => 4, "G" => 5,
+            "D" => shoots == "R" ? 4 : 3, _ => -1,
+        };
+        int primary = Code(official.Length > 0 ? official : listed.FirstOrDefault() ?? "");
+        // "D" as the official position and "LD" listed first: the listed side wins
+        if (official == "D" && listed.FirstOrDefault() is "LD" or "RD") primary = Code(listed[0]);
+        static bool Forward(int c) => c is 0 or 1 or 2;
+        int secondary = listed.Select(Code).FirstOrDefault(c => c >= 0 && c != primary && c != 5 && primary != 5 && Forward(c) == Forward(primary), -1);
+        string position = primary switch { 0 => "C", 1 => "LW", 2 => "RW", 3 or 4 => "D", 5 => "G", _ => "" };
+        int Lead(string s) => int.TryParse(Regex.Match(s ?? "", @"^\d+").Value, out int v) ? v : 0;
+        string FirstOf(string name) => p.TryGetProperty(name, out var a) && a.ValueKind == JsonValueKind.Array && a.GetArrayLength() > 0 && a[0].ValueKind == JsonValueKind.String ? a[0].GetString() : Str(p, name);
+        var hm = Regex.Match(FirstOf("height"), "(\\d+)'\\s*(\\d+)");
+        int height = hm.Success ? int.Parse(hm.Groups[1].Value) * 12 + int.Parse(hm.Groups[2].Value) : 0;
+        int weight = Lead(FirstOf("weight"));
+        int Num(string name) => p.TryGetProperty(name, out var v) ? v.ValueKind == JsonValueKind.Number ? v.GetInt32() : int.TryParse(v.ValueKind == JsonValueKind.String ? v.GetString() : "", out int x) ? x : 0 : 0;
+        int year = Num("draft_year");
+        var draft = year > 0 && Str(p, "drafted_by").Length > 0 ? new DraftInfo(year, Str(p, "drafted_by"), Num("draft_round"), Num("drafted_overall")) : DraftInfo.Undrafted;
+        var (city, country, region) = BirthPlace(Str(p, "birthplace"), Str(p, "nationality"));
+        return new PlayerBio(first, last, Num("sweaterNumber") is var n and > 0 ? n : -1, position, shoots, height, weight,
+            ParseDate(Str(p, "born")), city, draft, "CapWages")
+        { Primary = primary, Secondary = secondary, BirthCountry = country, BirthRegion = region };
+    }
+
+    /// <summary>"Eden Prairie, Minnesota, USA" → (Eden Prairie, USA, Minnesota); "Brunico, ITA" → (Brunico, ITA, "");
+    /// "Toronto, Ontario, Canada" → (Toronto, CAN, Ontario). The country falls back on his nationality.</summary>
+    public static (string City, string Country, string Region) BirthPlace(string place, string nationality)
+    {
+        var parts = (place ?? "").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0) return ("", Country(nationality), "");
+        string country = parts.Length >= 2 ? Country(parts[^1]) : "";
+        if (country.Length == 0) country = Country(nationality);
+        string region = parts.Length >= 3 ? parts[1] : "";
+        // "Calgary, AB" with no country: the province or state says which
+        if (parts.Length == 2 && country.Length == 0 || parts.Length == 2 && Country(parts[1]).Length == 0)
+        {
+            var (c2, r2) = MissingPlayers.BirthCountry(place);
+            if (c2.Length > 0) { country = c2; region = r2; }
+        }
+        return (parts[0], country, region);
+    }
+
+    private static string Country(string s)
+    {
+        s = (s ?? "").Trim();
+        if (s.Length == 0) return "";
+        var (c, _) = MissingPlayers.BirthCountry("x, " + s);
+        if (c.Length > 0 && !(s.Length == 2)) return c;
+        return s.Length == 3 && s.All(char.IsLetter) ? s.ToUpperInvariant() : "";
+    }
+
+    /// <summary>
+    /// A player's CapWages page: name, birth date, status ("Minor", "Junior", "Prospect" for an unsigned pick whose rights a
+    /// team holds, "Inactive"…), the NHL team he belongs to ("" when none) and his stats rows in the page's order: oldest
+    /// season first, and within a season in the order he played for each team ("2026-27 Anaheim Ducks NHL", then
+    /// "2026-27 Saginaw Spirit OHL"). Null when CapWages has no page by that slug.
+    /// </summary>
+    public static async Task<CapPage> PageAsync(string slug, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(slug)) return null;
+        string json;
+        try { json = await PlayerDataAsync(slug, ct); }
+        catch (HttpRequestException e) when (e.StatusCode == System.Net.HttpStatusCode.NotFound) { return null; }
+        using var doc = JsonDocument.Parse(json);
+        if (!doc.RootElement.TryGetProperty("props", out var props) || !props.TryGetProperty("pageProps", out var pp)
+            || !pp.TryGetProperty("player", out var pl) || pl.ValueKind != JsonValueKind.Object) return null;
+        var list = new List<CapStat>();
+        if (pl.TryGetProperty("stats", out var st) && st.ValueKind == JsonValueKind.Array)
+            foreach (var s in st.EnumerateArray())
+            {
+                int gp = s.TryGetProperty("gp", out var g) && g.ValueKind == JsonValueKind.Number ? g.GetInt32() : 0;
+                if (Str(s, "team").Length > 0) list.Add(new CapStat(Str(s, "season"), Str(s, "team"), Str(s, "league"), gp));
+            }
+        return new CapPage(slug, Str(pl, "name"), ParseDate(Str(pl, "born")), Str(pl, "status"), Str(pl, "currentTeamTricode"), list);
+    }
+
+    /// <summary>The slug CapWages most likely gives a player: "Michael Hage" → "michael-hage" (accents, dots and
+    /// apostrophes dropped). Only a guess: a page found by it is checked against his birth date before it's believed.</summary>
+    public static string GuessSlug(string name)
+    {
+        string plain = new string((name ?? "").Normalize(System.Text.NormalizationForm.FormD)
+            .Where(ch => System.Globalization.CharUnicodeInfo.GetUnicodeCategory(ch) != System.Globalization.UnicodeCategory.NonSpacingMark).ToArray());
+        plain = Regex.Replace(plain.ToLowerInvariant().Replace(".", "").Replace("'", "").Replace("’", ""), "[^a-z0-9]+", "-").Trim('-');
+        return plain;
     }
 
     /// <summary>The first string value named <paramref name="name"/> anywhere under <paramref name="e"/>; "" when none.</summary>

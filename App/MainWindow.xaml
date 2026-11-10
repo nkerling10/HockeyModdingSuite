@@ -94,17 +94,17 @@
                         <ScrollViewer VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Disabled" Focusable="False">
                         <StackPanel>
                             <RadioButton x:Name="NavPlay" Style="{StaticResource NavItem}" Content="Play" Tag="&#xE7FC;" Checked="OnNav" />
+                            <RadioButton x:Name="NavRoster" Style="{StaticResource NavItem}" Content="Roster" Tag="&#xE716;" Checked="OnNav" />
+                            <RadioButton x:Name="NavFranchise" Style="{StaticResource NavItem}" Content="Franchise" Tag="&#xE7C1;" Checked="OnNav" />
                             <RadioButton x:Name="NavExplorer" Style="{StaticResource NavItem}" Content="Explorer" Tag="&#xEC50;" IsChecked="True" Checked="OnNav" />
                             <RadioButton x:Name="NavTextures" Style="{StaticResource NavItem}" Content="Textures" Tag="&#xEB9F;" Checked="OnNav" />
                             <RadioButton x:Name="NavSounds" Style="{StaticResource NavItem}" Content="Sounds" Tag="&#xE767;" Checked="OnNav" />
                             <RadioButton x:Name="NavVideos" Style="{StaticResource NavItem}" Content="Videos" Tag="&#xE714;" Checked="OnNav" />
-                            <RadioButton x:Name="NavRoster" Style="{StaticResource NavItem}" Content="Roster" Tag="&#xE716;" Checked="OnNav" />
                             <RadioButton x:Name="NavDatabase" Style="{StaticResource NavItem}" Content="Database" Tag="&#xE1D3;" Checked="OnNav" />
                             <RadioButton x:Name="NavTuning" Style="{StaticResource NavItem}" Content="Tuning" Tag="&#xE9E9;" Checked="OnNav" />
                             <RadioButton x:Name="NavTeams" Style="{StaticResource NavItem}" Content="Teams" Tag="&#xE790;" Checked="OnNav" />
                             <RadioButton x:Name="NavArenas" Style="{StaticResource NavItem}" Content="Arenas" Tag="&#xE80F;" Checked="OnNav" />
                             <RadioButton x:Name="NavBeAPro" Style="{StaticResource NavItem}" Content="Be A Pro" Tag="&#xE77B;" Checked="OnNav" />
-                            <RadioButton x:Name="NavFranchise" Style="{StaticResource NavItem}" Content="Franchise" Tag="&#xE7C1;" Checked="OnNav" />
                             <RadioButton x:Name="NavUniforms" Style="{StaticResource NavItem}" Content="Uniforms" Tag="&#xE7BF;" Checked="OnNav" />
                             <RadioButton x:Name="NavStudio" Style="{StaticResource NavItem}" Content="Studio" Tag="&#xE790;" Checked="OnNav" />
                             <RadioButton x:Name="NavUnused" Style="{StaticResource NavItem}" Content="Unused" Tag="&#xE8F1;" ToolTip="Unused jerseys" Checked="OnNav" />

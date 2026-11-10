@@ -52,7 +52,9 @@ public static class LineSync
 {
     private sealed record TeamPlayer(int PlayerIndex, RosterPlayer Player, int Jersey);
 
-    public static List<LineChange> Compare(T3Db db, IReadOnlyList<(string Abbr, LineTeam Team, string Error)> teams)
+    /// <param name="cap">When given: a team whose lineup's only players not on it are ones CapWages has sent down
+    /// (LineupCallUps.SentDown) gets no row. DailyFaceoff hasn't caught up, so there's nothing to do until it does.</param>
+    public static List<LineChange> Compare(T3Db db, IReadOnlyList<(string Abbr, LineTeam Team, string Error)> teams, IReadOnlyList<CapTeam> cap = null)
     {
         var codes = RosterSync.TeamIndex(db);
         var roster = new Roster(db);
@@ -68,6 +70,7 @@ public static class LineSync
             }
             var c = Plan(db, roster, team, name, lt);
             if (c.NotOnTeam.Count == 0 && c.Changed == 0) continue;
+            if (cap != null && c.NotOnTeam.Count > 0 && c.NotOnTeam.All(n => LineupCallUps.SentDown(cap, abbr, n))) continue;
             c.Selected = c.Ready;
             changes.Add(c);
         }

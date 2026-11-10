@@ -16,16 +16,29 @@ public sealed class SyncStage : Observable
     private StageState _state;
     private string _detail = "";
 
-    public SyncStage(string label) => Label = label;
+    public SyncStage(string label, string source = "")
+    {
+        Label = label;
+        Source = source;
+    }
 
     public string Label { get; }
+    /// <summary>Where the step reads from ("NHL.com", "CapWages player pages"), or "" for a check made in HMS.</summary>
+    public string Source { get; }
     public StageState State { get => _state; private set => Set(ref _state, value); }
     public string Detail { get => _detail; private set => Set(ref _detail, value); }
+    /// <summary>How far a running step is (0–100), read from its "12/32" detail; -1 when it has no count.</summary>
+    public double Percent { get => _percent; private set { if (Set(ref _percent, value)) Raise(nameof(HasPercent)); } }
+    private double _percent = -1;
+    public bool HasPercent => _percent >= 0;
 
     public void Update(StageState state, string detail = "")
     {
         State = state;
         Detail = detail;
+        var m = System.Text.RegularExpressions.Regex.Match(detail ?? "", @"^(\d+)/(\d+)");
+        Percent = state == StageState.Running && m.Success && int.Parse(m.Groups[2].Value) > 0
+            ? 100.0 * int.Parse(m.Groups[1].Value) / int.Parse(m.Groups[2].Value) : -1;
     }
 }
 
@@ -170,6 +183,7 @@ public sealed class SyncRow : Observable
         Change.Lineup != null ? Change.Lineup :
         Change.NameOnly ? "Matched by name only: the birth dates differ. Check it's the same player." :
         Change.Kind == SyncKind.Join && Change.NeedsNewRow ? "In the game as a free agent with no roster row — Sync will create one." :
+        Change.Kind == SyncKind.Left && Change.Where != null ? Change.Where :
         Change.Kind == SyncKind.Left ? "Unticked: he may be injured, sent down or gone. Tick it to send him to the AHL affiliate." :
         Change.Kind == SyncKind.Missing ? MissingNote() : "";
 
@@ -227,11 +241,17 @@ public sealed class SyncRow : Observable
     /// contracts and clauses, same-group positions, name calls, lines, picks, new players) is applied automatically.
     /// </summary>
     public bool NeedsReview =>
-        IsPlayer ? !IsHeld && (Change.NameOnly || Change.Kind == SyncKind.Left || Change.Lineup != null && !Selected || Change.Kind == SyncKind.Missing && !Change.CanCreate)
+        IsPlayer ? !IsHeld && (Change.NameOnly || Change.Kind == SyncKind.Left && !Change.Settled ||Change.Lineup != null && !Selected || Change.Kind == SyncKind.Missing && !Change.CanCreate)
         : IsPosition ? Pos.NameOnly || Pos.CrossesGroup
         : IsContract ? Contract.NameOnly || !Contract.IsTeam && Contract.Old.Length > 0 && Contract.New.Length == 0
         : IsLines ? !Line.Ready
         : false;
+
+    /// <summary>A Left row was placed from CapWages after it was built: its destination, note and box change.</summary>
+    public void Replaced()
+    {
+        foreach (var p in new[] { nameof(Description), nameof(Note), nameof(CanApply), nameof(SearchText) }) Raise(p);
+    }
 
     /// <summary>The row's note changed (a hold was set after it was built).</summary>
     public void NoteChanged()
@@ -308,38 +328,38 @@ public partial class RosterSyncView : UserControl
 
     private static string BioKey(SyncChange c) => SyncPlan.BioKey(c);
 
-    private readonly SyncStage _nhlRosters = new("Rosters");
-    private readonly SyncStage _nhlBios = new("New players' bios");
-    private readonly SyncStage _ahlRosters = new("Rosters");
-    private readonly SyncStage _ahlBios = new("New players' bios");
-    private readonly SyncStage _capPages = new("Team pages");
+    // what is read, in the order it's read (the first four at the same time)
+    private readonly SyncStage _nhlRosters = new("NHL rosters", "NHL.com");
+    private readonly SyncStage _ahlRosters = new("AHL rosters", "TheAHL.com");
+    private readonly SyncStage _capPages = new("NHL team contracts", "CapWages team pages");
+    private readonly SyncStage _linePages = new("Lines", "DailyFaceoff");
+    private readonly SyncStage _ahlSizes = new("AHL players' heights and weights", "CapWages player pages");
+    private readonly SyncStage _nhlBios = new("New NHL players' bios", "NHL.com");
+    private readonly SyncStage _ahlBios = new("New AHL players' bios", "CapWages player pages");
+    private readonly SyncStage _leftPages = new("Players no roster lists", "CapWages player pages");
+    // what is checked once it's read
+    private readonly SyncStage _compareStage = new("Rosters compared");
+    private readonly SyncStage _placeStage = new("Players no roster lists, placed");
     private readonly SyncStage _contractsStage = new("Contracts");
     private readonly SyncStage _positionsStage = new("Positions");
     private readonly SyncStage _picksStage = new("Draft picks");
-    private readonly SyncStage _linePages = new("Team pages");
     private readonly SyncStage _linesStage = new("Lines");
 
-    private readonly SyncSource _nhlSource, _ahlSource, _capSource, _linesSource;
+    // A sync reads everything: NHL and AHL rosters, CapWages and DailyFaceoff, heights and weights included.
+    private const bool AhlOn = true, CapOn = true, LinesOn = true;
 
-    private bool AhlOn => _ahlSource.IsOn;
-    private bool CapOn => _capSource.IsOn;
-    private bool LinesOn => _linesSource.IsOn;
+    /// <summary>Cancels the running fetch (Cancel button). Writing to the game is never cancelled half way.</summary>
+    private CancellationTokenSource _cts;
+    private CancellationToken Ct => _cts?.Token ?? CancellationToken.None;
 
     public RosterSyncView()
     {
         InitializeComponent();
-        _nhlSource = new SyncSource("NHL.com", "api-web.nhle.com", "NHL rosters, numbers, positions, heights and weights, and the bios of players to create.", false,
-            "The NHL's public API: all 32 teams' current rosters, and each new player's birth date, birthplace, size, hand and draft.", _nhlRosters, _nhlBios);
-        _ahlSource = new SyncSource("TheAHL.com", "lscluster.hockeytech.com", "AHL rosters (call-ups and send-downs), and the bios of AHL players to create.", true,
-            "The AHL's stats feed (HockeyTech, which theahl.com reads): all 32 AHL teams' rosters and each new player's bio.", _ahlRosters, _ahlBios);
-        _capSource = new SyncSource("CapWages", "capwages.com", "Contracts, extensions, clauses, retained salary, buyouts, positions and draft pick owners.", true,
-            "CapWages' team pages: every NHL team's contracts, each player's positions (where he has played) and the draft picks. Checked once the rosters and new players are planned.", _capPages, _contractsStage, _positionsStage, _picksStage);
-        _linesSource = new SyncSource("DailyFaceoff", "dailyfaceoff.com", "Forward lines, D pairs, power play, penalty kill and the starting goalie.", true,
-            "DailyFaceoff's line combinations for each team's next game. Checked once the rosters and new players are planned.", _linePages, _linesStage);
-        SourceList.ItemsSource = new[] { _nhlSource, _ahlSource, _capSource, _linesSource };
-        _ahlSource.Toggled += OnAhl;
-        _capSource.Toggled += OnCap;
-        _linesSource.Toggled += OnLines;
+        ReadList.ItemsSource = new[] { _nhlRosters, _ahlRosters, _capPages, _linePages, _ahlSizes, _nhlBios, _ahlBios, _leftPages };
+        CheckList.ItemsSource = new[] { _compareStage, _placeStage, _contractsStage, _positionsStage, _picksStage, _linesStage };
+        // the page's extent is only known after layout: re-fit when it or the window changes
+        PageScroll.ScrollChanged += (_, e) => { if (e.ExtentHeightChange != 0 || e.ViewportHeightChange != 0) FitChanges(); };
+        TopPanel.SizeChanged += (_, _) => FitChanges();
         _replan.Tick += async (_, _) =>
         {
             _replan.Stop();
@@ -357,14 +377,62 @@ public partial class RosterSyncView : UserControl
         ShowBaseline();
     }
 
-    /// <summary>Starts or ends a fetch/apply: the buttons and the sources' boxes are locked while it runs.</summary>
+    /// <summary>Starts or ends a fetch/apply: the buttons are locked while it runs.</summary>
     private void SetBusy(bool busy)
     {
         _busy = busy;
-        foreach (var s in new[] { _ahlSource, _capSource, _linesSource }) s.CanToggle = !busy;
         FetchButton.IsEnabled = !busy;
         ShowBaseline();
         SetButtons();
+    }
+
+    /// <summary>
+    /// The changes list gets the height the window has left under steps 1 and 2, but never less than MinListHeight: on a short
+    /// window (a remote desktop) the page scrolls instead of squeezing the list to nothing.
+    /// </summary>
+    private const double MinListHeight = 300;
+
+    private void FitChanges()
+    {
+        // everything on the page but the list (cards, margins) is the extent less the list's own height
+        if (ChangesCard.ActualHeight <= 0 || PageScroll.ViewportHeight <= 0) return;
+        double others = Math.Max(TopPanel.ActualHeight, PageScroll.ExtentHeight - ChangesCard.ActualHeight);
+        double height = Math.Max(MinListHeight, Math.Floor(PageScroll.ViewportHeight - others));
+        if (Math.Abs(ChangesCard.Height - height) >= 1) ChangesCard.Height = height;
+    }
+
+    private void OnShowProgress(object sender, RoutedEventArgs e) => ShowProgress(ProgressPanel.Visibility != Visibility.Visible);
+
+    /// <summary>Opens or folds the sources and progress list (open while a fetch runs, folded once its list is ready).</summary>
+    private void ShowProgress(bool show)
+    {
+        ProgressPanel.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        ProgressToggleText.Text = show ? "Hide progress" : "Show sources & progress";
+        ProgressToggleIcon.Text = show ? "" : "";
+    }
+
+    /// <summary>Opens the progress list and/or step 1's details (scripted screenshots).</summary>
+    public void OpenPanels(bool progress, bool details)
+    {
+        if (progress) ShowProgress(true);
+        if (details) ShowBaselineMore(true);
+    }
+
+    private void OnBaselineMore(object sender, RoutedEventArgs e) => ShowBaselineMore(BaselineMore.Visibility != Visibility.Visible);
+
+    /// <summary>Step 1's details (the pack's folder, Preview, and what the last preview or import did): folded by default.</summary>
+    private void ShowBaselineMore(bool show)
+    {
+        BaselineMore.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        BaselineMoreText.Text = show ? "Less" : "Details";
+    }
+
+    private void OnCancel(object sender, RoutedEventArgs e)
+    {
+        if (_cts == null || _cts.IsCancellationRequested) return;
+        _cts.Cancel();
+        CancelButton.IsEnabled = false;
+        FetchStatus.Text = "Cancelling…";
     }
 
     // ---------------------------------------------------------------- the sources' cards
@@ -418,9 +486,11 @@ public partial class RosterSyncView : UserControl
     private async void OnFetch(object sender, RoutedEventArgs e) => await FetchAsync();
 
     /// <summary>
-    /// Reads every ticked source at the same time, then compares in order: the NHL and AHL rosters together (one
-    /// shared matched set), the missing players' bios, and last the contracts, picks and lines, against the rosters as
-    /// Apply will leave them (PlanAsync).
+    /// Reads every source, then checks in order (the order the progress list shows): NHL.com, TheAHL.com, CapWages' team
+    /// pages and DailyFaceoff at the same time; the AHL players' CapWages details; the NHL and AHL rosters compared
+    /// together (one shared matched set); the missing players' bios; the players no roster lists placed from CapWages;
+    /// and last the contracts, positions, picks and lines, against the rosters as Apply will leave them (PlanAsync).
+    /// Cancel stops it at the next step or download and drops what it had found, so nothing half-read can be applied.
     /// </summary>
     public async Task FetchAsync()
     {
@@ -431,20 +501,23 @@ public partial class RosterSyncView : UserControl
         _replan.Stop();
         _planRun++;
         _planning = false;
+        _cts?.Dispose();
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
         SetBusy(true);
+        CancelButton.Visibility = Visibility.Visible;
+        CancelButton.IsEnabled = true;
+        ShowProgress(true);
         try
         {
-            bool includeAhl = AhlOn, includeCap = CapOn, includeLines = LinesOn;
-
             FetchStatus.Text = "Reading the sources…";
-            _nhlRosters.Update(StageState.Running, "starting…");
-            _nhlBios.Update(StageState.Waiting, "after rosters");
-            _ahlRosters.Update(includeAhl ? StageState.Running : StageState.Off, includeAhl ? "starting…" : "off");
-            _ahlBios.Update(includeAhl ? StageState.Waiting : StageState.Off, includeAhl ? "after rosters" : "off");
-            _capPages.Update(includeCap ? StageState.Running : StageState.Off, includeCap ? "starting…" : "off");
-            _linePages.Update(includeLines ? StageState.Running : StageState.Off, includeLines ? "starting…" : "off");
-            if (!includeCap) foreach (var s in new[] { _contractsStage, _positionsStage, _picksStage }) s.Update(StageState.Off, "off");
-            if (!includeLines) _linesStage.Update(StageState.Off, "off");
+            foreach (var s in new[] { _nhlRosters, _ahlRosters, _capPages, _linePages }) s.Update(StageState.Running, "starting…");
+            _ahlSizes.Update(StageState.Waiting, "after AHL rosters and CapWages");
+            _nhlBios.Update(StageState.Waiting, "after the compare");
+            _ahlBios.Update(StageState.Waiting, "after the compare");
+            _leftPages.Update(StageState.Waiting, "after the compare");
+            _compareStage.Update(StageState.Waiting, "after the rosters");
+            _placeStage.Update(StageState.Waiting, "after the compare");
             ShowPlanWaiting();
 
             // Earlier rows go away: everything below is compared from this fetch.
@@ -459,73 +532,108 @@ public partial class RosterSyncView : UserControl
             int done = 0;
             var progress = new Progress<string>(t => _nhlRosters.Update(StageState.Running, $"{++done}/{NhlApi.Teams.Length} · {t}"));
             var sink = (IProgress<string>)progress;
-            Task<List<NhlPlayer>> nhlTask = Task.Run(() => NhlApi.AllRostersAsync(t => sink.Report(t)));
+            Task<List<NhlPlayer>> nhlTask = Task.Run(() => NhlApi.AllRostersAsync(t => sink.Report(t), ct));
 
-            Task<List<(AhlTeam Team, List<AhlPlayer> Players)>> ahlTask = null;
-            if (includeAhl)
-            {
-                int ahlDone = 0;
-                var ahlProgress = new Progress<string>(t => _ahlRosters.Update(StageState.Running, $"{++ahlDone}/32 · {t}"));
-                var ahlSink = (IProgress<string>)ahlProgress;
-                ahlTask = Task.Run(() => AhlApi.AllRostersAsync(t => ahlSink.Report(t)));
-            }
+            int ahlDone = 0;
+            var ahlProgress = new Progress<string>(t => _ahlRosters.Update(StageState.Running, $"{++ahlDone}/32 · {t}"));
+            var ahlSink = (IProgress<string>)ahlProgress;
+            var ahlTask = Task.Run(() => AhlApi.AllRostersAsync(t => ahlSink.Report(t), ct));
 
-            // CapWages and DailyFaceoff: read only for now (they never throw); compared at the end.
-            Task capTask = includeCap ? FetchCapPagesAsync() : Task.CompletedTask;
-            Task linesTask = includeLines ? FetchLinePagesAsync() : Task.CompletedTask;
+            // CapWages and DailyFaceoff: read now (they never throw), used once the rosters are in
+            Task capTask = FetchCapPagesAsync();
+            Task linesTask = FetchLinePagesAsync();
 
             // A failed NHL fetch means no player list, but the other sources still finish on their own.
             _nhlError = null;
             try { _api = await nhlTask; _nhlRosters.Update(StageState.Done, $"{_api.Count} players"); }
-            catch (Exception ex) { _api = null; _nhlError = ex.Message; _nhlRosters.Update(StageState.Failed, ex.Message); }
+            catch (Exception ex) when (!ct.IsCancellationRequested) { _api = null; _nhlError = ex.Message; _nhlRosters.Update(StageState.Failed, ex.Message); }
+            ct.ThrowIfCancellationRequested();
             _fetchedAt = DateTime.Now;
 
             _ahl = null;
             _ahlError = null;
             _ahlSkipped = new List<string>();
-            if (ahlTask != null)
-            {
-                try { _ahl = await ahlTask; }
-                catch (Exception ex) { _ahl = null; _ahlError = ex.Message; }
-            }
+            try { _ahl = await ahlTask; _ahlRosters.Update(StageState.Done, $"{_ahl.Sum(t => t.Players.Count)} players on {_ahl.Count} teams"); }
+            catch (Exception ex) when (!ct.IsCancellationRequested) { _ahl = null; _ahlError = ex.Message; _ahlRosters.Update(StageState.Failed, ex.Message); }
+            ct.ThrowIfCancellationRequested();
+            // TheAHL.com says who is on each AHL roster; who the player is (birth date, size, bio) comes from CapWages,
+            // so it's read before the compare
+            _ahlFeed = _ahl;
+            _ahlSized = false;
+            await capTask;
+            ct.ThrowIfCancellationRequested();
+            if (_ahl != null) await UseCapWagesForAhlAsync();
+            else _ahlSizes.Update(StageState.Off, "no AHL rosters");
+            ct.ThrowIfCancellationRequested();
 
             // The combined player compare, then the bios of the players it finds missing.
             _bios.Clear();
             if (_api != null) await CompareAsync();
-            ShowAhlStage();
+            ct.ThrowIfCancellationRequested();
             _bioFailed = 0;
             if (_api != null) _bioFailed = await LookUpBiosAsync();
             else
             {
+                _compareStage.Update(StageState.Failed, "no NHL rosters");
                 _nhlBios.Update(StageState.Off, "skipped");
-                if (includeAhl) _ahlBios.Update(StageState.Off, "skipped");
+                _ahlBios.Update(StageState.Off, "skipped");
             }
+            ct.ThrowIfCancellationRequested();
 
-            await capTask;
             await linesTask;
+            ct.ThrowIfCancellationRequested();
             // the roster lists against CapWages and DailyFaceoff: don't send down a player they have on his NHL team
             HoldNhlPlayers();
+            // and the rest of those no roster lists placed from CapWages: minors, junior club, released
+            _leftStats.Clear();
+            await PlaceLeftAsync();
+            ct.ThrowIfCancellationRequested();
 
             // Last: contracts, picks and lines against the rosters as Apply will leave them.
             await PlanAsync();
+            ct.ThrowIfCancellationRequested();
             _fetched = true;
             // the list again, now that the fetch is over (its empty-list text said it was reading)
             ApplyFilter();
             ShowSummary();
             FilterBar.IsEnabled = true;
+            // the list is what matters now: the progress folds away (its button opens it again)
+            ShowProgress(false);
+        }
+        catch (Exception ex) when (ct.IsCancellationRequested)
+        {
+            // nothing half-read stays: the list is emptied, and the next Fetch starts over
+            _planRun++;
+            _planning = false;
+            _fetched = false;
+            _api = null;
+            _rows = new List<SyncRow>();
+            _nameRows = new List<SyncRow>();
+            ClearCap();
+            _lines = null;
+            _lineRows = new List<SyncRow>();
+            _lineupRows = new List<SyncRow>();
+            ApplyFilter();
+            foreach (var s in AllStages) if (s.State is StageState.Running or StageState.Waiting) s.Update(StageState.Off, "cancelled");
+            FetchStatus.Text = "Cancelled. Nothing was changed in the game.";
+            _ = ex;
         }
         catch (Exception ex)
         {
             FetchStatus.Text = "Couldn't fetch: " + ex.Message;
-            foreach (var s in new[] { _nhlRosters, _nhlBios, _ahlRosters, _ahlBios, _capPages, _contractsStage, _positionsStage, _picksStage, _linePages, _linesStage })
+            foreach (var s in AllStages)
                 if (s.State is StageState.Running or StageState.Waiting) s.Update(StageState.Failed, ex.Message);
         }
         finally
         {
+            CancelButton.Visibility = Visibility.Collapsed;
             SetBusy(false);
             FetchLabel.Text = _api == null ? "Fetch & compare" : "Fetch again";
         }
     }
+
+    private SyncStage[] AllStages => new[] { _nhlRosters, _ahlRosters, _capPages, _linePages, _ahlSizes, _nhlBios, _ahlBios, _leftPages,
+                                             _compareStage, _placeStage, _contractsStage, _positionsStage, _picksStage, _linesStage };
 
     /// <summary>Reads every NHL team's CapWages page. All or nothing (half a league is never compared); never throws.</summary>
     private async Task FetchCapPagesAsync()
@@ -538,7 +646,8 @@ public partial class RosterSyncView : UserControl
             int done = 0;
             var progress = new Progress<string>(t => _capPages.Update(StageState.Running, $"{++done}/{CapWagesApi.Teams.Length} · {t}"));
             var sink = (IProgress<string>)progress;
-            _cap = await Task.Run(() => CapWagesApi.AllTeamsAsync(t => sink.Report(t)));
+            var ct = Ct;
+            _cap = await Task.Run(() => CapWagesApi.AllTeamsAsync(t => sink.Report(t), ct));
             _capPages.Update(StageState.Done, $"{_cap.Count} teams read");
             await SaveRetainedNotesAsync();
         }
@@ -578,7 +687,8 @@ public partial class RosterSyncView : UserControl
             int done = 0;
             var progress = new Progress<string>(t => _linePages.Update(StageState.Running, $"{++done}/32 · {t}"));
             var sink = (IProgress<string>)progress;
-            _lines = await Task.Run(() => DailyFaceoffApi.AllTeamsAsync(t => sink.Report(t)));
+            var ct = Ct;
+            _lines = await Task.Run(() => DailyFaceoffApi.AllTeamsAsync(t => sink.Report(t), ct));
             int failed = _lines.Count(t => t.Error != null);
             if (failed == _lines.Count) _linePages.Update(StageState.Failed, _lines.FirstOrDefault().Error ?? "no teams");
             else _linePages.Update(StageState.Done, $"{_lines.Count - failed} teams read" + (failed > 0 ? $", {failed} failed" : ""));
@@ -608,15 +718,16 @@ public partial class RosterSyncView : UserControl
             if (rows.Count > 0) stage.Update(StageState.Running, $"0/{rows.Count}");
             foreach (var r in rows)
             {
+                Ct.ThrowIfCancellationRequested();
                 try
                 {
-                    r.Change.Bio = await MissingPlayers.BioAsync(r.Change);
+                    r.Change.Bio = await MissingPlayers.BioAsync(r.Change, Ct);
                     if (r.Change.Bio != null && BioKey(r.Change) is { } key) _bios[key] = r.Change.Bio;
                     r.BioLoaded();
                 }
-                catch (Exception) { bad++; }
+                catch (Exception) when (!Ct.IsCancellationRequested) { bad++; }
                 stage.Update(StageState.Running, $"{++done}/{rows.Count}");
-                await Task.Delay(150);
+                await Task.Delay(150, Ct);
             }
             failed += bad;
             int with = all.Count(r => r.Change.Bio != null);
@@ -636,15 +747,21 @@ public partial class RosterSyncView : UserControl
     private async Task CompareAsync()
     {
         var db = await _mods.OpenDbAsync(Roster.Database);
-        bool sizes = SizesBox.IsChecked == true;
+        const bool sizes = true; // a sync always includes heights and weights
+        // a re-compare (after Apply) whose AHL players' CapWages sizes weren't read: read them now
+        if (_fetched && _ahlFeed != null && _cap != null && !_ahlSized)
+            await UseCapWagesForAhlAsync();
+        _compareStage.Update(StageState.Running, "comparing…");
         var api = _api;
         var ahl = _ahl;
+        // players left on AHL teams no roster list has: only with CapWages, which is what places them
+        bool stragglers = CapOn && _cap != null;
         // One combined compare (AHL first, NHL second, one shared matched set — see CompareCombined). An AHL compare
         // failure must not wipe the NHL rows: fall back to the NHL compare alone and remember the error.
         List<SyncChange> changes;
         if (ahl != null)
         {
-            try { var (combined, skipped) = await Task.Run(() => RosterSync.CompareCombined(db, api, ahl, sizes)); changes = combined; _ahlSkipped = skipped; _ahlError = null; }
+            try { var (combined, skipped) = await Task.Run(() => RosterSync.CompareCombined(db, api, ahl, sizes, stragglers)); changes = combined; _ahlSkipped = skipped; _ahlError = null; }
             catch (Exception ex) { _ahlError = ex.Message; changes = await Task.Run(() => RosterSync.Compare(db, api, sizes)); }
         }
         else
@@ -654,10 +771,98 @@ public partial class RosterSyncView : UserControl
         foreach (var c in changes)
             if (c.Kind == SyncKind.Missing && BioKey(c) is { } key && _bios.TryGetValue(key, out var bio)) { c.Bio = bio; c.Selected = c.CanCreate; }
         _rows = changes.Select(PlayerRow).ToList();
-        // a re-compare after the fetch (sizes, AHL, after Apply): CapWages and DailyFaceoff are already read
-        if (_fetched) HoldNhlPlayers();
+        int Count(SyncKind k) => changes.Count(c => c.Kind == k);
+        _compareStage.Update(_ahlError != null ? StageState.Failed : StageState.Done,
+            (_ahlError != null ? "AHL compare failed: " + _ahlError + " · " : "") +
+            $"{Count(SyncKind.Move)} trades, {Count(SyncKind.Join)} call-ups, {Count(SyncKind.Update)} info, {Count(SyncKind.Left)} off a roster, {Count(SyncKind.Missing)} not in game");
+        // a re-compare after the fetch (after Apply): CapWages and DailyFaceoff are already read
         _abbrOf = RosterSync.TeamIndex(db).GroupBy(kv => kv.Value).ToDictionary(g => g.Key, g => g.First().Key);
+        if (_fetched) { HoldNhlPlayers(); await PlaceLeftAsync(db); }
         ApplyFilter();
+    }
+
+    /// <summary>The AHL rosters as TheAHL.com gave them; <see cref="_ahl"/> is these with CapWages' details when CapWages is read.</summary>
+    private List<(AhlTeam Team, List<AhlPlayer> Players)> _ahlFeed;
+    /// <summary>Whether <see cref="_ahl"/> has CapWages' heights and weights (read only when sizes are compared).</summary>
+    private bool _ahlSized;
+
+    /// <summary>
+    /// The AHL rosters with CapWages' birth dates (and, when sizes are compared, heights and weights from the players'
+    /// CapWages pages, kept a day on this machine). TheAHL.com's feed is left with only who is where and the numbers.
+    /// </summary>
+    private async Task UseCapWagesForAhlAsync()
+    {
+        if (_ahlFeed == null) return;
+        var cap = CapOn ? _cap : null;
+        if (cap == null) { _ahl = _ahlFeed; _ahlSized = false; _ahlSizes.Update(StageState.Failed, "CapWages not read: TheAHL.com's details used"); return; }
+        _ahl = AhlCapWages.Enrich(_ahlFeed, cap);
+        int onCap = _ahl.Sum(r => r.Players.Count(p => p.CapSlug.Length > 0)), all = _ahl.Sum(r => r.Players.Count);
+        var progress = new Progress<(int Done, int Total)>(x => _ahlSizes.Update(StageState.Running, $"{x.Done}/{x.Total} pages"));
+        var sink = (IProgress<(int, int)>)progress;
+        var enriched = _ahl;
+        var ct = Ct;
+        _ahlSizes.Update(StageState.Running, $"0/{onCap} pages");
+        try
+        {
+            _ahl = await Task.Run(() => AhlCapWages.SizesAsync(enriched, (d, t) => sink.Report((d, t)), ct));
+            _ahlSized = true;
+            _ahlSizes.Update(StageState.Done, $"{onCap} of {all} on CapWages");
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested) { _ahlSizes.Update(StageState.Failed, ex.Message); }
+    }
+
+    /// <summary>CapWages player pages read for "left the NHL" players (slug → stats), kept until the next fetch.</summary>
+    private readonly Dictionary<string, CapPage> _leftStats = new();
+    /// <summary>Where each "left the NHL" player goes (LeftNhl.Plan), by game id; empty without CapWages.</summary>
+    private Dictionary<int, LeftPlan> _leftPlans = new();
+
+    /// <summary>
+    /// Places the "left the NHL" rows that aren't held from CapWages (LeftNhl): a player in the minors goes to his team's
+    /// affiliate, a junior or European player to his latest club (read from his player page, once per fetch), a player no
+    /// one has under contract is released. A placed row is ticked and applied without review; the rest stay for review.
+    /// </summary>
+    private async Task PlaceLeftAsync(T3Db db = null)
+    {
+        _leftPlans = new Dictionary<int, LeftPlan>();
+        var cap = CapOn ? _cap : null;
+        var left = _rows.Where(r => r.Change.Kind == SyncKind.Left && r.Change.Hold == null).ToList();
+        if (cap == null) { _leftPages.Update(StageState.Failed, "CapWages not read"); _placeStage.Update(StageState.Failed, "CapWages not read"); return; }
+        if (left.Count == 0 || _mods == null) { _leftPages.Update(StageState.Done, "none needed"); _placeStage.Update(StageState.Done, "none"); return; }
+        var ct = Ct;
+        try
+        {
+            db ??= await _mods.OpenDbAsync(Roster.Database);
+            var changes = left.Select(r => r.Change).ToList();
+            // every row: an AHL player the game lacks may be the straggler under another spelling (LeftNhl's namesake check)
+            var everything = _rows.Select(r => r.Change).ToList();
+            var needed = LeftNhl.PagesNeeded(db, changes, cap).Where(s => !_leftStats.ContainsKey(s)).ToList();
+            int done = 0;
+            _leftPages.Update(StageState.Running, $"0/{needed.Count} pages");
+            foreach (var slug in needed)
+            {
+                ct.ThrowIfCancellationRequested();
+                bool cached = CapWagesApi.IsCached(slug);
+                // null: CapWages has no such page (kept, so it isn't asked again); an error leaves it unread
+                try { _leftStats[slug] = await CapWagesApi.PageAsync(slug, ct); }
+                catch (Exception) when (!ct.IsCancellationRequested) { }
+                _leftPages.Update(StageState.Running, $"{++done}/{needed.Count} pages");
+                if (!cached) await Task.Delay(300, ct);
+            }
+            _leftPages.Update(StageState.Done, $"{_leftStats.Count(kv => kv.Value != null)} pages read for {left.Count} players");
+            _placeStage.Update(StageState.Running, "placing…");
+            _leftPlans = await Task.Run(() => LeftNhl.Plan(db, everything, cap, _leftStats));
+            LeftNhl.Use(changes, _leftPlans);
+            foreach (var r in left) { r.Restore(r.Change.Selected); r.Replaced(); r.NoteChanged(); }
+            int held = left.Count(r => r.Change.Hold != null), released = left.Count(r => r.Change.Release),
+                moved = left.Count(r => r.Change.Hold == null && !r.Change.Release && r.Change.Settled), review = left.Count - held - released - moved;
+            _placeStage.Update(StageState.Done, $"{moved} moved, {released} released, {held} kept, {review} to review");
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _leftPlans = new Dictionary<int, LeftPlan>();
+            _placeStage.Update(StageState.Failed, ex.Message);
+        }
+        SetButtons();
     }
 
     /// <summary>
@@ -689,7 +894,9 @@ public partial class RosterSyncView : UserControl
             var why = new List<string>();
             if (onCap.TryGetValue(abbr, out var capNames) && capNames.TryGetValue(k, out var section))
                 why.Add(section == "inactive" ? $"CapWages has him on {abbr}'s injured or inactive list" : $"CapWages has him on {abbr}'s NHL roster");
-            if (inLineup.TryGetValue(abbr, out var lineup) && lineup.Contains(k)) why.Add($"he's in {abbr}'s DailyFaceoff lineup");
+            if (inLineup.TryGetValue(abbr, out var lineup) && lineup.Contains(k)
+                // CapWages has him in that team's minors: the lineup is out of date (LineupCallUps.SentDown)
+                && !LineupCallUps.SentDown(cap, abbr, c.Name)) why.Add($"he's in {abbr}'s DailyFaceoff lineup");
             if (why.Count == 0) continue;
             c.Hold = $"Held: {string.Join(", and ", why)}. {(c.IsAhl ? "TheAHL.com" : "NHL.com")}'s roster list is behind, so he stays on {abbr}.";
             r.Restore(false);
@@ -751,13 +958,14 @@ public partial class RosterSyncView : UserControl
         var ahl = _ahl;
         var cap = _cap;
         var lines = _lines;
-        bool sizes = SizesBox.IsChecked == true;
+        const bool sizes = true; // a sync always includes heights and weights
         var picked = PickedMoves();
         var toCreate = PickedCreates();
         var posTicks = _positionRows.ToDictionary(r => r.Pos.GameId, r => r.Selected);
         var lineupTicks = _lineupRows.ToDictionary(r => r.Change.GameId, r => r.Selected);
         // the list's roster changes, compared against this same game database: no need to compare the rosters again
         var compared = _rows.Select(r => r.Change).ToList();
+        var leftPlans = _leftPlans;
         // a tick's check looks for lineup call-ups on its own teams, and still makes the ticked ones elsewhere
         var lineupLines = full || lines == null ? lines : lines.Where(l => teams.Contains(l.Abbr)
             || _lineupRows.Any(r => r.Selected && _abbrOf.TryGetValue(r.Change.ToTeam, out var a) && a == l.Abbr)).ToList();
@@ -766,7 +974,7 @@ public partial class RosterSyncView : UserControl
             var db = await _mods.OpenDbAsync(Roster.Database);
             var result = await Task.Run(() =>
             {
-                var players = SyncPlan.ApplyPlayers(db, api, ahl, sizes, picked, toCreate, capOn ? cap : null, compared);
+                var players = SyncPlan.ApplyPlayers(db, api, ahl, sizes, picked, toCreate, capOn ? cap : null, compared, leftPlans);
                 // lineup players the NHL's roster lists missed, called up as ticked before anything else is compared
                 var lineup = linesOn || capOn ? SyncPlan.ApplyLineupCallUps(db, lineupLines, api, ahl, capOn ? cap : null, lineupTicks, othersByDefault: true).CallUps : null;
                 var contracts = capOn ? ContractSync.Compare(db, cap).Where(c => !players.Created.Contains(c.GameId)).ToList() : null;
@@ -781,7 +989,7 @@ public partial class RosterSyncView : UserControl
                 var owners = capOn && full ? PickOwners.FromCapWages(cap, db) : null;
                 var pickResult = capOn && full ? PickSync.Compare(db, owners.Picks) : null;
                 var names = namesOn && full ? NameCalls.Compare(db) : null;
-                var lineChanges = linesOn ? LineSync.Compare(db, full ? lines : lines.Where(l => teams.Contains(l.Abbr)).ToList()) : null;
+                var lineChanges = linesOn ? LineSync.Compare(db, full ? lines : lines.Where(l => teams.Contains(l.Abbr)).ToList(), capOn ? cap : null) : null;
                 return (contracts, positions, owners, pickResult, names, lineChanges, lineup);
             });
             if (run != _planRun) return;
@@ -952,12 +1160,14 @@ public partial class RosterSyncView : UserControl
         var all = _rows.Concat(_lineupRows).Concat(_nameRows).Concat(_contractRows).Concat(_positionRows).Concat(_pickRows).Concat(_lineRows).ToList();
         int held = all.Count(r => r.IsHeld), review = all.Count(r => r.NeedsReview), auto = all.Count(r => !r.IsHeld && !r.NeedsReview && r.Selected);
         string lead = $"{auto} changes go in automatically, {review} need your review (the Review list)" + (held > 0 ? $", {held} held (other sources have the player where he is)" : "") + ". ";
-        int N(SyncKind k) => _rows.Count(r => !r.IsHeld && !r.Change.IsAhl && r.Change.Kind == k);
-        int A(SyncKind k) => _rows.Count(r => !r.IsHeld && r.Change.IsAhl && r.Change.Kind == k);
+        int N(SyncKind k) => _rows.Count(r => !r.IsHeld && !r.Change.IsAhl && !r.Change.FromAhl && r.Change.Kind == k);
+        int A(SyncKind k) => _rows.Count(r => !r.IsHeld && (r.Change.IsAhl || r.Change.FromAhl) && r.Change.Kind == k);
+        int released = _rows.Count(r => !r.IsHeld && r.Change.Release);
         string s = lead + $"{N(SyncKind.Move)} trades, {N(SyncKind.Join)} call-ups/signings, {N(SyncKind.Update)} info changes, " +
                    $"{N(SyncKind.Left)} no longer on an NHL roster, {N(SyncKind.Missing)} not in the game.";
-        if (_rows.Any(r => r.Change.IsAhl))
-            s += $" AHL: {A(SyncKind.Join)} call-ups, {A(SyncKind.Move)} moves, {A(SyncKind.Update)} info changes, {A(SyncKind.Missing)} not in the game.";
+        if (_rows.Any(r => r.Change.IsAhl || r.Change.FromAhl))
+            s += $" AHL: {A(SyncKind.Join)} call-ups, {A(SyncKind.Move)} moves, {A(SyncKind.Update)} info changes, {A(SyncKind.Left)} no longer on an AHL roster, {A(SyncKind.Missing)} not in the game.";
+        if (released > 0) s += $" {released} released to free agency (no contract or club on CapWages).";
         if (_nameRows.Count > 0) s += $" {_nameRows.Count} player{(_nameRows.Count == 1 ? "" : "s")} can get a play-by-play name call.";
         return s + CapCounts() + LinesCounts();
     }
@@ -1033,91 +1243,6 @@ public partial class RosterSyncView : UserControl
 
     private void OnFilter(object sender, RoutedEventArgs e) => ApplyFilter();
 
-    // ---------------------------------------------------------------- ticking a source after a fetch
-
-    private async void OnSizes(object sender, RoutedEventArgs e)
-    {
-        if (_api == null || _busy) return;
-        SetBusy(true);
-        try { await CompareAsync(); await PlanAsync(); ShowSummary(); }
-        finally { SetBusy(false); }
-    }
-
-    /// <summary>Ticking/unticking TheAHL after a fetch: read the 32 AHL rosters (not the NHL's again), or drop the AHL rows; then the bios and the check.</summary>
-    private async void OnAhl()
-    {
-        if (!AhlOn) { _ahlRosters.Update(StageState.Off, "off"); _ahlBios.Update(StageState.Off, "off"); }
-        else if (!_fetched) { _ahlRosters.Update(StageState.Off); _ahlBios.Update(StageState.Off); }
-        if (_api == null || _busy || !_fetched) return;
-        SetBusy(true);
-        try
-        {
-            if (AhlOn && _ahl == null)
-            {
-                try
-                {
-                    int ahlDone = 0;
-                    _ahlRosters.Update(StageState.Running, "starting…");
-                    _ahlBios.Update(StageState.Waiting, "after rosters");
-                    var ahlProgress = new Progress<string>(t => _ahlRosters.Update(StageState.Running, $"{++ahlDone}/32 · {t}"));
-                    var ahlSink = (IProgress<string>)ahlProgress;
-                    _ahl = await Task.Run(() => AhlApi.AllRostersAsync(t => ahlSink.Report(t)));
-                    _ahlError = null;
-                }
-                catch (Exception ex) { _ahl = null; _ahlError = ex.Message; }
-            }
-            else if (!AhlOn) { _ahl = null; _ahlError = null; _ahlSkipped = new List<string>(); }
-            ShowPlanWaiting();
-            await CompareAsync();
-            ShowAhlStage();
-            _bioFailed = await LookUpBiosAsync();
-            await PlanAsync();
-            ShowSummary();
-        }
-        finally { SetBusy(false); }
-    }
-
-    /// <summary>Ticking/unticking CapWages after a fetch: read its pages (only if they haven't been) and check, or drop the contract and pick rows.</summary>
-    private async void OnCap()
-    {
-        if (!CapOn) { ShowCapStages(); ClearCap(keepPages: true); ApplyFilter(); }
-        else if (!_fetched) foreach (var s in new[] { _capPages, _contractsStage, _positionsStage, _picksStage }) s.Update(StageState.Off);
-        if (_mods == null || _busy || !_fetched) return;
-        SetBusy(true);
-        try
-        {
-            if (CapOn)
-            {
-                ShowPlanWaiting();
-                if (_cap == null) await FetchCapPagesAsync();
-                if (_cap == null) ShowCapStages();
-            }
-            await PlanAsync();
-            ShowSummary();
-        }
-        finally { SetBusy(false); }
-    }
-
-    /// <summary>Ticking/unticking DailyFaceoff after a fetch: read its pages (only if they haven't been) and check, or drop the lines rows.</summary>
-    private async void OnLines()
-    {
-        if (!LinesOn) { ShowLinesStage(); _lineRows = new List<SyncRow>(); _lineupRows = new List<SyncRow>(); ApplyFilter(); }
-        else if (!_fetched) { _linePages.Update(StageState.Off); _linesStage.Update(StageState.Off); }
-        if (_mods == null || _busy || !_fetched) return;
-        SetBusy(true);
-        try
-        {
-            if (LinesOn)
-            {
-                ShowPlanWaiting();
-                if (_lines == null) await FetchLinePagesAsync();
-            }
-            await PlanAsync();
-            ShowSummary();
-        }
-        finally { SetBusy(false); }
-    }
-
     private void OnTickAll(object sender, RoutedEventArgs e) { foreach (var r in Shown) r.Selected = true; }
     private void OnTickNone(object sender, RoutedEventArgs e) { foreach (var r in Shown) r.Selected = false; }
 
@@ -1172,7 +1297,8 @@ public partial class RosterSyncView : UserControl
         var picks = _picks;
         var cap = _cap;
         var lines = _lines;
-        bool sizes = SizesBox.IsChecked == true;
+        var leftPlans = _leftPlans;
+        const bool sizes = true; // a sync always includes heights and weights
         int totalPicked = picked.Count + toCreate.Count + pickedPicks.Count + pickedContracts.Count + pickedLines.Count + pickedPositions.Count + pickedNames.Count + pickedLineup;
         StatusChanged?.Invoke($"Writing {totalPicked} roster change(s) into the game…");
         string summary = null;
@@ -1180,7 +1306,7 @@ public partial class RosterSyncView : UserControl
         {
             await _mods.SaveDbAsync(Roster.Database, db =>
             {
-                var players = SyncPlan.ApplyPlayers(db, api, ahl, sizes, picked, toCreate, contractsOn ? cap : null);
+                var players = SyncPlan.ApplyPlayers(db, api, ahl, sizes, picked, toCreate, contractsOn ? cap : null, left: leftPlans);
                 var summaries = players.Summaries;
                 var created = players.Created;
                 // lineup call-ups right after the roster changes, matched afresh; only the ticked rows go in

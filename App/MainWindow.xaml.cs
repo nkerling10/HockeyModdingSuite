@@ -95,6 +95,13 @@ public partial class MainWindow : Window
         VideoPage.GoToMods += () => NavMods.IsChecked = true;
         if (App.Args.TryGetValue("page", out var page))
             (page switch { "settings" => NavSettings, "play" => NavPlay, "textures" => NavTextures, "sounds" => NavSounds, "videos" => NavVideos, "mods" => NavMods, "roster" => NavRoster, "uniforms" => NavUniforms, "studio" => NavStudio, "unused" => NavUnused, "scorebug" => NavScorebug, "database" => NavDatabase, "tuning" => NavTuning, "beapro" => NavBeAPro, "franchise" => NavFranchise, "arenas" => NavArenas, "teams" => NavTeams, _ => NavExplorer }).IsChecked = true;
+        // --winsize 1280x720: the window at that size (scripted screenshots of small screens, e.g. a remote desktop)
+        if (App.Args.TryGetValue("winsize", out var ws) && ws.Split('x') is [var ww, var wh] && double.TryParse(ww, out double w) && double.TryParse(wh, out double h))
+        {
+            WindowState = WindowState.Normal;
+            Width = w;
+            Height = h;
+        }
         if (App.Args.TryGetValue("scroll", out var scroll) && double.TryParse(scroll, out double offset))
         {
             PlayPage.UpdateLayout();
@@ -1195,6 +1202,13 @@ public partial class MainWindow : Window
         }
         // --rbaseline DIR: NHL Sync's base roster card previewing that roster (nothing is written)
         if (a.TryGetValue("rbaseline", out var rbase)) { await Task.Delay(2500); File.WriteAllText(Path.Combine(Path.GetTempPath(), "hms-baseline.txt"), await RosterPage.BaselinePreviewAsync(rbase) ?? ""); await Task.Delay(500); }
+        // --rsyncpanels progress,details: NHL Sync's progress list and step 1's details open (no fetch)
+        if (a.TryGetValue("rsyncpanels", out var panels))
+        {
+            await Task.Delay(1500);
+            await RosterPage.SyncOpenPanels(panels.Contains("progress"), panels.Contains("details"));
+            await Task.Delay(500);
+        }
         if (a.TryGetValue("rsync", out var rsync))
         {
             await Task.Delay(2500);
@@ -1226,6 +1240,8 @@ public partial class MainWindow : Window
             await Task.Delay(3000);
             // --rretained: scroll the profile to the retained salary section
             if (a.ContainsKey("rretained")) { RosterPage.ShowRetained(); await Task.Delay(800); }
+            // --ridentity: scroll the profile to its identity section
+            if (a.ContainsKey("ridentity")) { RosterPage.ShowIdentity(); await Task.Delay(800); }
         }
         if (a.TryGetValue("tsearch", out var tsearch))
             TexturePage.SetSearch(tsearch);

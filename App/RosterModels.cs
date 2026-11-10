@@ -41,6 +41,7 @@ public static class RosterVisuals
         ["c_puckplayfrequency"] = "Puck play freq.", ["c_breakaway"] = "Breakaway", ["c_paddledown"] = "Paddle down",
         ["firstname"] = "First name", ["lastname"] = "Last name", ["birthplace"] = "Birthplace", ["nickname"] = "Nickname",
         ["jersey"] = "Jersey", ["height"] = "Height (in)", ["weight"] = "Weight (lb)",
+        ["year"] = "Birth year", ["month"] = "Birth month", ["day"] = "Birth day",
         ["positionprimary"] = "Primary position", ["positionsecondary"] = "Secondary position", ["position"] = "Position",
         ["draftyear"] = "Draft year", ["draftround"] = "Draft round", ["draftposition"] = "Draft pick", ["draftteam"] = "Drafted by",
         ["contractdollars"] = "Salary ($)", ["contractlength"] = "Years remaining",

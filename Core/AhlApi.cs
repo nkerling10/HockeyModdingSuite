@@ -9,6 +9,9 @@ public sealed record AhlPlayer(int Id, string First, string Last, int Number, st
                                int HeightIn, int WeightLb, DateTime? Born, string BirthPlace, string TeamName)
 {
     public string Name => $"{First} {Last}";
+    /// <summary>His CapWages player page when AhlCapWages found him there ("" when CapWages doesn't list him: a tryout or
+    /// ECHL deal). With it, his birth date, height and weight are CapWages', not the AHL feed's.</summary>
+    public string CapSlug { get; init; } = "";
 }
 
 /// <summary>One AHL team, as the feed's teamsForSeason view lists it (id, feed team_code, name).</summary>

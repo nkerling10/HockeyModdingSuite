@@ -13,6 +13,21 @@ namespace NHL27Kit.Core;
 /// </summary>
 public static class LineupCallUps
 {
+    /// <summary>
+    /// True when CapWages has this player in the team's minors (its non-roster list as "Minor", or its affiliate's AHL
+    /// contracts): a DailyFaceoff lineup that still has him with the NHL team is out of date, so it neither holds him
+    /// there, nor calls him up, nor keeps the team's lines from going in. Trey Taylor, 2026-11-10: in DAL's Nov 8 lineup,
+    /// on DAL's non-roster list as Minor, on the Texas Stars' roster.
+    /// </summary>
+    public static bool SentDown(IReadOnlyList<CapTeam> cap, string abbr, string name)
+    {
+        var t = cap?.FirstOrDefault(x => string.Equals(x.Abbr, abbr, StringComparison.OrdinalIgnoreCase));
+        if (t == null) return false;
+        string k = RosterSync.Norm(name);
+        return t.Players.Any(p => p.Section == "non-roster" && p.Status is "" or "Minor" or "Minors" or "AHL" && RosterSync.Norm(p.First + p.Last) == k)
+            || t.AhlPlayers.Any(p => RosterSync.Norm(p.First + p.Last) == k);
+    }
+
     public static List<SyncChange> Compare(T3Db db, IReadOnlyList<(string Abbr, LineTeam Team, string Error)> lines,
         IReadOnlyList<NhlPlayer> api, IReadOnlyList<(AhlTeam Team, List<AhlPlayer> Players)> ahl, IReadOnlyList<CapTeam> cap)
     {
@@ -56,7 +71,7 @@ public static class LineupCallUps
             {
                 if (!byName.TryGetValue(RosterSync.Norm(name), out var same) || same.Count != 1) continue;
                 var p = same[0];
-                if (onNhl.Contains(p.GameId) || !seen.Add(p.GameId)) continue;
+                if (onNhl.Contains(p.GameId) || SentDown(cap, lc.TeamAbbr, name) || !seen.Add(p.GameId)) continue;
                 int pi = p.RosterRow >= 0 ? (int)db.Get(rt, p.RosterRow, piField) : p.PlayerIndex;
                 var (from, jersey) = shown.TryGetValue(pi, out var s) ? s : (p.Team, -1);
                 if (from == lc.Team) continue;
@@ -100,11 +115,13 @@ public static class LineupCallUps
         string TeamName(int i) => roster.Teams.TryGetValue(i, out var tm) && !string.IsNullOrEmpty(tm.Name) ? tm.Name : $"team {i}";
         // players a roster list places are left to the roster compare
         var placed = new HashSet<int>();
+        var onNhlList = new Dictionary<int, string>();
         foreach (var a in api ?? Array.Empty<NhlPlayer>())
-            if (matcher.Find(a.First, a.Last, a.Born).Player is { } p) placed.Add(p.GameId);
+            if (matcher.Find(a.First, a.Last, a.Born).Player is { } p) { placed.Add(p.GameId); onNhlList.TryAdd(p.GameId, a.Team); }
+        var onAhlList = new HashSet<int>();
         foreach (var (_, players) in ahl ?? Array.Empty<(AhlTeam, List<AhlPlayer>)>())
             foreach (var a in players)
-                if (matcher.Find(a.First, a.Last, a.Born).Player is { } p) placed.Add(p.GameId);
+                if (matcher.Find(a.First, a.Last, a.Born).Player is { } p) { placed.Add(p.GameId); onAhlList.Add(p.GameId); }
         var rt = db.Table(Roster.RosterTable);
         var rf = rt.Fields.ToDictionary(x => x.Name);
         var seen = new HashSet<int>();
@@ -114,10 +131,28 @@ public static class LineupCallUps
             foreach (var cp in team.Players.Where(x => x.Section is "roster" or "inactive"))
             {
                 var (p, nameOnly) = matcher.Find(cp.First, cp.Last, cp.Born);
-                if (p == null || nameOnly || placed.Contains(p.GameId) || !seen.Add(p.GameId)) continue;
+                if (p == null || nameOnly) continue;
+                // on both this team's NHL.com list and an AHL list (the AHL compare wins those, since NHL.com also lists
+                // players assigned to the AHL): CapWages having him on the NHL roster settles it. Ryan Tverberg,
+                // 2026-11-10: on TOR's NHL.com list and CapWages roster (NHL), still on TheAHL's Marlies list.
+                bool tie = cp.Section == "roster" && onAhlList.Contains(p.GameId) && onNhlList.GetValueOrDefault(p.GameId) == team.Abbr;
+                if (placed.Contains(p.GameId) && !tie || !seen.Add(p.GameId)) continue;
                 int from = p.RosterRow >= 0 ? (int)db.Get(rt, p.RosterRow, rf["team"]) : p.Team;
                 if (from == to) continue;
                 string status = cp.Status.Length > 0 ? cp.Status : cp.Section;
+                if (tie)
+                {
+                    changes.Add(new SyncChange
+                    {
+                        Kind = nhlTeams.Contains(from) ? SyncKind.Move : SyncKind.Join,
+                        GameId = p.GameId, Name = p.Name, Position = p.PositionDisplay, RosterRow = p.RosterRow, BioRow = p.BioRow, PlayerIndex = p.PlayerIndex,
+                        FromTeam = from, ToTeam = to, FromTeamName = from >= 0 ? TeamName(from) : "Free agent", ToTeamName = TeamName(to),
+                        OldNumber = p.RosterRow >= 0 ? (int)db.Get(rt, p.RosterRow, rf["jersey"]) : -1,
+                        Lineup = $"On {team.Abbr}'s NHL.com roster and CapWages' {team.Abbr} roster ({status}); TheAHL.com still lists him with {(from >= 0 ? TeamName(from) : "an AHL team")}",
+                        Selected = true,
+                    });
+                    continue;
+                }
                 changes.Add(new SyncChange
                 {
                     Kind = nhlTeams.Contains(from) ? SyncKind.Move : SyncKind.Join,
