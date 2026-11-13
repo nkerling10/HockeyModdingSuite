@@ -14,6 +14,8 @@ public sealed class PackageSpec
     public string Version { get; set; }
     public LeagueSpec League { get; set; }
     public TeamBlockSpec TeamBlock { get; set; }
+    /// <summary>Optional: teams to retire when the team tables are full (see RecycleSpec).</summary>
+    public RecycleSpec RecycleTeams { get; set; }
     public List<TeamSpec> Teams { get; set; } = new();
     public PlayersSpec Players { get; set; }
     public RulesSpec Rules { get; set; } = new();
@@ -179,6 +181,16 @@ public sealed class TeamBlockSpec
 {
     public int First { get; set; }
     public int Last { get; set; }
+}
+
+/// <summary>Teams the package may retire when the team tables run out of room: rows of this league whose name matches
+/// the pattern and that own no players, highest index first, only as many as needed. Their team, strategy, arena,
+/// jersey, equipment and roster rows are removed (the package's mod entry restores them on removal).</summary>
+public sealed class RecycleSpec
+{
+    public int League { get; set; }
+    /// <summary>Regex on teamname; default: the online event teams "Circuit N Team M".</summary>
+    public string NamePattern { get; set; } = @"^Circuit \d+ Team \d+$";
 }
 
 public sealed class TeamSpec

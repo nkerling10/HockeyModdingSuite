@@ -20,6 +20,8 @@ public static class PackageCheck
         public Dictionary<string, NameSetChoice> NameSets { get; } = new();
         public Dictionary<string, int> LogoArt { get; } = new();
         public int LeagueArt { get; set; } = -1;
+        /// <summary>The art id the teams without a logo share (drawn from the league logo), or -1.</summary>
+        public int PlaceholderArt { get; set; } = -1;
         public bool Ok => Errors.Count == 0;
     }
 
@@ -32,6 +34,7 @@ public static class PackageCheck
 
         CheckRecipe(spec, r);
         CheckImages(spec, r);
+        Recycle(db, spec, r.Lines);                 // on this copy: the room and art ids below see the retired teams gone
         CheckTeams(db, spec, r);
         CheckRoom(db, spec, r);
         PreviewLogoArt(index, db, spec, r);
@@ -39,6 +42,59 @@ public static class PackageCheck
         PreviewStrings(loc, spec, r);
         PreviewNameSets(db, loc, spec, r);
         return r;
+    }
+
+    // ---------------------------------------------------------------- retiring teams for room
+
+    /// <summary>
+    /// When the team tables can't take the package's new teams, removes as many of spec.RecycleTeams' teams as needed
+    /// (its league, name pattern, no player of their own, highest index first): their rows in the team, strategy,
+    /// jersey, equipment and roster tables, and their arena row when no other team uses it. Returns their indexes.
+    /// </summary>
+    public static List<int> Recycle(T3Db db, PackageSpec spec, List<string> lines)
+    {
+        var done = new List<int>();
+        if (spec.RecycleTeams is not { } rc) return done;
+        var teams = db.Table("exhibitionteams");
+        int Int(T3Table t, int row, string f) => Convert.ToInt32(db.Get(t, row, F(t, f)));
+        var have = Valid(db, teams).Select(i => Int(teams, i, "index")).ToHashSet();
+        int need = spec.Teams.Count(t => !have.Contains(t.Index));
+        int Free(string n) => db.Table(n) is { } t ? t.Records - t.WrittenRecords : int.MaxValue;
+        int shortBy = need - new[] { "exhibitionteams", "exhibitionteamstrategies", "customonlineteamstrategies", "exhibitionarena" }.Min(Free);
+        if (shortBy <= 0) return done;
+        var bios = db.Table("exhibitionplayerbiotable");
+        var owners = bios == null ? new HashSet<int>() : Valid(db, bios).Select(i => Int(bios, i, "team")).ToHashSet();
+        var rx = new Regex(rc.NamePattern ?? ".*");
+        var picks = Valid(db, teams)
+            .Select(i => (Index: Int(teams, i, "index"), League: Int(teams, i, "league"), Arena: Int(teams, i, "arenaid"),
+                          Name: db.Get(teams, i, F(teams, "teamname"))?.ToString() ?? ""))
+            .Where(x => x.League == rc.League && rx.IsMatch(x.Name) && !owners.Contains(x.Index) && !spec.Teams.Any(t => t.Index == x.Index))
+            .OrderByDescending(x => x.Index).Take(shortBy).ToList();
+        if (picks.Count < shortBy) lines.Add($"recycle: only {picks.Count} of the {shortBy} teams needed match league {rc.League} / \"{rc.NamePattern}\"");
+        var arenaUsers = Valid(db, teams).GroupBy(i => Int(teams, i, "arenaid")).ToDictionary(g => g.Key, g => g.Count());
+        foreach (var p in picks)
+        {
+            foreach (var (table, key) in new[] { ("exhibitionteams", "index"), ("exhibitionteamstrategies", "index"), ("customonlineteamstrategies", "index"),
+                                                 ("stockteamjerseys", "teamid"), ("stockteamequipmenttable", "team"), ("stockgoalieequipment", "team"),
+                                                 ("exhibitionrostertable", "team"), ("customonlinerostertable", "team") })
+                RemoveWhere(db, table, key, p.Index);
+            if (arenaUsers.GetValueOrDefault(p.Arena) == 1) RemoveWhere(db, "exhibitionarena", "index", p.Arena);
+            done.Add(p.Index);
+        }
+        lines.Add($"Retired {done.Count} online event teams for room: {string.Join(", ", picks.Select(p => $"{p.Index} {p.Name}"))}");
+        return done;
+    }
+
+    private static void RemoveWhere(T3Db db, string table, string key, int value)
+    {
+        var t = db.Table(table);
+        var f = t?.Fields.FirstOrDefault(x => x.Name.Equals(key, StringComparison.OrdinalIgnoreCase));
+        if (f == null) return;
+        var rows = Enumerable.Range(0, t.WrittenRecords).ToList();
+        var gone = rows.Where(i => !db.IsInvalid(t, i) && Convert.ToInt32(db.Get(t, i, f)) == value).ToHashSet();
+        if (gone.Count == 0) return;
+        db.Reorder(t, rows.Where(i => !gone.Contains(i)).Concat(rows.Where(gone.Contains)).ToList());
+        db.SetWritten(t, t.WrittenRecords - gone.Count);
     }
 
     // ---------------------------------------------------------------- recipe
@@ -80,7 +136,8 @@ public static class PackageCheck
         foreach (var t in spec.Teams)
         {
             string dir = spec.TeamLogoFolder(t);
-            Image(spec.TeamLogoFile(t) ?? Path.Combine(dir, "logo.png"), $"{t.Code} logo", required: true, r);
+            if (spec.TeamLogoFile(t) == null) continue;                // no logo yet: the shared placeholder (PreviewLogoArt)
+            Image(spec.TeamLogoFile(t), $"{t.Code} logo", required: true, r);
             foreach (string opt in new[] { "logo_lightbg.png", "mono.png", "ice.png" })
                 Image(Path.Combine(dir, opt), $"{t.Code} {opt}", required: false, r);
         }
@@ -142,7 +199,10 @@ public static class PackageCheck
 
     private static void CheckRoom(T3Db db, PackageSpec spec, Report r)
     {
-        int n = spec.Teams.Count;
+        // only the teams not in the game yet need rows (an installed package's teams are taken down and re-added)
+        var teams = db.Table("exhibitionteams");
+        var have = Valid(db, teams).Select(i => Convert.ToInt32(db.Get(teams, i, F(teams, "index")))).ToHashSet();
+        int n = spec.Teams.Count(t => !have.Contains(t.Index));
         foreach (var (name, perTeam) in new[] { ("exhibitionteams", 1), ("exhibitionteamstrategies", 1), ("customonlineteamstrategies", 1),
                                                 ("exhibitionarena", 1), ("stockteamjerseys", 2), ("stockteamequipmenttable", 37), ("stockgoalieequipment", 4) })
         {
@@ -167,14 +227,22 @@ public static class PackageCheck
         var spare = map.Menu.Where(kv => !used.Contains(kv.Key) && map.Ice.ContainsKey(kv.Key))
                             .OrderByDescending(kv => kv.Value.Count).ThenBy(kv => kv.Key).Select(kv => (kv.Key, kv.Value.Count)).ToList();
         r.Lines.Add($"Spare logo art ids (logo textures + centre ice, no team uses them): {spare.Count}; a full set has {full} menu styles.");
+        // teams with a logo get their own id; teams without one share a single placeholder id (the league logo)
         int k = 0;
-        foreach (var t in spec.Teams)
+        foreach (var t in spec.Teams.Where(t => spec.TeamLogoFile(t) != null))
         {
             if (k >= spare.Count) { r.Errors.Add($"{t.Code}: no spare logo art id left."); continue; }
             var (art, styles) = spare[k++];
             r.LogoArt[t.Code] = art;
             r.Lines.Add($"{t.Code}: logo art id {art} ({styles} menu styles + centre ice)");
         }
+        var bare = spec.Teams.Where(t => spec.TeamLogoFile(t) == null).ToList();
+        if (bare.Count == 0) return;
+        if (k >= spare.Count) { r.Errors.Add($"No spare logo art id left for the placeholder logo ({bare.Count} teams without a logo)."); return; }
+        var (ph, phStyles) = spare[k];
+        foreach (var t in bare) r.LogoArt[t.Code] = ph;
+        r.PlaceholderArt = ph;
+        r.Lines.Add($"{bare.Count} teams without a logo share placeholder art id {ph} ({phStyles} menu styles), drawn from the league logo: {string.Join(", ", bare.Select(t => t.Code))}");
     }
 
     private static void PreviewLeagueArt(AssetIndex index, T3Db db, Report r)

@@ -293,12 +293,12 @@ public static class NcaaCodeMods
                 if (tb.Length > 7 || t.Any(c => c > 127)) throw new ArgumentException($"Team abbreviation '{t}' is longer than 7 ASCII characters.");
                 etab.AddRange(tb); etab.AddRange(new byte[8 - tb.Length]);
             }
-            // the schools' display names for the offer messages (part 11), 24 bytes each
+            // the schools' display names for the offer messages (part 11), P11SchoolLen bytes each (NUL included)
             for (int i = 0; i <= last - first; i++)
             {
                 var nb = System.Text.Encoding.UTF8.GetBytes(schools != null && i < schools.Count ? schools[i] ?? "" : "");
-                if (nb.Length > 23) throw new ArgumentException($"School name '{schools[i]}' is longer than 23 bytes.");
-                etab.AddRange(nb); etab.AddRange(new byte[24 - nb.Length]);
+                if (nb.Length >= NcaaPart8Code.P11SchoolLen) throw new ArgumentException($"School name '{schools[i]}' is longer than {NcaaPart8Code.P11SchoolLen - 1} bytes.");
+                etab.AddRange(nb); etab.AddRange(new byte[NcaaPart8Code.P11SchoolLen - nb.Length]);
             }
             // (the tables live in part 11's cave, built below)
             if (NcaaPart8Code.P10EntryTable + etab.Count > NcaaPart8Code.P11RunEnd) throw new InvalidOperationException($"Too many classes / teams for the code cave ({entries.Count} classes, {last - first + 1} teams).");

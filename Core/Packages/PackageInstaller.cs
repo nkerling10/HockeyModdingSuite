@@ -78,6 +78,7 @@ public static class PackageInstaller
         var legacy = new Legacy(index);
         var db = legacy.OpenDb(PackageCheck.GameDb);
         var loc = legacy.OpenDb(PackageCheck.LocDb);
+        PackageCheck.Recycle(db, spec, r.Lines);
         Resolve(db, loc, spec, check, resolved, r);
 
         // 3. the recipe, in memory
@@ -202,10 +203,23 @@ public static class PackageInstaller
         var usedArt = Valid(db, teams).Select(i => Int(db, teams, i, "artid")).ToHashSet();
         var usedAbbr = Valid(db, teams).Select(i => db.Get(teams, i, F(teams, "artabbr"))?.ToString()?.ToUpperInvariant()).ToHashSet();
         var sets = PackageCheck.NameSets(loc);
+        // logo art: a team with a logo keeps its earlier id while it's free and its own; teams without one share the
+        // placeholder id (a free id none of the logo teams holds)
+        var withLogo = spec.Teams.Where(t => spec.TeamLogoFile(t) != null).ToList();
+        var kept = new HashSet<int>();
+        foreach (var t in withLogo)
+        {
+            if (res.LogoArt.TryGetValue(t.Code, out int a) && !usedArt.Contains(a) && kept.Add(a)) continue;
+            if (check.LogoArt.TryGetValue(t.Code, out int pick)) { res.LogoArt[t.Code] = pick; kept.Add(pick); }
+        }
+        if (check.PlaceholderArt >= 0)
+        {
+            int ph = !kept.Contains(check.PlaceholderArt) ? check.PlaceholderArt
+                   : check.LogoArt.Values.Concat(withLogo.Select(t => check.LogoArt.GetValueOrDefault(t.Code, -1))).First(v => v >= 0 && !kept.Contains(v) && !usedArt.Contains(v));
+            foreach (var t in spec.Teams.Where(t => spec.TeamLogoFile(t) == null)) res.LogoArt[t.Code] = ph;
+        }
         foreach (var t in spec.Teams)
         {
-            if (!(res.LogoArt.TryGetValue(t.Code, out int a) && !usedArt.Contains(a)) && check.LogoArt.TryGetValue(t.Code, out int pick))
-                res.LogoArt[t.Code] = pick;
             // an earlier name set stays while it's free and scores at least as well as the check's pick
             bool keep = res.NameSets.TryGetValue(t.Code, out var s) && !usedAbbr.Contains(s)
                         && sets.TryGetValue(s.ToUpperInvariant(), out var set) && PackageCheck.Fit(loc, s.ToUpperInvariant(), set, t, spec.NameSets?.SchoolOnly == true) is { } fit
@@ -378,11 +392,15 @@ public static class PackageInstaller
             }
             catch { /* not a texture header we read */ }
         }
+        var drawn = new HashSet<int>();
         foreach (var t in spec.Teams)
         {
             string main = spec.TeamLogoFile(t);
+            bool placeholder = main == null;
+            main ??= spec.LeagueLogoFile();                              // no logo yet: the shared placeholder, the league logo
             if (main == null || !res.LogoArt.TryGetValue(t.Code, out int art)) { r.Warnings.Add($"{t.Code}: no logo file or art id, logos left as they are"); continue; }
-            string dir = spec.TeamLogoFolder(t);
+            if (!drawn.Add(art)) continue;                               // the placeholder id is drawn once
+            string dir = placeholder ? Path.GetDirectoryName(main) : spec.TeamLogoFolder(t);
             var img = Png.Load(main);
             var light = File.Exists(Path.Combine(dir, "logo_lightbg.png")) ? Png.Load(Path.Combine(dir, "logo_lightbg.png")) : img;
             var mono = File.Exists(Path.Combine(dir, "mono.png")) ? Png.Load(Path.Combine(dir, "mono.png")) : (Png.Silhouette(img.Rgba), img.W, img.H);
@@ -394,7 +412,8 @@ public static class PackageInstaller
                 if (PlanOne(index, logo.Name, src, locations, tocs, patches, r, st)) n++;
             }
             if (map.Ice.TryGetValue(art, out var iceLogo) && PlanOne(index, iceLogo.Name, ice, locations, tocs, patches, r, st)) n++;
-            r.Lines.Add($"{t.Code}: {n} logo textures on art id {art}");
+            r.Lines.Add(placeholder ? $"placeholder (league logo): {n} logo textures on art id {art}, shared by the teams without a logo"
+                                    : $"{t.Code}: {n} logo textures on art id {art}");
         }
         string league = spec.LeagueLogoFile();
         if (league != null && res.LeagueArt >= 0)
