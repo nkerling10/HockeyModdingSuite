@@ -20,27 +20,35 @@ public static class PackageCheck
         public Dictionary<string, NameSetChoice> NameSets { get; } = new();
         public Dictionary<string, int> LogoArt { get; } = new();
         public int LeagueArt { get; set; } = -1;
+        /// <summary>Spare league logo art id per league id (the package's league and its extra leagues).</summary>
+        public Dictionary<int, int> LeagueArts { get; } = new();
         /// <summary>The art id the teams without a logo share (drawn from the league logo), or -1.</summary>
         public int PlaceholderArt { get; set; } = -1;
         public bool Ok => Errors.Count == 0;
     }
 
-    public static Report Run(AssetIndex index, PackageSpec spec)
+    /// <param name="prior">Earlier install's choices (resolved.json): a team keeps its name set and logo art id when
+    /// they're still free and fit, and the other teams pick around them, so no two teams share either.</param>
+    public static Report Run(AssetIndex index, PackageSpec spec, PackageInstaller.Resolved prior = null)
     {
         var r = new Report();
         var legacy = new Legacy(index);
         var db = legacy.OpenDb(GameDb);
         var loc = legacy.OpenDb(LocDb);
 
-        CheckRecipe(spec, r);
+        foreach (var g in spec.Groups) CheckRecipe(g, r);
+        foreach (var dup in spec.AllTeams.GroupBy(t => t.Code, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+            r.Errors.Add($"Team code {dup.Key} is used {dup.Count()} times.");
+        foreach (var dup in spec.AllTeams.GroupBy(t => t.Index).Where(g => g.Count() > 1))
+            r.Errors.Add($"Team index {dup.Key} is used {dup.Count()} times.");
         CheckImages(spec, r);
         Recycle(db, spec, r.Lines);                 // on this copy: the room and art ids below see the retired teams gone
         CheckTeams(db, spec, r);
         CheckRoom(db, spec, r);
-        PreviewLogoArt(index, db, spec, r);
-        PreviewLeagueArt(index, db, r);
-        PreviewStrings(loc, spec, r);
-        PreviewNameSets(db, loc, spec, r);
+        PreviewLogoArt(index, db, spec, r, prior);
+        PreviewLeagueArt(index, db, spec, r);
+        foreach (var g in spec.Groups) PreviewStrings(loc, g, r);
+        PreviewNameSets(db, loc, spec, r, prior);
         return r;
     }
 
@@ -58,7 +66,7 @@ public static class PackageCheck
         var teams = db.Table("exhibitionteams");
         int Int(T3Table t, int row, string f) => Convert.ToInt32(db.Get(t, row, F(t, f)));
         var have = Valid(db, teams).Select(i => Int(teams, i, "index")).ToHashSet();
-        int need = spec.Teams.Count(t => !have.Contains(t.Index));
+        int need = spec.AllTeams.Count(t => !have.Contains(t.Index));
         int Free(string n) => db.Table(n) is { } t ? t.Records - t.WrittenRecords : int.MaxValue;
         int shortBy = need - new[] { "exhibitionteams", "exhibitionteamstrategies", "customonlineteamstrategies", "exhibitionarena" }.Min(Free);
         if (shortBy <= 0) return done;
@@ -68,9 +76,12 @@ public static class PackageCheck
         var picks = Valid(db, teams)
             .Select(i => (Index: Int(teams, i, "index"), League: Int(teams, i, "league"), Arena: Int(teams, i, "arenaid"),
                           Name: db.Get(teams, i, F(teams, "teamname"))?.ToString() ?? ""))
-            .Where(x => x.League == rc.League && rx.IsMatch(x.Name) && !owners.Contains(x.Index) && !spec.Teams.Any(t => t.Index == x.Index))
-            .OrderByDescending(x => x.Index).Take(shortBy).ToList();
-        if (picks.Count < shortBy) lines.Add($"recycle: only {picks.Count} of the {shortBy} teams needed match league {rc.League} / \"{rc.NamePattern}\"");
+            .Where(x => x.League == rc.League && rx.IsMatch(x.Name) && !owners.Contains(x.Index) && !spec.AllTeams.Any(t => t.Index == x.Index))
+            .OrderBy(x => rc.Indexes is { } li ? (li.IndexOf(x.Index) is var k && k >= 0 ? k : int.MaxValue) : -x.Index)
+            .Where(x => rc.Indexes == null || rc.Indexes.Contains(x.Index))
+            .Take(shortBy).ToList();
+        if (picks.Count < shortBy) lines.Add($"recycle: only {picks.Count} of the {shortBy} teams needed are retirable (league {rc.League}, \"{rc.NamePattern}\"" +
+                                              (rc.Indexes != null ? ", the listed indexes" : "") + ", no players of their own)");
         var arenaUsers = Valid(db, teams).GroupBy(i => Int(teams, i, "arenaid")).ToDictionary(g => g.Key, g => g.Count());
         foreach (var p in picks)
         {
@@ -105,15 +116,12 @@ public static class PackageCheck
                     (spec.Players?.File is { } pf ? $", players from {pf} (season {spec.Players.Season ?? "earliest"})" : ""));
         if (spec.Players?.File is { } plf && !File.Exists(spec.PathOf(plf))) r.Errors.Add($"The players file {plf} isn't there.");
         if (spec.League == null) r.Errors.Add("No \"league\".");
+        if (spec.League?.NameKey is { Length: > 24 } nk) r.Errors.Add($"league {spec.League.Id}: nameKey {nk} is longer than 24 characters (stockleagues.name).");
         if (spec.TeamBlock == null) { r.Errors.Add("No \"teamBlock\"."); return; }
         var b = spec.TeamBlock;
         if (b.First > b.Last) r.Errors.Add($"teamBlock {b.First}-{b.Last} is empty.");
         if (b.First < 600 && b.Last >= 400 && b.First <= 599) r.Errors.Add($"teamBlock {b.First}-{b.Last} overlaps 400-599 (create-a-team slots: their rosters are read from customrostertable).");
         if (b.Last > 1023) r.Errors.Add("teamBlock goes past 1023.");
-        foreach (var dup in spec.Teams.GroupBy(t => t.Code, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
-            r.Errors.Add($"Team code {dup.Key} is used {dup.Count()} times.");
-        foreach (var dup in spec.Teams.GroupBy(t => t.Index).Where(g => g.Count() > 1))
-            r.Errors.Add($"Team index {dup.Key} is used {dup.Count()} times.");
         foreach (var t in spec.Teams)
         {
             if (t.Index < b.First || t.Index > b.Last) r.Errors.Add($"{t.Code}: index {t.Index} is outside the teamBlock {b.First}-{b.Last}.");
@@ -125,15 +133,16 @@ public static class PackageCheck
         if (idx.Count > 0 && idx[^1] - idx[0] + 1 != idx.Count)
             r.Errors.Add($"Team indexes {idx[0]}-{idx[^1]} have gaps: generated prospects pick from a contiguous range, so every index in it must be a team.");
         else if (idx.Count > 0)
-            r.Lines.Add($"Generated US prospects will pick from teams {idx[0]}-{idx[^1]} (code mod 4).");
+            r.Lines.Add($"League {spec.League?.Id}: teams {idx[0]}-{idx[^1]}");
     }
 
     // ---------------------------------------------------------------- images
 
     private static void CheckImages(PackageSpec spec, Report r)
     {
-        Image(spec.LeagueLogoFile() ?? Path.Combine(spec.Folder, "logos", "league", "logo.png"), "league logo", required: true, r);
-        foreach (var t in spec.Teams)
+        foreach (var g in spec.Groups)
+            Image(g.LeagueLogoFile() ?? Path.Combine(spec.Folder, "logos", "league", "logo.png"), $"league {g.League?.Id} logo", required: true, r);
+        foreach (var t in spec.AllTeams)
         {
             string dir = spec.TeamLogoFolder(t);
             if (spec.TeamLogoFile(t) == null) continue;                // no logo yet: the shared placeholder (PreviewLogoArt)
@@ -178,21 +187,20 @@ public static class PackageCheck
         var teams = db.Table("exhibitionteams");
         var fi = F(teams, "index"); var fn = F(teams, "teamname"); var fl = F(teams, "league");
         var byIndex = Valid(db, teams).ToDictionary(i => Convert.ToInt32(db.Get(teams, i, fi)), i => i);
-        foreach (var t in spec.Teams)
+        foreach (var t in spec.AllTeams)
         {
             if (byIndex.TryGetValue(t.Index, out int row))
             {
                 string name = db.Get(teams, row, fn)?.ToString();
                 int lg = Convert.ToInt32(db.Get(teams, row, fl));
-                if (name == t.Name && lg == spec.League?.Id) r.Lines.Add($"{t.Code}: team {t.Index} is already there (installed before).");
+                if (name == t.Name && lg == t.LeagueId) r.Lines.Add($"{t.Code}: team {t.Index} is already there (installed before).");
                 else r.Errors.Add($"{t.Code}: team index {t.Index} is taken by \"{name}\" (league {lg}).");
             }
             if (!byIndex.ContainsKey(t.Template)) r.Errors.Add($"{t.Code}: template team {t.Template} doesn't exist.");
         }
-        var block = spec.TeamBlock;
-        if (block != null)
+        foreach (var block in spec.Groups.Select(g => g.TeamBlock).Where(b => b != null))
         {
-            var foreign = byIndex.Keys.Where(i => i >= block.First && i <= block.Last && !spec.Teams.Any(t => t.Index == i)).ToList();
+            var foreign = byIndex.Keys.Where(i => i >= block.First && i <= block.Last && !spec.AllTeams.Any(t => t.Index == i)).ToList();
             if (foreign.Count > 0) r.Warnings.Add($"teamBlock {block.First}-{block.Last} already holds other teams: {string.Join(", ", foreign.Take(10))}.");
         }
     }
@@ -202,7 +210,7 @@ public static class PackageCheck
         // only the teams not in the game yet need rows (an installed package's teams are taken down and re-added)
         var teams = db.Table("exhibitionteams");
         var have = Valid(db, teams).Select(i => Convert.ToInt32(db.Get(teams, i, F(teams, "index")))).ToHashSet();
-        int n = spec.Teams.Count(t => !have.Contains(t.Index));
+        int n = spec.AllTeams.Count(t => !have.Contains(t.Index));
         foreach (var (name, perTeam) in new[] { ("exhibitionteams", 1), ("exhibitionteamstrategies", 1), ("customonlineteamstrategies", 1),
                                                 ("exhibitionarena", 1), ("stockteamjerseys", 2), ("stockteamequipmenttable", 37), ("stockgoalieequipment", 4) })
         {
@@ -218,7 +226,7 @@ public static class PackageCheck
 
     private static readonly Regex LeagueLogo = new(@"^ui/textures/common/leaguelogos/(.+)/l(\d+)(_fr)?$", RegexOptions.IgnoreCase);
 
-    private static void PreviewLogoArt(AssetIndex index, T3Db db, PackageSpec spec, Report r)
+    private static void PreviewLogoArt(AssetIndex index, T3Db db, PackageSpec spec, Report r, PackageInstaller.Resolved prior = null)
     {
         var map = TeamLogos.All(index);
         var teams = db.Table("exhibitionteams");
@@ -228,24 +236,37 @@ public static class PackageCheck
                             .OrderByDescending(kv => kv.Value.Count).ThenBy(kv => kv.Key).Select(kv => (kv.Key, kv.Value.Count)).ToList();
         r.Lines.Add($"Spare logo art ids (logo textures + centre ice, no team uses them): {spare.Count}; a full set has {full} menu styles.");
         // teams with a logo get their own id; teams without one share a single placeholder id (the league logo)
+        // a team with a logo keeps its earlier id while it's spare and no other team kept it
+        var kept = new Dictionary<string, (int, int)>();
+        var held = new HashSet<int>();
+        var bareTeams = spec.AllTeams.Where(t => spec.TeamLogoFile(t) == null).ToList();
+        int priorPh = bareTeams.Select(t => prior?.LogoArt.GetValueOrDefault(t.Code, -1) ?? -1).FirstOrDefault(a => a >= 0, -1);
+        foreach (var t in spec.AllTeams.Where(t => spec.TeamLogoFile(t) != null))
+            if (prior?.LogoArt.GetValueOrDefault(t.Code, -1) is int pa && pa >= 0 && pa != priorPh && spare.Any(x => x.Key == pa) && held.Add(pa))
+                kept[t.Code] = spare.First(x => x.Key == pa);
+        var phPrior = spare.FirstOrDefault(x => x.Key == priorPh && !held.Contains(x.Key));    // (0, 0) when gone
+        spare = spare.Where(x => !held.Contains(x.Key) && x.Key != priorPh).ToList();
         int k = 0;
-        foreach (var t in spec.Teams.Where(t => spec.TeamLogoFile(t) != null))
+        foreach (var t in spec.AllTeams.Where(t => spec.TeamLogoFile(t) != null))
         {
-            if (k >= spare.Count) { r.Errors.Add($"{t.Code}: no spare logo art id left."); continue; }
-            var (art, styles) = spare[k++];
+            (int art, int styles) pick;
+            if (kept.TryGetValue(t.Code, out var kp)) pick = kp;
+            else if (k >= spare.Count) { r.Errors.Add($"{t.Code}: no spare logo art id left."); continue; }
+            else pick = spare[k++];
+            var (art, styles) = pick;
             r.LogoArt[t.Code] = art;
             r.Lines.Add($"{t.Code}: logo art id {art} ({styles} menu styles + centre ice)");
         }
-        var bare = spec.Teams.Where(t => spec.TeamLogoFile(t) == null).ToList();
+        var bare = spec.AllTeams.Where(t => spec.TeamLogoFile(t) == null).ToList();
         if (bare.Count == 0) return;
-        if (k >= spare.Count) { r.Errors.Add($"No spare logo art id left for the placeholder logo ({bare.Count} teams without a logo)."); return; }
-        var (ph, phStyles) = spare[k];
+        if (phPrior.Item1 == 0 && k >= spare.Count) { r.Errors.Add($"No spare logo art id left for the placeholder logo ({bare.Count} teams without a logo)."); return; }
+        var (ph, phStyles) = phPrior.Item1 != 0 ? phPrior : spare[k];            // the earlier placeholder id when still spare
         foreach (var t in bare) r.LogoArt[t.Code] = ph;
         r.PlaceholderArt = ph;
         r.Lines.Add($"{bare.Count} teams without a logo share placeholder art id {ph} ({phStyles} menu styles), drawn from the league logo: {string.Join(", ", bare.Select(t => t.Code))}");
     }
 
-    private static void PreviewLeagueArt(AssetIndex index, T3Db db, Report r)
+    private static void PreviewLeagueArt(AssetIndex index, T3Db db, PackageSpec spec, Report r)
     {
         var styles = new Dictionary<int, int>();
         foreach (string name in index.Res.Keys)
@@ -254,9 +275,15 @@ public static class PackageCheck
         var leagues = db.Table("stockleagues");
         var used = Valid(db, leagues).Select(i => Convert.ToInt32(db.Get(leagues, i, F(leagues, "artid")))).ToHashSet();
         var spare = styles.Where(kv => !used.Contains(kv.Key)).OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key).ToList();
-        if (spare.Count == 0) { r.Warnings.Add("No spare league logo art id: the league logo would replace league 32's own (USA)."); return; }
-        r.LeagueArt = spare[0].Key;
-        r.Lines.Add($"League logo: spare art id {spare[0].Key} ({spare[0].Value} styles; {spare.Count} spare league art ids)");
+        int k = 0;
+        foreach (var g in spec.Groups.Where(g => g.League != null))
+        {
+            if (k >= spare.Count) { r.Warnings.Add($"No spare league logo art id for league {g.League.Id}: its logo would replace the league's own."); continue; }
+            r.LeagueArts[g.League.Id] = spare[k].Key;
+            if (g == spec) r.LeagueArt = spare[k].Key;
+            r.Lines.Add($"League {g.League.Id} logo: spare art id {spare[k].Key} ({spare[k].Value} styles; {spare.Count} spare league art ids)");
+            k++;
+        }
     }
 
     // ---------------------------------------------------------------- language strings
@@ -399,20 +426,27 @@ public static class PackageCheck
         return need >= 0 && have > 0 && need <= have;
     }
 
-    private static void PreviewNameSets(T3Db db, T3Db loc, PackageSpec spec, Report r)
+    private static void PreviewNameSets(T3Db db, T3Db loc, PackageSpec spec, Report r, PackageInstaller.Resolved prior = null)
     {
         var sets = NameSets(loc);
         var avoid = new HashSet<string>((spec.NameSets?.Avoid ?? new()).Select(a => a.ToUpperInvariant()));
-        var donors = Donors(db, sets, avoid, spec.Teams.Select(t => t.Index).ToHashSet());
+        var donors = Donors(db, sets, avoid, spec.AllTeams.Select(t => t.Index).ToHashSet());
         r.Lines.Add($"Name sets: {sets.Count} in the language file, {donors.Count} usable donors (no team, a real club's).");
-        var taken = new HashSet<string>();
-        // long names first (few sets have room for them), then long codes (few hold a 4-letter abbreviation)
-        foreach (var t in spec.Teams.OrderByDescending(t => System.Text.Encoding.UTF8.GetByteCount(t.Name ?? "")).ThenByDescending(t => t.Abbr?.Length ?? 0))
+        // earlier sets kept first; when keeping them leaves a team without any set, a fresh assignment for every team
+        var picks = Assign(loc, sets, donors, spec, prior, out var failed);
+        if (failed.Count > 0 && prior?.NameSets.Count > 0)
         {
-            var best = donors.Where(k => !taken.Contains(k)).Select(k => Fit(loc, k, sets[k], t, spec.NameSets?.SchoolOnly == true)).Where(c => c != null)
-                             .OrderBy(c => c.Score).ThenByDescending(c => c.Strings.Count).FirstOrDefault();
-            if (best == null) { r.Errors.Add($"{t.Code}: no name set can hold the abbreviation \"{t.Abbr}\"."); continue; }
-            taken.Add(best.ArtAbbr);
+            var fresh = Assign(loc, sets, donors, spec, null, out var failed2);
+            if (failed2.Count < failed.Count)
+            {
+                r.Lines.Add($"Name sets: the earlier ones leave no room for {string.Join(", ", failed.Select(t => t.Code))}: every team picks afresh.");
+                picks = fresh; failed = failed2;
+            }
+        }
+        foreach (var t in failed) r.Errors.Add($"{t.Code}: no name set can hold the abbreviation \"{t.Abbr}\".");
+        foreach (var t in spec.AllTeams)
+        {
+            if (!picks.TryGetValue(t.Code, out var best)) continue;
             r.NameSets[t.Code] = best;
             var shortened = best.Strings.Where(s => !s.Exact && !s.Kept).Select(s => $"{s.S.Prefix.TrimEnd('_')}=\"{s.Text}\"");
             var kept = best.Strings.Where(s => s.Kept).Select(s => $"{s.S.Prefix.TrimEnd('_')}=\"{s.Text}\"");
@@ -421,5 +455,30 @@ public static class PackageCheck
             r.Lines.Add(line);
             if (best.KeptCount > 0) r.Warnings.Add($"{t.Code}: {best.KeptCount} string(s) of set {best.ArtAbbr} can't hold the team's text and keep the old club's: " + string.Join(", ", kept));
         }
+    }
+
+    /// <summary>One name set per team, no set twice: earlier choices (prior) first while they're donors and fit, then
+    /// long names first (few sets have room for them), then long codes (few hold a 4-letter abbreviation).</summary>
+    private static Dictionary<string, NameSetChoice> Assign(T3Db loc, Dictionary<string, Dictionary<string, NameString>> sets, List<string> donors,
+                                                            PackageSpec spec, PackageInstaller.Resolved prior, out List<TeamSpec> failed)
+    {
+        var taken = new HashSet<string>();
+        var picks = new Dictionary<string, NameSetChoice>();
+        failed = new List<TeamSpec>();
+        bool school = spec.NameSets?.SchoolOnly == true;
+        foreach (var t in spec.AllTeams)
+            if (prior?.NameSets.GetValueOrDefault(t.Code) is { } ps && donors.Contains(ps.ToUpperInvariant()) && !taken.Contains(ps.ToUpperInvariant())
+                && Fit(loc, ps.ToUpperInvariant(), sets[ps.ToUpperInvariant()], t, school) is { } kf)
+            { picks[t.Code] = kf; taken.Add(kf.ArtAbbr); }
+        foreach (var t in spec.AllTeams.Where(t => !picks.ContainsKey(t.Code))
+                     .OrderByDescending(t => System.Text.Encoding.UTF8.GetByteCount(t.Name ?? "")).ThenByDescending(t => t.Abbr?.Length ?? 0))
+        {
+            var best = donors.Where(k => !taken.Contains(k)).Select(k => Fit(loc, k, sets[k], t, school)).Where(c => c != null)
+                             .OrderBy(c => c.Score).ThenByDescending(c => c.Strings.Count).FirstOrDefault();
+            if (best == null) { failed.Add(t); continue; }
+            taken.Add(best.ArtAbbr);
+            picks[t.Code] = best;
+        }
+        return picks;
     }
 }

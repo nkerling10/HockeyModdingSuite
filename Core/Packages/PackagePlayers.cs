@@ -221,6 +221,7 @@ public static class PackagePlayers
         var creates = new List<SyncChange>();
         var placed = new List<(Listed L, int GameId)>();
         var needDetails = new List<Listed>();
+        var notCreated = new List<Listed>();
         int already = 0;
         foreach (var l in now)
         {
@@ -245,6 +246,7 @@ public static class PackagePlayers
                 });
                 continue;
             }
+            if (!ps.Create) { notCreated.Add(l); continue; }                // this league only moves existing players
             var d = l.Info;
             if (d == null || posOf[l].P < 0) { needDetails.Add(l); continue; }
             var bio = BioOf(l, d, posOf[l].P, posOf[l].S);
@@ -312,6 +314,8 @@ public static class PackagePlayers
             r.Lines.Add($"  {g.Key}: {g.Count()} players ({f} F, {dd} D, {gg} G)");
             if (f < 12 || dd < 6 || gg < 2) r.Warnings.Add($"players: {g.Key} can't dress a full lineup (needs 12 F, 6 D, 2 G)");
         }
+        if (notCreated.Count > 0)
+            r.Lines.Add($"players: league {league}: {notCreated.Count} not in the game, not created (players.create = false)");
         if (needDetails.Count > 0)
             r.Warnings.Add($"players: not in the game and no position in {ps.Details ?? "the details file"} ({needDetails.Count}): " +
                            string.Join(", ", needDetails.Select(l => $"{l.Name} ({l.Team.Code})")));
@@ -403,4 +407,6 @@ public sealed class PlayersSpec
     public string File { get; set; }
     public string Season { get; set; }
     public string Details { get; set; }
+    /// <summary>false: players not in the game are listed, not created (e.g. the USHL: only existing prospects move).</summary>
+    public bool Create { get; set; } = true;
 }

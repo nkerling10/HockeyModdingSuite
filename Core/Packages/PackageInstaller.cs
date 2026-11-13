@@ -21,6 +21,9 @@ public static class PackageInstaller
         public Dictionary<string, string> NameSets { get; set; } = new();
         public int LeagueArt { get; set; } = -1;
         public int Group { get; set; } = -1;
+        /// <summary>The extra leagues' logo art ids and team group ids, by league id.</summary>
+        public Dictionary<int, int> LeagueArts { get; set; } = new();
+        public Dictionary<int, int> Groups { get; set; } = new();
     }
 
     public sealed class Result
@@ -72,9 +75,9 @@ public static class PackageInstaller
             throw new InvalidOperationException($"{spec.Id} is installed: a dry run needs it removed first (package-remove {spec.Id}).");
 
         // 2. check and resolve
-        var check = PackageCheck.Run(index, spec);
-        if (!check.Ok) throw new InvalidOperationException("The package doesn't pass package-check:\n  " + string.Join("\n  ", check.Errors));
         var resolved = LoadResolved(store, spec.Id);
+        var check = PackageCheck.Run(index, spec, resolved);       // keeps earlier choices where it can, all unique
+        if (!check.Ok) throw new InvalidOperationException("The package doesn't pass package-check:\n  " + string.Join("\n  ", check.Errors));
         var legacy = new Legacy(index);
         var db = legacy.OpenDb(PackageCheck.GameDb);
         var loc = legacy.OpenDb(PackageCheck.LocDb);
@@ -83,9 +86,9 @@ public static class PackageInstaller
 
         // 3. the recipe, in memory
         var nameSets = PackageCheck.NameSets(loc);
-        ApplyLeague(db, loc, spec, resolved, r);
+        foreach (var g in spec.Groups) ApplyLeague(db, loc, g, g == spec ? resolved.LeagueArt : resolved.LeagueArts.GetValueOrDefault(g.League.Id, -1), r);
         ApplyTeams(db, loc, spec, resolved, nameSets, r);
-        PackagePlayers.Apply(db, spec, r);
+        foreach (var g in spec.Groups) PackagePlayers.Apply(db, g, r);
         var portraits = PackagePortraits.Assign(index, legacy, db, spec, r);
         PackagePlayers.EntryYears(db, r);
         foreach (var (id, text) in spec.Strings ?? new()) SetString(loc, id, text, r);
@@ -124,7 +127,7 @@ public static class PackageInstaller
         }
 
         // 6. write: one entry, applied; code mods file; resolved choices; report
-        string summary = $"{spec.Title} {spec.Version}: league {spec.League.Id}, {spec.Teams.Count} teams ({string.Join(", ", spec.Teams.Select(t => t.Code))}), logos, strings";
+        string summary = $"{spec.Title} {spec.Version}: " + string.Join("; ", spec.Groups.Select(g => $"league {g.League?.Id}, {g.Teams.Count} teams ({string.Join(", ", g.Teams.Select(t => t.Code))})")) + ", logos, strings";
         r.Entry = store.Add(Kind, spec.Id, spec.Folder, summary, patches, r.Warnings);
         store.Apply(r.Entry, game, log);
         SaveResolved(store, spec.Id, resolved);
@@ -203,51 +206,50 @@ public static class PackageInstaller
         var usedArt = Valid(db, teams).Select(i => Int(db, teams, i, "artid")).ToHashSet();
         var usedAbbr = Valid(db, teams).Select(i => db.Get(teams, i, F(teams, "artabbr"))?.ToString()?.ToUpperInvariant()).ToHashSet();
         var sets = PackageCheck.NameSets(loc);
-        // logo art: a team with a logo keeps its earlier id while it's free and its own; teams without one share the
-        // placeholder id (a free id none of the logo teams holds)
-        var withLogo = spec.Teams.Where(t => spec.TeamLogoFile(t) != null).ToList();
-        var kept = new HashSet<int>();
-        foreach (var t in withLogo)
-        {
-            if (res.LogoArt.TryGetValue(t.Code, out int a) && !usedArt.Contains(a) && kept.Add(a)) continue;
-            if (check.LogoArt.TryGetValue(t.Code, out int pick)) { res.LogoArt[t.Code] = pick; kept.Add(pick); }
-        }
-        if (check.PlaceholderArt >= 0)
-        {
-            int ph = !kept.Contains(check.PlaceholderArt) ? check.PlaceholderArt
-                   : check.LogoArt.Values.Concat(withLogo.Select(t => check.LogoArt.GetValueOrDefault(t.Code, -1))).First(v => v >= 0 && !kept.Contains(v) && !usedArt.Contains(v));
-            foreach (var t in spec.Teams.Where(t => spec.TeamLogoFile(t) == null)) res.LogoArt[t.Code] = ph;
-        }
-        foreach (var t in spec.Teams)
-        {
-            // an earlier name set stays while it's free and scores at least as well as the check's pick
-            bool keep = res.NameSets.TryGetValue(t.Code, out var s) && !usedAbbr.Contains(s)
-                        && sets.TryGetValue(s.ToUpperInvariant(), out var set) && PackageCheck.Fit(loc, s.ToUpperInvariant(), set, t, spec.NameSets?.SchoolOnly == true) is { } fit
-                        && !(check.NameSets.TryGetValue(t.Code, out var c0) && c0.Score.CompareTo(fit.Score) < 0);
-            if (!keep && check.NameSets.TryGetValue(t.Code, out var ns))
-                res.NameSets[t.Code] = ns.ArtAbbr;
-        }
+        // logo art ids and name sets: the check's picks, which already keep earlier choices where they're still free
+        // and fit, and never give two teams the same one (the placeholder id is the one deliberate share)
+        res.LogoArt.Clear();
+        foreach (var (code, art) in check.LogoArt) res.LogoArt[code] = art;
+        res.NameSets.Clear();
+        foreach (var (code, ns) in check.NameSets) res.NameSets[code] = ns.ArtAbbr;
+        var dup = res.NameSets.GroupBy(kv => kv.Value, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1).ToList();
+        if (dup.Count > 0) throw new InvalidOperationException("Two teams got the same name set: " + string.Join("; ", dup.Select(g => $"{g.Key}: {string.Join(", ", g.Select(kv => kv.Key))}")));
         var leagues = db.Table("stockleagues");
         var usedLeagueArt = Valid(db, leagues).Select(i => Int(db, leagues, i, "artid")).ToHashSet();
         if (res.LeagueArt < 0 || usedLeagueArt.Contains(res.LeagueArt)) res.LeagueArt = check.LeagueArt;
+        foreach (var g in spec.Groups.Where(g => g != spec && g.League != null))
+            if (!res.LeagueArts.TryGetValue(g.League.Id, out int la) || usedLeagueArt.Contains(la) || la == res.LeagueArt)
+                res.LeagueArts[g.League.Id] = check.LeagueArts.GetValueOrDefault(g.League.Id, -1);
         // one group id for the package's teams (league, conference and division), unused by any team
         var usedGroups = Valid(db, teams).SelectMany(i => new[] { Int(db, teams, i, "leaguegroup"), Int(db, teams, i, "conferencegroup"), Int(db, teams, i, "divisiongroup") }).ToHashSet();
         if (res.Group < 0 || usedGroups.Contains(res.Group)) res.Group = Enumerable.Range(100, 28).Concat(Enumerable.Range(1, 99)).First(g => !usedGroups.Contains(g));
+        usedGroups.Add(res.Group);
+        foreach (var g in spec.Groups.Where(g => g != spec && g.League != null))
+        {
+            if (!res.Groups.TryGetValue(g.League.Id, out int gid) || usedGroups.Contains(gid))
+                res.Groups[g.League.Id] = gid = Enumerable.Range(100, 28).Concat(Enumerable.Range(1, 99)).First(x => !usedGroups.Contains(x));
+            usedGroups.Add(gid);
+        }
         r.Lines.Add($"resolved: group {res.Group}, league logo art {res.LeagueArt}, " +
-                    string.Join(", ", spec.Teams.Select(t => $"{t.Code} art {res.LogoArt.GetValueOrDefault(t.Code, -1)} / names {res.NameSets.GetValueOrDefault(t.Code)}")));
+                    string.Join(", ", spec.AllTeams.Select(t => $"{t.Code} art {res.LogoArt.GetValueOrDefault(t.Code, -1)} / names {res.NameSets.GetValueOrDefault(t.Code)}")));
     }
 
     // ---------------------------------------------------------------- recipe
 
-    private static void ApplyLeague(T3Db db, T3Db loc, PackageSpec spec, Resolved res, Result r)
+    private static void ApplyLeague(T3Db db, T3Db loc, PackageSpec spec, int leagueArt, Result r)
     {
         var leagues = db.Table("stockleagues");
         int row = Valid(db, leagues).FirstOrDefault(i => Int(db, leagues, i, "leagueid") == spec.League.Id, -1);
         if (row < 0) throw new InvalidOperationException($"League {spec.League.Id} isn't in stockleagues.");
-        if (res.LeagueArt >= 0 && spec.LeagueLogoFile() != null)
+        if (leagueArt >= 0 && spec.LeagueLogoFile() != null)
         {
-            db.Set(leagues, row, F(leagues, "artid"), res.LeagueArt);
-            r.Lines.Add($"league {spec.League.Id}: logo art id {res.LeagueArt}");
+            db.Set(leagues, row, F(leagues, "artid"), leagueArt);
+            r.Lines.Add($"league {spec.League.Id}: logo art id {leagueArt}");
+        }
+        if (!string.IsNullOrEmpty(spec.League.NameKey))
+        {
+            db.Set(leagues, row, F(leagues, "name"), spec.League.NameKey);
+            r.Lines.Add($"league {spec.League.Id}: name from {spec.League.NameKey}");
         }
         foreach (var (id, text) in spec.League.Strings ?? new())
             SetString(loc, id, text, r);
@@ -284,13 +286,13 @@ public static class PackageInstaller
     {
         var teams = db.Table("exhibitionteams");
         var arenas = db.Table("exhibitionarena");
-        var byName = spec.Teams.Where(t => t.Name != null).ToDictionary(t => t.Name, t => t.Index, StringComparer.OrdinalIgnoreCase);
-        foreach (var t in spec.Teams.OrderBy(t => t.Index))
+        var byName = spec.AllTeams.Where(t => t.Name != null).ToDictionary(t => t.Name, t => t.Index, StringComparer.OrdinalIgnoreCase);
+        foreach (var t in spec.AllTeams.OrderBy(t => t.Index))
         {
             string artAbbr = res.NameSets.GetValueOrDefault(t.Code) ?? t.Abbr;
             var s = t.Data;
             var nt = new TeamCreator.NewTeam(t.Index, Cut(t.Name, 31), Cut(t.Name, 31), Cut(t.City, 29), Cut(t.Abbr, 11), Cut(artAbbr, 11),
-                                              res.LogoArt.GetValueOrDefault(t.Code, 0), spec.League.Id, Color(t.Primary) is var p && p >= 0 ? p : null,
+                                              res.LogoArt.GetValueOrDefault(t.Code, 0), t.LeagueId, Color(t.Primary) is var p && p >= 0 ? p : null,
                                               Color(t.Secondary) is var q && q >= 0 ? q : null);
             r.Lines.Add(TeamCreator.Create(db, t.Template, nt));
             int row = Valid(db, teams).First(i => Int(db, teams, i, "index") == t.Index);
@@ -305,7 +307,8 @@ public static class PackageInstaller
                 if (s.MainRival != null && byName.TryGetValue(s.MainRival, out int r1)) Set("rivalteam", r1);
                 if (s.SecondRival != null && byName.TryGetValue(s.SecondRival, out int r2)) Set("rivalteam2", r2);
             }
-            Set("leaguegroup", res.Group); Set("conferencegroup", res.Group); Set("divisiongroup", res.Group);
+            int grp = t.LeagueId == spec.League.Id ? res.Group : res.Groups.GetValueOrDefault(t.LeagueId, res.Group);
+            Set("leaguegroup", grp); Set("conferencegroup", grp); Set("divisiongroup", grp);
             Set("active", 1);
 
             // its own arena row: a copy of the template's arena, at the team's index when that's free
@@ -393,7 +396,7 @@ public static class PackageInstaller
             catch { /* not a texture header we read */ }
         }
         var drawn = new HashSet<int>();
-        foreach (var t in spec.Teams)
+        foreach (var t in spec.AllTeams)
         {
             string main = spec.TeamLogoFile(t);
             bool placeholder = main == null;
@@ -415,14 +418,16 @@ public static class PackageInstaller
             r.Lines.Add(placeholder ? $"placeholder (league logo): {n} logo textures on art id {art}, shared by the teams without a logo"
                                     : $"{t.Code}: {n} logo textures on art id {art}");
         }
-        string league = spec.LeagueLogoFile();
-        if (league != null && res.LeagueArt >= 0)
+        foreach (var g in spec.Groups)
         {
+            string league = g.LeagueLogoFile();
+            int la = g == spec ? res.LeagueArt : res.LeagueArts.GetValueOrDefault(g.League.Id, -1);
+            if (league == null || la < 0) continue;
             var img = Png.Load(league);
             int n = 0;
-            foreach (string name in index.Res.Keys.Where(k => LeagueLogo.Match(k) is { Success: true } m && int.Parse(m.Groups[2].Value) == res.LeagueArt).ToList())
+            foreach (string name in index.Res.Keys.Where(k => LeagueLogo.Match(k) is { Success: true } m && int.Parse(m.Groups[2].Value) == la).ToList())
                 if (PlanOne(index, name, img, locations, tocs, patches, r, st)) n++;
-            r.Lines.Add($"league: {n} logo textures on art id {res.LeagueArt}");
+            r.Lines.Add($"league {g.League.Id}: {n} logo textures on art id {la}");
         }
     }
 
@@ -551,7 +556,7 @@ public static class PackageInstaller
         sb.AppendLine();
         sb.AppendLine("| Team | Index | Logo art | Name set |");
         sb.AppendLine("|---|---|---|---|");
-        foreach (var t in spec.Teams)
+        foreach (var t in spec.AllTeams)
             sb.AppendLine($"| {t.Name} ({t.Code}) | {t.Index} | {res.LogoArt.GetValueOrDefault(t.Code, -1)} | {res.NameSets.GetValueOrDefault(t.Code)} |");
         sb.AppendLine();
         sb.AppendLine($"League {spec.League.Id}: logo art {res.LeagueArt}; NCAA group id {res.Group}.");

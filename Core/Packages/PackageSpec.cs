@@ -26,6 +26,18 @@ public sealed class PackageSpec
     /// <summary>Folder (relative) of the players' portraits, &lt;team code&gt;/&lt;first-last&gt;.png, 512×340 ready-made
     /// (see PackagePortraits); default "portraits" when that folder exists.</summary>
     public string Portraits { get; set; }
+    /// <summary>More leagues the package adds with their own teams (e.g. the USHL next to the NCAA): each entry takes
+    /// league, teamBlock, teamsFile, logoFolder, teams and players, like the package itself. Name sets, rules and the
+    /// retired-team room are shared; the NCAA code mods use the package's own teams only.</summary>
+    public List<PackageSpec> ExtraLeagues { get; set; }
+    /// <summary>Optional folder (relative) of team logos named after the team: "&lt;team-name-slug&gt;-logo.png" or
+    /// "&lt;slug&gt;.png" (used when logos/teams/&lt;code&gt; has none).</summary>
+    public string LogoFolder { get; set; }
+
+    /// <summary>The package and its extra leagues.</summary>
+    [JsonIgnore] public IEnumerable<PackageSpec> Groups => new[] { this }.Concat(ExtraLeagues ?? new List<PackageSpec>());
+    /// <summary>Every team of every league in the package.</summary>
+    [JsonIgnore] public IEnumerable<TeamSpec> AllTeams => Groups.SelectMany(g => g.Teams ?? new List<TeamSpec>());
 
     /// <summary>The source folder the recipe was read from (paths in it are relative to this).</summary>
     [JsonIgnore] public string Folder { get; set; }
@@ -48,7 +60,17 @@ public sealed class PackageSpec
                    ?? throw new InvalidDataException($"{file} is empty.");
         spec.Folder = Path.GetFullPath(folder);
         if (string.IsNullOrWhiteSpace(spec.Id)) throw new InvalidDataException($"{file} has no \"id\".");
-        if (!string.IsNullOrEmpty(spec.TeamsFile)) spec.MergeTeamsFile();
+        foreach (var g in spec.Groups)
+        {
+            if (g != spec)
+            {
+                g.Folder = spec.Folder; g.Id ??= spec.Id; g.Title ??= spec.Title; g.Version ??= spec.Version;
+                g.NameSets = spec.NameSets; g.Rules ??= spec.Rules;
+            }
+            g.Teams ??= new List<TeamSpec>();
+            if (!string.IsNullOrEmpty(g.TeamsFile)) g.MergeTeamsFile();
+            foreach (var t in g.Teams) { t.LeagueId = g.League?.Id ?? 0; t.LogoDir = g.PathOf(g.LogoFolder); }
+        }
         return spec;
     }
 
@@ -76,6 +98,7 @@ public sealed class PackageSpec
         foreach (var t in Teams)
         {
             if (!Source.TryGetValue(t.Code ?? "", out var s)) continue;
+            if (t.Index == 0 && s.TeamId is int id) t.Index = id;   // the data file's team_id sets the team's index
             t.Name ??= s.TeamName;
             t.Abbr ??= s.Abbreviation;
             t.City ??= s.City;
@@ -118,7 +141,17 @@ public sealed class PackageSpec
     /// A team's main logo: logos/teams/&lt;code&gt;/logo.png, or the folder's only PNG when there's no logo.png and the
     /// folder holds just one (any name). Null when there's none.
     /// </summary>
-    public string TeamLogoFile(TeamSpec t) => LogoIn(TeamLogoFolder(t));
+    public string TeamLogoFile(TeamSpec t) => LogoIn(TeamLogoFolder(t)) ?? NamedLogo(t);
+
+    /// <summary>A logo named after the team in its league's logo folder: "&lt;slug&gt;-logo.png" or "&lt;slug&gt;.png".</summary>
+    private static string NamedLogo(TeamSpec t)
+    {
+        if (string.IsNullOrEmpty(t.LogoDir) || !Directory.Exists(t.LogoDir) || string.IsNullOrEmpty(t.Name)) return null;
+        string slug = System.Text.RegularExpressions.Regex.Replace(t.Name.ToLowerInvariant(), "[^a-z0-9]+", "-").Trim('-');
+        foreach (string f in new[] { slug + "-logo.png", slug + ".png" })
+            if (System.IO.File.Exists(Path.Combine(t.LogoDir, f))) return Path.Combine(t.LogoDir, f);
+        return null;
+    }
 
     /// <summary>The league logo: league.logo, or logos/league's logo.png / only PNG.</summary>
     public string LeagueLogoFile() =>
@@ -143,6 +176,8 @@ public sealed class TeamSource
     [JsonPropertyName("team_name")] public string TeamName { get; set; }
     [JsonPropertyName("nickname")] public string Nickname { get; set; }
     [JsonPropertyName("abbreviation")] public string Abbreviation { get; set; }
+    /// <summary>The team index the package creates the team at (the package's own "index" wins when it sets one).</summary>
+    [JsonPropertyName("team_id")] public int? TeamId { get; set; }
     [JsonPropertyName("conference")] public string Conference { get; set; }
     [JsonPropertyName("primary_menu_color")] public string PrimaryMenuColor { get; set; }
     [JsonPropertyName("secondary_menu_color")] public string SecondaryMenuColor { get; set; }
@@ -174,6 +209,9 @@ public sealed class LeagueSpec
     public Dictionary<string, string> Strings { get; set; } = new();
     /// <summary>The league logo image (relative to the package folder).</summary>
     public string Logo { get; set; }
+    /// <summary>Optional: the language key the league's name is read from (stockleagues.name), when its own key is
+    /// shared with something that must keep its text (league 29's TXT_ALL_STARS_TOURNAMENT is the Divisional Showdown).</summary>
+    public string NameKey { get; set; }
 }
 
 /// <summary>The contiguous team-index block the package's teams live in (code mod 4 picks generated prospects' schools from it).</summary>
@@ -191,6 +229,9 @@ public sealed class RecycleSpec
     public int League { get; set; }
     /// <summary>Regex on teamname; default: the online event teams "Circuit N Team M".</summary>
     public string NamePattern { get; set; } = @"^Circuit \d+ Team \d+$";
+    /// <summary>Optional: exactly which teams to retire, in this order (only as many as needed; each must still be in
+    /// League, match NamePattern and own no players). Without it, the highest matching indexes go first.</summary>
+    public List<int> Indexes { get; set; }
 }
 
 public sealed class TeamSpec
@@ -216,6 +257,10 @@ public sealed class TeamSpec
     public Dictionary<string, int> Arena { get; set; }
     /// <summary>The team's row in the team data file, when there is one (colours, arena, rivals...).</summary>
     [JsonIgnore] public TeamSource Data { get; set; }
+    /// <summary>The league the team goes in (its group's league id; set on load).</summary>
+    [JsonIgnore] public int LeagueId { get; set; }
+    /// <summary>Its group's logo folder of name-keyed logos (absolute), or null.</summary>
+    [JsonIgnore] public string LogoDir { get; set; }
 }
 
 public sealed class NameSetsSpec
