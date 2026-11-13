@@ -275,7 +275,10 @@ public sealed class FranchiseSave
     /// The game's 45 injuries (injurytype), from the injury table in eboot.bin (file 0xFAFB850): each has three names,
     /// most serious first, and which one the injury screen shows depends on the injury and its length (20 days of knee
     /// is "an MCL sprain", 20 days of shoulder "a sore shoulder"). Ids 0-29 are skater injuries and 30-44 goalie ones;
-    /// a goalie injury on a skater crashes the injury report (its ratings penalty isn't there).
+    /// a goalie injury on a skater crashes the injury report (its ratings penalty isn't there). All 45 were placed by
+    /// hand (2026-11-06): concussions (7, 34) both showed "an upper body injury" at 20 days, and the flu (10) shows as
+    /// "the flu (playable)". Id 0 is "no injury" in practice: a player given id 0 is left off the injury report, so
+    /// never write 0 as an injury (use 10 for the flu).
     /// </summary>
     public static readonly string[][] InjuryNames =
     {

@@ -62,6 +62,7 @@ public static class Program
                 "contracts-sync" => ContractsSyncCmd(game, opts),
                 "retained-check" => RetainedCheckCmd(game, opts),
                 "save-player" => SavePlayerCmd(game, opts),
+                "portrait-slots" => PortraitSlotsCmd(game, opts),
                 "texture-rgba" => TextureRgbaCmd(game, opts),
                 "roster-compare" => RosterCompareCmd(game, opts),
                 "move-player" => MovePlayerCmd(game, opts),
@@ -96,6 +97,14 @@ public static class Program
                 "db-add" => DbAddCmd(game, opts),
                 "db-remove" => DbRemoveCmd(game, opts),
                 "loc-budget" => LocBudgetCmd(game, opts),
+                "package-check" => PackageCheckCmd(game, opts),
+                "package-install" => PackageInstallCmd(game, opts),
+                "package-remove" => PackageRemoveCmd(game, opts),
+                "package-status" => PackageStatusCmd(game, opts),
+                "package-codemods" => PackageCodeModsCmd(game, opts),
+                "package-players" => PackagePlayersCmd(game, opts),
+                "who" => WhoCmd(game, opts),
+                "string-room" => StringRoomCmd(game, opts),
                 "kyty-releases" => KytyReleasesCmd(opts),
                 "mods" => ModsCmd(game, opts),
                 "apply-sound" => ApplySoundCmd(game, opts),
@@ -1209,6 +1218,243 @@ public static class Program
         foreach (var n in legacy.Names.Where(n => filter == null || n.Contains(filter, StringComparison.OrdinalIgnoreCase)).OrderBy(n => n))
             Console.WriteLine(opts.Get("where") != null && legacy.Find(n) is { } lf ? $"{n}\t{lf.Size}\t{lf.ChunkId}\t{lf.Offset}" : $"{n}\t{legacy.Find(n)?.Size}");
         return 0;
+    }
+
+    /// <summary>
+    /// package-install FOLDER [--dry 1] [--emulator DIR]: installs (or rebuilds) a package as one mod-list entry: league,
+    /// teams, strings, logos; writes the code mods to mods/codemods/nhl27_code_mods.json. --emulator points that
+    /// emulator's --game-patch at the file (cfgGlobal.json, backed up first). --dry plans everything and writes nothing.
+    /// </summary>
+    private static int PackageInstallCmd(string game, Options opts)
+    {
+        string folder = opts.Positional.FirstOrDefault() ?? throw new ArgumentException("package-install needs the package folder");
+        bool dry = opts.Has("dry");
+        if (!dry) RefuseWhileRunning();
+        var spec = NHL27Kit.Core.Packages.PackageSpec.Load(folder);
+        var index = OpenIndex(game, false);
+        var r = NHL27Kit.Core.Packages.PackageInstaller.Install(index, Mods(), game, spec, dry, s => { if (opts.Has("verbose")) Console.WriteLine("    " + s); },
+            () => OpenIndex(game, false));
+        foreach (var l in r.Lines) Console.WriteLine("  " + l);
+        foreach (var w in r.Warnings) Console.WriteLine("  warning: " + w);
+        if (dry) { Console.WriteLine("dry run: nothing written"); return 0; }
+        Console.WriteLine($"installed: {r.Entry.Summary}\nstate: {Mods().State(r.Entry, game)}");
+        Console.WriteLine($"code mods: {r.CodeModsFile}");
+        if (opts.Get("emulator") is { } emu)
+        {
+            string change = NHL27Kit.Core.Packages.PackageInstaller.SetEmulatorPatch(emu, r.CodeModsFile);
+            Console.WriteLine(change == null ? "emulator: already loads it" : $"emulator config: {change}");
+        }
+        else Console.WriteLine("emulator: pass --emulator <emulator folder> to point its --game-patch at the code mods file");
+        Console.WriteLine($"report: {Path.Combine(spec.Folder, "build", "install-report.md")}");
+        return 0;
+    }
+
+    /// <summary>package-remove ID: restores a package's entry, removes it from the mod list, empties the managed code mods.</summary>
+    private static int PackageRemoveCmd(string game, Options opts)
+    {
+        string id = opts.Positional.FirstOrDefault() ?? throw new ArgumentException("package-remove needs the package id");
+        RefuseWhileRunning();
+        foreach (var l in NHL27Kit.Core.Packages.PackageInstaller.Remove(Mods(), game, id, Console.WriteLine)) Console.WriteLine("  " + l);
+        return 0;
+    }
+
+    /// <summary>package-status: installed packages, their state and resolved choices.</summary>
+    private static int PackageStatusCmd(string game, Options opts)
+    {
+        var store = Mods();
+        var list = store.Entries.Where(e => e.Kind == NHL27Kit.Core.Packages.PackageInstaller.Kind).ToList();
+        if (list.Count == 0) Console.WriteLine("no packages installed");
+        foreach (var e in list)
+        {
+            Console.WriteLine($"{e.Name}: {store.State(e, game)} | {e.Patches.Count} byte ranges | {e.Summary} | from {e.Source}");
+            string res = Path.Combine(NHL27Kit.Core.Packages.PackageInstaller.StateDir(store, e.Name), "resolved.json");
+            if (File.Exists(res)) Console.WriteLine("  resolved: " + File.ReadAllText(res).Replace("\n", " ").Replace("  ", ""));
+        }
+        Console.WriteLine($"code mods file: {NHL27Kit.Core.Packages.PackageInstaller.CodeModsFile(store)}");
+        return 0;
+    }
+
+    /// <summary>package-codemods FIRST LAST [KEEP] [SEASONS] [ENTRY_AGE] [--out FILE]: the NCAA rules code mod for a team block (for checking).</summary>
+    private static int PackageCodeModsCmd(string game, Options opts) => PackageCodeModsCore(game, opts);
+
+    /// <summary>package-players FOLDER: read-only. Runs the package's players step on the game's database as it is now (in
+    /// memory) and prints who would be moved, created or still needs details.</summary>
+    private static int PackagePlayersCmd(string game, Options opts)
+    {
+        string folder = opts.Positional.FirstOrDefault() ?? throw new ArgumentException("package-players needs the package folder");
+        var spec = NHL27Kit.Core.Packages.PackageSpec.Load(folder);
+        var db = new Legacy(OpenIndex(game, false)).OpenDb(Roster.Database);
+        var r = new NHL27Kit.Core.Packages.PackageInstaller.Result();
+        NHL27Kit.Core.Packages.PackagePlayers.Apply(db, spec, r);
+        NHL27Kit.Core.Packages.PackagePlayers.EntryYears(db, r);   // (no portraits step here: shared art ids are skipped)
+        foreach (var l in r.Lines) Console.WriteLine("  " + l);
+        foreach (var w in r.Warnings) Console.WriteLine("  warning: " + w);
+        var (ok, total) = db.CheckCrcs();
+        Console.WriteLine($"in memory only: CRCs {ok}/{total}");
+        if (opts.Get("commits-out") is { } co)                   // the commit table, as package-codemods --commits reads it
+        {
+            var rows = r.Commits.OrderBy(c => c.Offset).ThenBy(c => c.Team).ThenBy(c => c.ArtId).Select(c => new[] { c.ArtId, c.Team, c.Offset });
+            File.WriteAllText(co, System.Text.Json.JsonSerializer.Serialize(rows));
+            Console.WriteLine($"commit table ({r.Commits.Count}) written to {co}");
+        }
+        if (opts.Get("entries-out") is { } eo)                   // the class table, as package-codemods --entries reads it
+        {
+            File.WriteAllText(eo, System.Text.Json.JsonSerializer.Serialize(r.Entries.OrderBy(e => e.ArtId).Select(e => new[] { e.ArtId, e.Offset })));
+            Console.WriteLine($"class table ({r.Entries.Count}) written to {eo}");
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// who NAME [NAME...] [--on YYYY-MM-DD]: read only. Each player whose name contains NAME, as the installed roster has
+    /// him: team, position, overall, age on --on (default today) and NCAA school — the details for finding him in game.
+    /// </summary>
+    private static int WhoCmd(string game, Options opts)
+    {
+        if (opts.Get("save") is { } saveDir) return WhoInSave(game, opts, saveDir);
+        if (opts.Positional.Count == 0) throw new ArgumentException("who needs a player name");
+        var on = DateTime.TryParse(opts.Get("on"), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var d) ? d : DateTime.Today;
+        var db = new Legacy(OpenIndex(game, false)).OpenDb(Roster.Database);
+        var roster = new Roster(db);
+        var bio = db.Table(Roster.BioTable);
+        var bf = bio.Fields.ToDictionary(f => f.Name);
+        var rt = db.Table(Roster.RosterTable);
+        var rtTeam = rt.Fields.First(f => f.Name == "team");
+        string TeamName(int t) => roster.Teams.TryGetValue(t, out var tm) && !string.IsNullOrEmpty(tm.Name) ? tm.Name : t < 0 ? "no team" : $"team {t}";
+        int I(int row, string f) => Convert.ToInt32(db.Get(bio, row, bf[f]));
+        foreach (string name in opts.Positional)
+        {
+            var hits = roster.Players.Where(p => p.Name.Contains(name, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (hits.Count == 0) { Console.WriteLine($"{name}: not found"); continue; }
+            foreach (var p in hits)
+            {
+                var born = new DateTime(I(p.BioRow, "year") + 1900, I(p.BioRow, "month") + 1, I(p.BioRow, "day") + 1);
+                int age = on.Year - born.Year - (on < born.AddYears(on.Year - born.Year) ? 1 : 0);
+                int team = p.RosterRow >= 0 ? Convert.ToInt32(db.Get(rt, p.RosterRow, rtTeam)) : p.Team;
+                int jl = I(p.BioRow, "juniorleague"), jt = I(p.BioRow, "juniorteam");
+                string school = jl == 32 && jt >= 0 ? $", NCAA: {TeamName(jt)}" : "";
+                Console.WriteLine($"{p.Name} — {TeamName(team)}, {p.PositionDisplay}, {p.Overall} OVR, age {age} (born {born:yyyy-MM-dd}){school}");
+            }
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// who --save BeAGMn [NAME...] [--ncaa]: as a franchise save has the players now: team, position, overall, age on the
+    /// save's date, NHL rights holder, draft, NCAA school and the NCAA entry byte (record 0x7F; bit 0x80 = graduated
+    /// senior). --ncaa: every league-32 player whose rights a team holds (the drafted NCAA players).
+    /// </summary>
+    private static int WhoInSave(string game, Options opts, string saveDir)
+    {
+        string meta = System.Text.Encoding.UTF8.GetString(new Legacy(OpenIndex(game, false)).Read("gamemodes/database/t3db/nhl_game-meta.xml")).TrimStart('﻿');
+        var db = new Legacy(OpenIndex(game, false)).OpenDb(Roster.Database);
+        var teams = new Roster(db).Teams;
+        string TeamName(int t) => t < 0 ? "none" : teams.TryGetValue(t, out var tm) && !string.IsNullOrEmpty(tm.Name) ? tm.Name : $"team {t}";
+        var slot = FranchiseSave.ReadSlot(saveDir);
+        var on = slot?.Season > 19000000 ? new DateTime(slot.Season / 10000, slot.Season / 100 % 100, slot.Season % 100) : DateTime.Today;
+        var save = FranchiseSave.Open(saveDir, meta);
+        Console.WriteLine($"save {Path.GetFileName(saveDir)}: {slot?.SeasonText}");
+        string Line(FranchisePlayer p)
+        {
+            var b = p.Bytes();
+            int rights = (sbyte)b[0x1AF], jl = (sbyte)b[0x178], jt = System.Buffers.Binary.BinaryPrimitives.ReadInt16LittleEndian(b.AsSpan(0xE0)), entry = b[0x7F];
+            int ovr = p.Value("skill_overall");
+            var born = new DateTime(p.Value("year"), Math.Max(1, p.Value("month")), Math.Max(1, p.Value("day")));
+            int age = on.Year - born.Year - (on < born.AddYears(on.Year - born.Year) ? 1 : 0);
+            string draft = p.Value("draftround") > 0 ? $"drafted {p.Value("draftyear")} rd {p.Value("draftround")} by {TeamName(p.Value("draftteam"))}" : "undrafted";
+            string ncaa = jl == 32 ? $"NCAA {TeamName(jt)}, entry byte {(entry == 0 ? "0 (birth rule)" : $"{2000 + (entry & 0x7F)}{((entry & 0x80) != 0 ? " +graduated" : "")}")}" : $"junior league {jl}" + (entry != 0 ? $", entry byte {entry}" : "");
+            return $"{p.Name} (id {BitConverter.ToInt32(b, 0x8C)}) — on {TeamName(p.CurrentTeam)}, {Roster.PositionNameFull(p.Value("positionprimary"))}, {ovr} OVR, age {age}; rights {TeamName(rights)}; {draft}; contract {p.Value("contractlength")} yrs; {ncaa}{(b[0x184] != 0 ? "; marked ex-pro" : "")}";
+        }
+        // --drafted YEAR: every player drafted that year (league, contract, round)
+        if (int.TryParse(opts.Get("drafted"), out int dy))
+            foreach (var p in save.Players.Where(p => p.Value("draftyear") == dy && p.Value("draftround") > 0).OrderBy(p => p.Value("draftround")))
+                Console.WriteLine(Line(p) + $" | round {p.Value("draftround")}");
+        // --commits: commits not at school yet (join-year stamp 1..0x7F, junior league not 32), by join year
+        if (opts.Has("commits"))
+            foreach (var p in save.Players.Where(p => { var b = p.Bytes(); return (sbyte)b[0x178] != 32 && b[0x7F] is > 0 and < 0x80; }).OrderBy(p => p.Bytes()[0x7F]).ThenBy(p => p.LastName))
+                Console.WriteLine(Line(p) + $" | joins fall {2000 + p.Bytes()[0x7F]}");
+        if (opts.Has("ncaa"))
+            foreach (var p in save.Players.Where(p => { var b = p.Bytes(); return (sbyte)b[0x178] == 32 && (sbyte)b[0x1AF] >= 0; }).OrderBy(p => p.LastName))
+                Console.WriteLine(Line(p));
+        foreach (string name in opts.Positional)
+        {
+            var hits = save.Players.Where(p => p.Name.Contains(name, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (hits.Count == 0) Console.WriteLine($"{name}: not found");
+            foreach (var p in hits) Console.WriteLine(Line(p));
+        }
+        return 0;
+    }
+
+    /// <summary>string-room KEY "TEXT" [KEY "TEXT"...]: read only. Whether each text fits its language string's room
+    /// (compressed bits the string has now) and what it says now.</summary>
+    private static int StringRoomCmd(string game, Options opts)
+    {
+        var loc = new Legacy(OpenIndex(game, false)).OpenDb(NHL27Kit.Core.Packages.PackageCheck.LocDb);
+        var p = opts.Positional;
+        // --find PATTERN "TEXT": every key containing PATTERN whose room fits TEXT
+        if (opts.Get("find") is { } pat && p.Count >= 1)
+        {
+            foreach (var t in loc.Tables.Where(t => t.HasCompressedStrings && t.WrittenRecords > 0))
+            {
+                var fid = t.Fields.FirstOrDefault(f => f.Name.Equals("stringid", StringComparison.OrdinalIgnoreCase));
+                var ftx = t.Fields.FirstOrDefault(f => f.Name.Equals("sourcetext", StringComparison.OrdinalIgnoreCase));
+                if (fid == null || ftx == null) continue;
+                for (int r = 0; r < t.WrittenRecords; r++)
+                {
+                    if (loc.IsInvalid(t, r)) continue;
+                    string id = loc.Get(t, r, fid)?.ToString() ?? "";
+                    if (!id.Contains(pat, StringComparison.OrdinalIgnoreCase)) continue;
+                    var (need, have) = loc.Budget(t, r, ftx, p[0]);
+                    if (need >= 0 && need <= have) Console.WriteLine($"{id}	room {have}	now \"{loc.Get(t, r, ftx)}\"");
+                }
+            }
+            return 0;
+        }
+        for (int i = 0; i + 1 < p.Count; i += 2)
+        {
+            var s = NHL27Kit.Core.Packages.PackageCheck.FindString(loc, p[i]);
+            if (s == null) { Console.WriteLine($"{p[i]}: not found"); continue; }
+            var (t, row, f) = s.Value;
+            var (need, have) = loc.Budget(t, row, f, p[i + 1]);
+            Console.WriteLine($"{p[i]}: now \"{loc.Get(t, row, f)}\"; \"{p[i + 1]}\" needs {need}, room {have}: {(need >= 0 && need <= have ? "fits" : "TOO LONG")}");
+        }
+        return 0;
+    }
+
+    private static int PackageCodeModsCore(string game, Options opts)
+    {
+        var p = opts.Positional.ToList();
+        if (p.Count < 2) throw new ArgumentException("package-codemods FIRST LAST [KEEP] [SEASONS] [ENTRY_AGE] [--commits FILE] [--entries FILE] [--abbrs A,B,...] [--names FILE]");
+        List<(int, int, int)> commits = null;
+        if (opts.Get("commits") is { } cf)                        // [[art id, school index, commit year], ...]
+            commits = System.Text.Json.JsonSerializer.Deserialize<int[][]>(File.ReadAllText(cf))!.Select(e => (e[0], e[1], e[2])).ToList();
+        List<(int, int)> entries = null;
+        if (opts.Get("entries") is { } ef)                        // [[art id, class offset 0 Fr .. 4 Gr], ...]
+            entries = System.Text.Json.JsonSerializer.Deserialize<int[][]>(File.ReadAllText(ef))!.Select(e => (e[0], e[1])).ToList();
+        var mod = NHL27Kit.Core.Packages.NcaaCodeMods.Build(Path.Combine(game, "eboot.bin"), int.Parse(p[0]), int.Parse(p[1]),
+            p.Count > 2 ? int.Parse(p[2]) : 9, p.Count > 3 ? int.Parse(p[3]) : 4, p.Count > 4 ? int.Parse(p[4]) : 19, commits, entries, opts.Get("abbrs")?.Split(','),
+            opts.Get("names") is { } nf ? System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement[][]>(File.ReadAllText(nf))!.Select(e => (e[0].GetString(), e[1].GetInt32(), e[2].GetInt32())).ToList() : null,
+            opts.Get("schools")?.Split(','));
+        string json = mod.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        if (opts.Get("out") is { } o) File.WriteAllText(o, json); else Console.WriteLine(json);
+        return 0;
+    }
+
+    /// <summary>
+    /// package-check FOLDER: read-only look at what installing a package (docs/PACKAGES.md) would do on this game: checks
+    /// the recipe and images, previews team indexes, spare logo art ids, the league logo id and name sets.
+    /// </summary>
+    private static int PackageCheckCmd(string game, Options opts)
+    {
+        string folder = opts.Positional.FirstOrDefault() ?? throw new ArgumentException("package-check needs the package folder");
+        var spec = NHL27Kit.Core.Packages.PackageSpec.Load(folder);
+        var index = OpenIndex(game, false);
+        var r = NHL27Kit.Core.Packages.PackageCheck.Run(index, spec);
+        foreach (var l in r.Lines) Console.WriteLine("  " + l);
+        foreach (var w in r.Warnings) Console.WriteLine("  warning: " + w);
+        foreach (var e in r.Errors) Console.WriteLine("  ERROR: " + e);
+        Console.WriteLine(r.Ok ? "OK: the package can be installed." : $"{r.Errors.Count} problem(s) to fix before installing.");
+        return r.Ok ? 0 : 1;
     }
 
     /// <summary>
@@ -3159,6 +3405,104 @@ public static class Program
     /// worked out from the game's data alone), scored against CapWages: the retaining team(s) and this season's retained
     /// dollars. Right, wrong (should never happen) or undetermined (shown as —).
     /// </summary>
+    /// <summary>
+    /// portrait-slots [--bucket N]: the game's portrait textures (p{artid}) and who uses them, for choosing id ranges.
+    /// Per bucket of ids: textures, used by a bio (nhl_game.db or a game mode's roster), free, free but stored together
+    /// with other textures (can't be replaced on their own), and slots HMS has already written. Then the longest runs of
+    /// free, replaceable ids, and art ids bios use that have no texture. Read only.
+    /// </summary>
+    private static int PortraitSlotsCmd(string game, Options opts)
+    {
+        var index = OpenIndex(game, false);
+        var legacy = new Legacy(index);
+        var main = legacy.OpenDb(Roster.Database);
+        var others = new List<T3Db>();
+        foreach (var name in PortraitSync.OtherRosters) try { others.Add(legacy.OpenDb(name)); } catch (Exception e) { Console.WriteLine($"  {name}: {e.Message}"); }
+        int bucket = int.TryParse(opts.Get("bucket"), out int b) ? b : 2000;
+
+        // used art ids: by source
+        var usedBy = new Dictionary<int, string>();
+        var bio = main.Table(Roster.BioTable);
+        var art = bio.Fields.First(f => f.Name == "artid");
+        var gid = bio.Fields.First(f => f.Name == "game_id");
+        var mainUsed = new Dictionary<int, int>();
+        for (int r = 0; r < bio.WrittenRecords; r++)
+            if (!main.IsInvalid(bio, r)) { int a = (int)main.Get(bio, r, art); usedBy.TryAdd(a, "game"); mainUsed.TryAdd(a, (int)main.Get(bio, r, gid)); }
+        for (int i = 0; i < others.Count; i++)
+            foreach (var t in others[i].Tables.Where(t => t.RecordSize == bio.RecordSize && t.Fields.Count == bio.Fields.Count))
+            {
+                var f = t.Fields.FirstOrDefault(x => x.BitOffset == art.BitOffset && x.Depth == art.Depth);
+                if (f == null) continue;
+                for (int r = 0; r < t.WrittenRecords; r++)
+                    if (!others[i].IsInvalid(t, r)) usedBy.TryAdd((int)others[i].Get(t, r, f), Path.GetFileNameWithoutExtension(PortraitSync.OtherRosters[i]));
+            }
+
+        // textures, and which ones share their stored image (chunk) with another texture
+        var tex = new Dictionary<int, Guid>();
+        foreach (var name in index.Res.Keys)
+            if (name.StartsWith(PortraitSync.Prefix, StringComparison.Ordinal) && int.TryParse(name.AsSpan(PortraitSync.Prefix.Length), out int n) && n > 0)
+                try { tex[n] = TextureHeader.Parse(index.Read(index.GetRes(name))).ChunkId; } catch { tex[n] = Guid.Empty; }
+        var chunkUses = tex.Values.GroupBy(g => g).ToDictionary(g => g.Key, g => g.Count());
+        bool Shared(int n) => tex[n] == Guid.Empty || chunkUses[tex[n]] > 1;
+
+        // slots HMS has written (texture mod entries on portraits)
+        var hms = new HashSet<int>();
+        foreach (var e in Mods().Entries.Where(e => e.Kind == "texture" && e.Name != null && e.Name.StartsWith(PortraitSync.Prefix, StringComparison.OrdinalIgnoreCase)))
+            if (int.TryParse(e.Name.AsSpan(PortraitSync.Prefix.Length), out int n)) hms.Add(n);
+
+        Console.WriteLine($"portrait textures: {tex.Count}, ids {tex.Keys.Min()}–{tex.Keys.Max()}; art ids in use: {usedBy.Count} ({usedBy.Count(u => tex.ContainsKey(u.Key))} with a texture)");
+        foreach (var g in usedBy.Where(u => tex.ContainsKey(u.Key)).GroupBy(u => u.Value)) Console.WriteLine($"  used by {g.Key}: {g.Count()}");
+        var free = tex.Keys.Where(n => !usedBy.ContainsKey(n)).OrderBy(n => n).ToList();
+        Console.WriteLine($"free: {free.Count} ({free.Count(n => !Shared(n))} replaceable, {free.Count(Shared)} stored with other textures); HMS has written {hms.Count}: {string.Join(", ", hms.OrderBy(x => x).Take(20))}");
+        Console.WriteLine();
+        Console.WriteLine($"{"ids",-14}{"textures",9}{"used",7}{"free",7}{"replaceable",12}{"HMS",5}");
+        int max = tex.Keys.Max();
+        for (int lo = 0; lo <= max; lo += bucket)
+        {
+            var ids = tex.Keys.Where(n => n >= lo && n < lo + bucket).ToList();
+            if (ids.Count == 0) continue;
+            int used = ids.Count(usedBy.ContainsKey), fr = ids.Count - used, rep = ids.Count(n => !usedBy.ContainsKey(n) && !Shared(n));
+            Console.WriteLine($"{$"{lo}–{lo + bucket - 1}",-14}{ids.Count,9}{used,7}{fr,7}{rep,12}{ids.Count(hms.Contains),5}");
+        }
+        // longest runs of consecutive replaceable free ids (a gap in the texture numbering ends a run)
+        var runs = new List<(int From, int To)>();
+        int start = -1, prev = -2;
+        foreach (int n in free.Where(n => !Shared(n)))
+        {
+            if (n != prev + 1) { if (start >= 0) runs.Add((start, prev)); start = n; }
+            prev = n;
+        }
+        if (start >= 0) runs.Add((start, prev));
+        Console.WriteLine();
+        Console.WriteLine("longest runs of free, replaceable ids:");
+        foreach (var (f, t) in runs.OrderByDescending(r => r.To - r.From).Take(int.TryParse(opts.Get("runs"), out int k) ? k : 15).OrderBy(r => r.From))
+            Console.WriteLine($"  {f}–{t} ({t - f + 1})");
+        // players with no portrait to show (flag off, or no texture), by their club's league
+        var teams = main.Table(Roster.TeamsTable);
+        var tf = teams.Fields.ToDictionary(x => x.Name);
+        var leagueOf = new Dictionary<int, int>();
+        for (int r = 0; r < teams.WrittenRecords; r++)
+            if (!main.IsInvalid(teams, r)) leagueOf.TryAdd((int)main.Get(teams, r, tf["index"]), (int)main.Get(teams, r, tf["league"]));
+        var bf = bio.Fields.ToDictionary(x => x.Name);
+        var byLeague = new SortedDictionary<int, (int All, int Missing)>();
+        for (int r = 0; r < bio.WrittenRecords; r++)
+        {
+            if (main.IsInvalid(bio, r)) continue;
+            int team = (int)main.Get(bio, r, bf["team"]);
+            if (team < 0 || !leagueOf.TryGetValue(team, out int lg)) continue;
+            bool missing = (int)main.Get(bio, r, bf["hasportrait"]) == 0 || !tex.ContainsKey((int)main.Get(bio, r, art));
+            var (a, m) = byLeague.GetValueOrDefault(lg);
+            byLeague[lg] = (a + 1, m + (missing ? 1 : 0));
+        }
+        Console.WriteLine();
+        Console.WriteLine("players by their club's league: all / no portrait");
+        foreach (var (lg, (a, m)) in byLeague) Console.WriteLine($"  league {lg,2}: {a,5} / {m,5}");
+        var noTex = usedBy.Keys.Where(a => a > 0 && !tex.ContainsKey(a)).OrderBy(a => a).ToList();
+        Console.WriteLine();
+        Console.WriteLine($"art ids bios use with no texture: {noTex.Count}" + (noTex.Count > 0 ? $" ({noTex.First()}–{noTex.Last()})" : ""));
+        return 0;
+    }
+
     /// <summary>
     /// save-player SAVEDIR NAME: a player's art id, portrait flag, team and number as a save (franchise or roster slot)
     /// holds them, from every table in its league database that has an artid, for checking what a save shows against
