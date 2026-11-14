@@ -69,10 +69,9 @@ public static class PackageInstaller
 
         // 1. back to the game without the package
         var existing = store.Find(Kind, spec.Id);
-        if (existing != null && !dry && store.State(existing, game) is ModState.Applied or ModState.Partial)
+        if (existing != null && !dry && store.RestoreIfApplied(existing, game, log))
         {
-            log($"Taking down the installed {spec.Id} first");
-            store.Restore(existing, game, log);
+            log($"Took down the installed {spec.Id} first");
             Took("taking down the installed package");
             index = reopen?.Invoke() ?? throw new InvalidOperationException(
                 $"{spec.Id} is installed: reinstalling needs a way to re-read the asset index after taking it down.");
@@ -102,7 +101,7 @@ public static class PackageInstaller
         ApplyTeams(db, loc, spec, resolved, nameSets, r);
         foreach (var g in spec.Groups) PackagePlayers.Apply(db, g, r);
         var portraits = PackagePortraits.Assign(index, legacy, db, spec, r);
-        PackagePlayers.EntryYears(db, r);
+        PackagePlayers.EntryYears(db, r, spec.Teams.Select(t => t.Index).ToHashSet());
         foreach (var (id, text) in spec.Strings ?? new()) SetString(loc, id, text, r);
         // the teams' own uniforms (Jersey Studio exports): their jersey menus now, their kit folders' bytes in step 4
         var uniforms = spec.Groups.Any(g => PackageUniforms.Folder(g) != null)
@@ -176,7 +175,7 @@ public static class PackageInstaller
         var lines = new List<string>();
         var e = store.Find(Kind, id) ?? throw new InvalidOperationException($"No package {id} in the mod list.");
         var clock = System.Diagnostics.Stopwatch.StartNew();
-        if (store.State(e, game) is ModState.Applied or ModState.Partial) store.Restore(e, game, log);
+        store.RestoreIfApplied(e, game, log);
         double restored = clock.Elapsed.TotalSeconds;
         store.Remove(e);
         lines.Add($"{id}: restored and removed from the mod list (its resolved choices are kept for a reinstall) in {restored:0.0} s + {clock.Elapsed.TotalSeconds - restored:0.0} s");
@@ -454,14 +453,15 @@ public static class PackageInstaller
             if (rink != null && placeholder) r.Warnings.Add($"{t.Code}: has a rink but no logo of its own (its art id is the shared placeholder's); rink skipped");
             else if (rink != null)
             {
-                var pic = Png.Load(rink);
-                if (!CenterIce.IsRinkShape(pic.W, pic.H) || pic.W < CenterIce.LeastWidth)
-                    r.Warnings.Add($"{t.Code}: {Path.GetFileName(rink)} is {pic.W}x{pic.H}, not a top-down rink layout (5000x2236); rink skipped");
+                var file = File.ReadAllBytes(rink);
+                var (w, h) = Png.Size(file, rink);
+                if (!CenterIce.IsRinkShape(w, h) || w < CenterIce.LeastWidth)
+                    r.Warnings.Add($"{t.Code}: {Path.GetFileName(rink)} is {w}x{h}, not a top-down rink layout (5000x2236); rink skipped");
                 else
                 {
-                    var g = CenterIce.Measure(pic.Rgba, pic.W, pic.H);
-                    ice = (CenterIce.Logo(pic.Rgba, pic.W, pic.H, g, new CenterIceLook()), CenterIce.LogoSize, CenterIce.LogoSize);
-                    r.Lines.Add($"{t.Code}: centre ice from {Path.GetFileName(rink)} (blue lines {(g.Measured ? "measured" : "not found, template scale")})");
+                    var (logo, measured) = CenterIceCut(file, rink);
+                    ice = (logo, CenterIce.LogoSize, CenterIce.LogoSize);
+                    r.Lines.Add($"{t.Code}: centre ice from {Path.GetFileName(rink)} (blue lines {(measured ? "measured" : "not found, template scale")})");
                 }
             }
             int n = 0;
@@ -486,6 +486,29 @@ public static class PackageInstaller
                 if (PlanOne(index, name, img, locations, tocs, patches, r, st)) n++;
             r.Lines.Add($"league {g.League.Id}: {n} logo textures on art id {la}");
         }
+    }
+
+    /// <summary>
+    /// The centre-ice logo cut from a rink layout, and whether its blue lines were found. Decoding a 5000×2236 layout and
+    /// cutting it takes about half a second, so the cut is kept in the plan cache by the layout's bytes (deflated: it is
+    /// mostly clear ice) and only a new or changed layout is cut again.
+    /// </summary>
+    private static (byte[] Logo, bool Measured) CenterIceCut(byte[] file, string what)
+    {
+        var kept = PlanCache.Get("centerice", () =>
+        {
+            var pic = Png.Decode(file, what);
+            var g = CenterIce.Measure(pic.Rgba, pic.W, pic.H);
+            var logo = CenterIce.Logo(pic.Rgba, pic.W, pic.H, g, new CenterIceLook());
+            using var ms = new MemoryStream();
+            ms.WriteByte(g.Measured ? (byte)1 : (byte)0);
+            using (var z = new System.IO.Compression.DeflateStream(ms, System.IO.Compression.CompressionLevel.Fastest, leaveOpen: true)) z.Write(logo);
+            return ms.ToArray();
+        }, $"{CenterIce.Version}|{CenterIce.LogoSize}", file);
+        var rgba = new byte[CenterIce.LogoSize * CenterIce.LogoSize * 4];
+        using (var z = new System.IO.Compression.DeflateStream(new MemoryStream(kept, 1, kept.Length - 1), System.IO.Compression.CompressionMode.Decompress))
+            z.ReadExactly(rgba);
+        return (rgba, kept[0] == 1);
     }
 
     /// <summary>The portraits' textures (slots from PackagePortraits.Assign). A slot whose chunk another portrait

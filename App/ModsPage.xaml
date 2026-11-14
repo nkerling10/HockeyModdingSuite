@@ -11,6 +11,12 @@
 
         <DockPanel Margin="0,0,0,16">
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button x:Name="PackageButton" Margin="0,0,8,0" Click="OnInstallPackage" ToolTip="Install a mod package: a folder with a package.json (e.g. NCAA_Mod)">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE7B8;" Style="{StaticResource Icon}" FontSize="13" />
+                        <TextBlock Text="Install package…" Margin="8,0,0,0" />
+                    </StackPanel>
+                </Button>
                 <Button x:Name="ImportButton" Click="OnImportPack" ToolTip="Write a .nhl27mod pack's replacements into the game">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE8B5;" Style="{StaticResource Icon}" FontSize="13" />
@@ -86,6 +92,10 @@
                                     </StackPanel>
                                 </Border>
                                 <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Top">
+                                    <Button Content="Reinstall" Padding="12,5" Click="OnReinstallPackage" Visibility="{Binding CanReinstall, Converter={StaticResource BoolVisible}}"
+                                            ToolTip="Take the package off and install it again from its folder (picks up changes made there)" />
+                                    <Button Content="Remove package" Padding="12,5" Margin="6,0,0,0" Click="OnRemovePackage" Visibility="{Binding IsPackage, Converter={StaticResource BoolVisible}}"
+                                            ToolTip="Put the game back as it was before the package (its code mods too) and take it off the list" />
                                     <Button Content="Apply" Padding="12,5" Click="OnApply" Visibility="{Binding CanApply, Converter={StaticResource BoolVisible}}" />
                                     <Button Content="Restore" Padding="12,5" Margin="6,0,0,0" Click="OnRestore" Visibility="{Binding CanRestore, Converter={StaticResource BoolVisible}}" />
                                     <Button Style="{StaticResource Ghost}" Margin="4,0,0,0" Click="OnRemove" ToolTip="Remove from the list (only when not in the game)"

@@ -34,7 +34,12 @@ public static class ChunkCopies
     // textures listed in the same few big bundles. Off by default: a record's SHA1s change when a mod is written.
     [ThreadStatic] private static Dictionary<(int, int, bool, uint, uint), BundleRecord> _records;
 
-    private sealed class RecordCache : IDisposable { public void Dispose() => _records = null; }
+    // Where each stored place is listed in a bundle (location key -> TOC path, bundle, entry index), built once per
+    // planning pass the first time FindAt runs: FindAt used to walk every bundle of every TOC (~372k) on each call, which
+    // a package's logo pass did once per grown texture.
+    [ThreadStatic] private static Dictionary<long, List<(string Path, int PathAt, TocBundle Bundle, int BundleAt, int Entry)>> _places;
+
+    private sealed class RecordCache : IDisposable { public void Dispose() { _records = null; _places = null; } }
     private sealed class NoOp : IDisposable { public void Dispose() { } }
 
     /// <summary>Keeps bundle records read on this thread until disposed (nested calls share the outer cache). Only for
@@ -111,23 +116,53 @@ public static class ChunkCopies
     {
         var have = known.Where(c => c.InBundle).Select(c => (c.Toc, c.BundleName, LocationIndex.Key(c.Ref))).ToHashSet();
         var found = new List<ChunkCopy>();
+        void Consider(string path, TocBundle tb, int i)
+        {
+            long key = LocationIndex.Key(tb.Entries[i]);
+            if (!places.Contains(key) || have.Contains((path, tb.Name, key))) return;
+            var r0 = tb.Entries[0];
+            var rec = Record(index, r0);
+            int at = i - 1 - rec.Ebx.Count - rec.Res.Count;
+            if (at < 0 || at >= rec.Chunks.Count) return;
+            var item = rec.Chunks[at];
+            if (only != null && item.Id != only) return;
+            found.Add(new ChunkCopy("bundle", path, tb.Entries[i], int.MaxValue, tb.Name, item.Sha1Pos, item.Sha1, item.LogicalOffset, item.Size, true, r0));
+            have.Add((path, tb.Name, key));
+        }
+        if (_records != null)
+        {
+            // a planning pass: look the places up (the same walk as below, done once and kept, in the same order)
+            if (_places == null)
+            {
+                _places = new();
+                int pathAt = 0;
+                foreach (string path in index.Layout.AllTocPaths())
+                {
+                    var bundles = tocs.Get(path).Bundles;
+                    for (int b = 0; b < bundles.Count; b++)
+                        for (int i = 1; i < bundles[b].Entries.Count; i++)
+                        {
+                            long key = LocationIndex.Key(bundles[b].Entries[i]);
+                            if (!_places.TryGetValue(key, out var list)) _places[key] = list = new();
+                            list.Add((path, pathAt, bundles[b], b, i));
+                        }
+                    pathAt++;
+                }
+            }
+            var hits = new List<(string Path, int PathAt, TocBundle Bundle, int BundleAt, int Entry)>();
+            foreach (long key in places)
+                if (_places.TryGetValue(key, out var list)) hits.AddRange(list);
+            // in the full walk's order: TOC paths, then bundles, then entries
+            foreach (var h in hits.OrderBy(h => h.PathAt).ThenBy(h => h.BundleAt).ThenBy(h => h.Entry))
+                Consider(h.Path, h.Bundle, h.Entry);
+            return found;
+        }
         foreach (string path in index.Layout.AllTocPaths())
         {
             var toc = tocs.Get(path);
             foreach (var tb in toc.Bundles)
                 for (int i = 1; i < tb.Entries.Count; i++)
-                {
-                    long key = LocationIndex.Key(tb.Entries[i]);
-                    if (!places.Contains(key) || have.Contains((path, tb.Name, key))) continue;
-                    var r0 = tb.Entries[0];
-                    var rec = Record(index, r0);
-                    int at = i - 1 - rec.Ebx.Count - rec.Res.Count;
-                    if (at < 0 || at >= rec.Chunks.Count) continue;
-                    var item = rec.Chunks[at];
-                    if (only != null && item.Id != only) continue;
-                    found.Add(new ChunkCopy("bundle", path, tb.Entries[i], int.MaxValue, tb.Name, item.Sha1Pos, item.Sha1, item.LogicalOffset, item.Size, true, r0));
-                    have.Add((path, tb.Name, key));
-                }
+                    Consider(path, tb, i);
         }
         return found;
     }

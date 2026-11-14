@@ -11,6 +11,15 @@ public static class Png
 {
     public static (byte[] Rgba, int W, int H) Load(string file) => Decode(File.ReadAllBytes(file), file);
 
+    /// <summary>A PNG's width and height from its header, without decoding it.</summary>
+    public static (int W, int H) Size(byte[] png, string what = "image")
+    {
+        ReadOnlySpan<byte> sig = stackalloc byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G', 0x0D, 0x0A, 0x1A, 0x0A };
+        if (png.Length < 24 || !png.AsSpan(0, 8).SequenceEqual(sig) || System.Text.Encoding.ASCII.GetString(png, 12, 4) != "IHDR")
+            throw new InvalidDataException($"{what} isn't a PNG.");
+        return (BinaryPrimitives.ReadInt32BigEndian(png.AsSpan(16)), BinaryPrimitives.ReadInt32BigEndian(png.AsSpan(20)));
+    }
+
     public static (byte[] Rgba, int W, int H) Decode(byte[] png, string what = "image")
     {
         ReadOnlySpan<byte> sig = stackalloc byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G', 0x0D, 0x0A, 0x1A, 0x0A };

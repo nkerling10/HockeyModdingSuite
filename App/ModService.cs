@@ -299,8 +299,86 @@ public sealed class ModService
     public async Task<ModEntry> SaveDbAsync(string name, Func<T3Db, string> edit, string source = "Database page")
     {
         RefuseWrite();
+        // a package wrote this database after its entry (e.g. a new base roster under the NCAA package): the package comes
+        // off, the save goes through, and the package goes back on (when the user agrees)
+        var pkg = await Run(() => BlockingPackage(name));
+        if (pkg != null && ConfirmPackageDetour != null && await ConfirmPackageDetour(pkg))
+        {
+            try { return await Run(() => SaveUnderPackage(pkg, name, edit, source)); }
+            finally { IndexStale?.Invoke(); Changed?.Invoke(); }
+        }
         try { return await Run(() => DbEditor.Save(Index, Store, Game, name, edit, source: source)); }
         finally { ForgetPs4(); Changed?.Invoke(); }
+    }
+
+    // ---------------------------------------------------------------- packages (a mod folder with a package.json, e.g. NCAA_Mod)
+
+    /// <summary>Raised after a package was installed or removed: the game's TOCs changed under the open index, so the
+    /// app reads the game again.</summary>
+    public event Action IndexStale;
+
+    /// <summary>Asked (on the UI thread) when a database save is blocked because a package wrote the same database after
+    /// it. True: take the package off, save, put it back on.</summary>
+    public Func<ModEntry, Task<bool>> ConfirmPackageDetour { get; set; }
+
+    /// <summary>The installed packages (mod list entries of kind "package").</summary>
+    public List<ModEntry> Packages => Store.Entries.Where(e => e.Kind == Core.Packages.PackageInstaller.Kind).ToList();
+
+    /// <summary>A fresh index: package installs change TOCs, so they read the game again rather than trust the open one.</summary>
+    private AssetIndex FreshIndex() => AssetIndex.Open(Game, File.ReadAllBytes, KitPaths.IndexFileFor(Profile), _ => { });
+
+    /// <summary>Installs (or reinstalls) the package in <paramref name="folder"/>: the same as <c>nhl27kit package-install</c>,
+    /// then points the emulator's --game-patch at the code mods file when it doesn't already.</summary>
+    public async Task<Core.Packages.PackageInstaller.Result> InstallPackageAsync(string folder, Action<string> log)
+    {
+        RefuseWrite();
+        try { return await Run(() => InstallPackage(folder, log)); }
+        finally { IndexStale?.Invoke(); Changed?.Invoke(); }
+    }
+
+    /// <summary>Takes a package out of the game and the mod list (its code mods too).</summary>
+    public async Task<List<string>> RemovePackageAsync(string id, Action<string> log)
+    {
+        RefuseWrite();
+        try { return await Run(() => Core.Packages.PackageInstaller.Remove(Store, Game, id, log)); }
+        finally { IndexStale?.Invoke(); Changed?.Invoke(); }
+    }
+
+    private Core.Packages.PackageInstaller.Result InstallPackage(string folder, Action<string> log)
+    {
+        var spec = Core.Packages.PackageSpec.Load(folder);
+        var r = Core.Packages.PackageInstaller.Install(FreshIndex(), Store, Game, spec, false, log, FreshIndex);
+        try
+        {
+            string exe = KytySetup.Load(Profile.TitleId ?? "PPSA34063", Settings.Load().Emulator).Emulator;
+            if (exe == null) r.Warnings.Add($"emulator: no KytyPS5 build found; give it --game-patch \"{r.CodeModsFile}\"");
+            else if (Core.Packages.PackageInstaller.SetEmulatorPatch(Path.GetDirectoryName(exe), r.CodeModsFile) is { } change) r.Lines.Add("emulator: " + change);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            r.Warnings.Add($"emulator: couldn't point it at the code mods ({ex.Message}); give it --game-patch \"{r.CodeModsFile}\"");
+        }
+        return r;
+    }
+
+    /// <summary>The applied package that changed <paramref name="name"/> after that database's own entry, if any.</summary>
+    private ModEntry BlockingPackage(string name)
+    {
+        var existing = Store.Find(DbEditor.Kind, name);
+        if (existing == null || Store.State(existing, Game) is not (ModState.Changed or ModState.Missing)) return null;
+        return Packages.LastOrDefault(p => Store.State(p, Game) is ModState.Applied or ModState.Partial && Directory.Exists(p.Source));
+    }
+
+    /// <summary>Package off, the database saved, the package back on (from its folder). If the save fails, the package
+    /// still goes back on.</summary>
+    private ModEntry SaveUnderPackage(ModEntry pkg, string name, Func<T3Db, string> edit, string source)
+    {
+        string folder = pkg.Source, id = pkg.Name;
+        Core.Packages.PackageInstaller.Remove(Store, Game, id, null);
+        ModEntry saved;
+        try { saved = DbEditor.Save(FreshIndex(), Store, Game, name, edit, source: source); }
+        finally { InstallPackage(folder, null); }
+        return saved;
     }
 
     /// <summary>Writes a pack of these mods (a database's current bytes are read from the game).</summary>

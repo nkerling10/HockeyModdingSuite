@@ -149,6 +149,8 @@ public sealed class ModStore
                 _open[p.File] = fs = new FileStream(Path_(_game, p), FileMode.Open, _write ? FileAccess.ReadWrite : FileAccess.Read, FileShare.ReadWrite, 1 << 16);
             return fs;
         }
+        /// <summary>Whether the range's file is in the game folder (asked of the disk once per file).</summary>
+        public bool Has(RangePatch p) => _open.ContainsKey(p.File) || File.Exists(Path_(_game, p));
         public void FlushAll() { foreach (var fs in _open.Values) fs.Flush(true); }
         public void Dispose() { foreach (var fs in _open.Values) fs.Dispose(); _open.Clear(); }
     }
@@ -249,23 +251,40 @@ public sealed class ModStore
     }
 
     /// <summary>What the game folder holds for this mod: all old, all new, a mix, or something else.</summary>
-    public ModState State(ModEntry e, string game)
+    public ModState State(ModEntry e, string game) => StateOf(e, StateHashes(e, game));
+
+    /// <summary>
+    /// The SHA1 each range's place holds now, read once (null: its file is missing or too short, or the range doesn't
+    /// count for the state). Added data says nothing on its own (it may stay after a restore): the ranges that point at
+    /// it decide, so it is read only when the mod is nothing but added data.
+    /// </summary>
+    private static string[] StateHashes(ModEntry e, string game)
+    {
+        bool appendsCount = e.Patches.All(p => p.Append);
+        var h = new string[e.Patches.Count];
+        using var files = new GameFiles(game, write: false);
+        for (int i = 0; i < h.Length; i++)
+        {
+            var p = e.Patches[i];
+            if (p.Append && !appendsCount) continue;
+            if (files.Has(p)) h[i] = Current(files.Get(p), p);
+        }
+        return h;
+    }
+
+    private static ModState StateOf(ModEntry e, string[] h)
     {
         int old = 0, neu = 0, other = 0;
-        // added data says nothing on its own (it may stay after a restore); the ranges that point at it decide
         bool appendsCount = e.Patches.All(p => p.Append);
-        using var files = new GameFiles(game, write: false);
-        foreach (var p in e.Patches)
+        for (int i = 0; i < h.Length; i++)
         {
+            var p = e.Patches[i];
             if (p.Append && !appendsCount) continue;
-            string file = Path_(game, p);
-            if (!File.Exists(file)) return ModState.Missing;
-            string h = Current(files.Get(p), p);
-            if (h == null) return ModState.Missing;
+            if (h[i] == null) return ModState.Missing;
             // a range whose old and new bytes are the same (a size that didn't change) says nothing either way
-            if (p.OldSha1 == p.NewSha1 && h == p.NewSha1) continue;
-            if (h == p.NewSha1) neu++;
-            else if (h == p.OldSha1) old++;
+            if (p.OldSha1 == p.NewSha1 && h[i] == p.NewSha1) continue;
+            if (h[i] == p.NewSha1) neu++;
+            else if (h[i] == p.OldSha1) old++;
             else other++;
         }
         if (other > 0) return ModState.Changed;
@@ -279,26 +298,65 @@ public sealed class ModStore
     /// <summary>Writes the mod's old bytes back.</summary>
     public void Restore(ModEntry e, string game, Action<string> log = null) => Write(e, game, toNew: false, log);
 
-    private void Write(ModEntry e, string game, bool toNew, Action<string> log)
+    /// <summary>
+    /// Restores the mod when it is applied or partly applied (<see cref="State"/> then <see cref="Restore"/>), reading
+    /// the game's bytes once for both. Returns whether it restored.
+    /// </summary>
+    public bool RestoreIfApplied(ModEntry e, string game, Action<string> log = null)
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var h = StateHashes(e, game);
+        if (StateOf(e, h) is not (ModState.Applied or ModState.Partial)) return false;
+        log?.Invoke($"{e.Name}: state read in {clock.Elapsed.TotalSeconds:0.0} s");
+        Write(e, game, toNew: false, log, h);
+        return true;
+    }
+
+    /// <summary>Whether two of the mod's ranges share bytes of a file (then a write can change what another range holds).</summary>
+    private static bool Overlapping(ModEntry e) =>
+        e.Patches.GroupBy(p => p.File, StringComparer.OrdinalIgnoreCase).Any(g =>
+        {
+            long end = long.MinValue;
+            foreach (var p in g.OrderBy(p => p.Offset))
+            {
+                if (p.Offset < end) return true;
+                end = Math.Max(end, p.Offset + p.Length);
+            }
+            return false;
+        });
+
+    /// <param name="known">What each range held when the caller just read it (restore only: <see cref="StateHashes"/>),
+    /// so it isn't read again.</param>
+    private void Write(ModEntry e, string game, bool toNew, Action<string> log, string[] known = null)
     {
         string verb = toNew ? "apply" : "restore";
         if (toNew) MoveAppended(e, game, log);
         int written = 0;
+        // seconds per phase, in the last log line
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var took = new List<string>();
+        void Took(string phase) { took.Add($"{phase} {clock.Elapsed.TotalSeconds:0.0} s"); clock.Restart(); }
         // each game file opened once; written ranges flushed to disk per file at the end, then read back
         using (var files = new GameFiles(game))
         using (var kept = new Kept(this, e))
         {
-            // check everything before writing anything
+            // check everything before writing anything; what each range holds is kept for the writing pass below, which
+            // needn't read it again unless two ranges share bytes (then an earlier write can change a later range)
+            var held = new string[e.Patches.Count];
+            bool reuse = !Overlapping(e);
             for (int i = 0; i < e.Patches.Count; i++)
             {
                 var p = e.Patches[i];
-                if (!File.Exists(Path_(game, p))) throw new FileNotFoundException($"Can't {verb} {e.Name}: {p.File} is not in the game folder.");
+                if (!files.Has(p)) throw new FileNotFoundException($"Can't {verb} {e.Name}: {p.File} is not in the game folder.");
                 // added data needs no check to restore: nothing points at it afterwards, and TrimAdded cuts only what it recognises
                 if (p.Append && !toNew) continue;
-                string h = Current(files.Get(p), p) ?? throw new InvalidDataException($"Can't {verb} {e.Name}: {p.File} is shorter than the patch expects.");
+                string h = (toNew ? null : known?[i]) ?? Current(files.Get(p), p)
+                           ?? throw new InvalidDataException($"Can't {verb} {e.Name}: {p.File} is shorter than the patch expects.");
                 if (h != p.OldSha1 && h != p.NewSha1)
                     throw new InvalidDataException($"Can't {verb} {e.Name}: {p.File} at 0x{p.Offset:X} holds neither the original nor the replacement. The game files changed since this mod was made; nothing was written.");
+                held[i] = h;
             }
+            Took("check");
             var done = new List<int>();
             // restoring goes backwards, so appended ranges are cut off last-added first
             foreach (int i in toNew ? Enumerable.Range(0, e.Patches.Count) : Enumerable.Range(0, e.Patches.Count).Reverse())
@@ -308,7 +366,7 @@ public sealed class ModStore
                 // added data comes off after the ranges pointing at it are back (TrimAdded)
                 if (p.Append && !toNew) continue;
                 var fs = files.Get(p);
-                if (Current(fs, p) == want) continue;
+                if ((reuse ? held[i] : Current(fs, p)) == want) continue;
                 var data = toNew ? kept.New(i) : kept.Old(i);
                 if (Hex(SHA1.HashData(data)) != want) throw new InvalidDataException($"The stored {(toNew ? "new" : "old")} bytes of {e.Name} (patch {i}) are damaged.");
                 fs.Position = p.Offset;
@@ -316,7 +374,9 @@ public sealed class ModStore
                 done.Add(i);
                 if (p.Append) log?.Invoke($"{p.Note ?? "range"}: {p.Length:N0} bytes at 0x{p.Offset:X} in {p.File}");
             }
+            Took("write");
             files.FlushAll();
+            Took("flush");
             foreach (int i in done)
             {
                 var p = e.Patches[i];
@@ -324,14 +384,17 @@ public sealed class ModStore
                     throw new IOException($"{p.File} did not hold what was written at 0x{p.Offset:X}.");
             }
             written = done.Count;
+            Took("read back");
         }
         if (!toNew)
         {
-            var pointsAt = new Dictionary<ModEntry, bool>();
+            // this mod points at none of its added data now: every other range holds its old bytes (checked or read back above)
+            var pointsAt = new Dictionary<ModEntry, bool> { [e] = false };
             foreach (var f in e.Patches.Where(p => p.Append).Select(p => p.File).Distinct(StringComparer.OrdinalIgnoreCase))
                 written += TrimAdded(game, f, log, pointsAt);
+            Took("cut added data");
         }
-        log?.Invoke($"{e.Name}: {written} range(s) written, {e.Patches.Count - written} already as wanted");
+        log?.Invoke($"{e.Name}: {written} range(s) written, {e.Patches.Count - written} already as wanted ({string.Join(", ", took)})");
     }
 
     /// <summary>
@@ -430,34 +493,43 @@ public sealed class ModStore
         var listed = Entries.SelectMany(x => x.Patches.Where(Here).Select(p => (Entry: x, Patch: p))).ToList();
         var byEnd = listed.GroupBy(t => t.Patch.Offset + t.Patch.Length).ToDictionary(g => g.Key, g => g.First());
         var starts = listed.Select(t => t.Patch.Offset).ToHashSet();
-        while (true)
+        // walk back from the end over what can go (each range checked as it is: the data its mod or an earlier save
+        // added), then cut the file once: one truncation per file, not one per range (thousands for a package's logos)
+        var cuts = new List<(ModEntry Entry, RangePatch Patch)>();
+        using (var fs = new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, 1 << 16))
         {
-            long length = new FileInfo(file).Length;
-            // leftovers that were cut, or whose place a listed mod uses now, are forgotten
-            int dropped = _leftovers.RemoveAll(p => Here(p) && (p.Offset >= length || starts.Contains(p.Offset)));
-            if (dropped > 0) Save();
-            var last = byEnd.TryGetValue(length, out var hit) && hit.Patch.Offset < length ? hit
-                : _leftovers.Select(p => (Entry: (ModEntry)null, Patch: p))
-                            .FirstOrDefault(t => Here(t.Patch) && t.Patch.Offset + t.Patch.Length == length && t.Patch.Offset < length);
-            if (last.Patch == null) break;
-            if (last.Entry == null)
+            long length = fs.Length;
+            while (true)
             {
-                if (Current(file, last.Patch) != last.Patch.NewSha1) break;
-                using (var fs = new FileStream(file, FileMode.Open, FileAccess.Write, FileShare.ReadWrite)) { fs.SetLength(last.Patch.Offset); fs.Flush(true); }
-                _leftovers.Remove(last.Patch);
-                Save();
-                log?.Invoke($"{last.Patch.Note ?? "range"}: cut {rel} back to 0x{last.Patch.Offset:X} (left by an earlier save)");
-                cut++;
-                continue;
+                // a leftover whose place a listed mod uses now is not this file's tail data any more
+                var last = byEnd.TryGetValue(length, out var hit) && hit.Patch.Offset < length ? hit
+                    : _leftovers.Select(p => (Entry: (ModEntry)null, Patch: p))
+                                .FirstOrDefault(t => Here(t.Patch) && !starts.Contains(t.Patch.Offset)
+                                                     && t.Patch.Offset + t.Patch.Length == length && t.Patch.Offset < length);
+                if (last.Patch == null) break;
+                // a listed mod's data only when nothing of its mod points at it
+                if (last.Entry != null && StillPoints(last.Entry)) break;
+                if (Current(fs, last.Patch) != last.Patch.NewSha1) break;
+                cuts.Add(last);
+                length = last.Patch.Offset;
             }
-            // only when nothing of its mod points at it, and it's the data the mod added
-            if (StillPoints(last.Entry)) break;
-            if (Current(file, last.Patch) != last.Patch.NewSha1) break;
-            using (var fs = new FileStream(file, FileMode.Open, FileAccess.Write, FileShare.ReadWrite)) { fs.SetLength(last.Patch.Offset); fs.Flush(true); }
-            if (new FileInfo(file).Length != last.Patch.Offset) throw new IOException($"{rel} was not cut back to 0x{last.Patch.Offset:X}.");
-            log?.Invoke($"{last.Patch.Note ?? "range"}: cut {rel} back to 0x{last.Patch.Offset:X} ({last.Entry.Name})");
+            if (cuts.Count > 0)
+            {
+                fs.SetLength(length);
+                fs.Flush(true);
+                if (fs.Length != length) throw new IOException($"{rel} was not cut back to 0x{length:X}.");
+            }
+        }
+        long now = new FileInfo(file).Length;
+        foreach (var (entry, p) in cuts)
+        {
+            if (entry == null) _leftovers.Remove(p);
+            log?.Invoke($"{p.Note ?? "range"}: cut {rel} back to 0x{p.Offset:X} ({entry?.Name ?? "left by an earlier save"})");
             cut++;
         }
+        // leftovers that were cut, or whose place a listed mod uses now, are forgotten
+        int dropped = _leftovers.RemoveAll(p => Here(p) && (p.Offset >= now || starts.Contains(p.Offset)));
+        if (dropped > 0 || cuts.Any(c => c.Entry == null)) Save();
         return cut;
     }
 }

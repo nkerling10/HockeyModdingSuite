@@ -259,12 +259,30 @@ public static class PackagePlayers
                 continue;
             }
             if (!ps.Create) { notCreated.Add(l); continue; }                // this league only moves existing players
+            PlanCreate(l);
+        }
+        void PlanCreate(Listed l)
+        {
             var d = l.Info;
-            if (d == null || posOf[l].P < 0) { needDetails.Add(l); continue; }
+            if (d == null || posOf[l].P < 0) { needDetails.Add(l); return; }
             var bio = BioOf(l, d, posOf[l].P, posOf[l].S);
             var c = new SyncChange { Kind = SyncKind.Missing, Name = l.Name, Position = bio.Position, ToTeam = l.Team.Index, ToTeamName = l.Team.Name, Bio = bio, Selected = true };
-            if (PlayerCreator.Problem(c) is { } problem) { r.Warnings.Add($"players: {l.Name}: {problem}"); continue; }
+            if (PlayerCreator.Problem(c) is { } problem) { r.Warnings.Add($"players: {l.Name}: {problem}"); return; }
             creates.Add(c);
+        }
+        // a league that only moves existing players still creates the file's players of a team none of whose players
+        // are in the game: an empty team crashes Edit Player (see the empty-team check below)
+        var filled = new List<string>();
+        if (ps.CreateForEmpty && notCreated.Count > 0)
+        {
+            var teamsWithPlayers = placed.Select(x => x.L.Team.Index).ToHashSet();
+            foreach (var g in notCreated.GroupBy(l => l.Team.Index).Where(g => !teamsWithPlayers.Contains(g.Key)).ToList())
+            {
+                int before = creates.Count;
+                foreach (var l in g) { PlanCreate(l); notCreated.Remove(l); }
+                filled.Add($"{g.First().Team.Code} ({creates.Count - before})");
+            }
+            if (filled.Count > 0) r.Lines.Add($"players: league {spec.League?.Id ?? 32}: teams with none of their players in the game get theirs created: {string.Join(", ", filled)}");
         }
 
         if (moves.Count > 0) r.Lines.Add("players: " + RosterSync.Apply(db, moves));
@@ -359,6 +377,14 @@ public static class PackagePlayers
             r.Lines.Add($"  {g.Key}: {g.Count()} players ({f} F, {dd} D, {gg} G)");
             if (f < 12 || dd < 6 || gg < 2) r.Warnings.Add($"players: {g.Key} can't dress a full lineup (needs 12 F, 6 D, 2 G)");
         }
+        // a team with nobody on it: Edit Player on its league crashed the game (2026-11-13: the roster provider hands
+        // back the inactive Create-a-Player slots for an empty team); every team needs at least one player
+        var juniors = new HashSet<int>();
+        foreach (int row in Enumerable.Range(0, bioT.WrittenRecords))
+            if (!db.IsInvalid(bioT, row)) juniors.Add(Convert.ToInt32(db.Get(bioT, row, bf["juniorteam"])));
+        var empty = spec.Teams.Where(t => !juniors.Contains(t.Index) && !roster.Players.Any(p => p.Team == t.Index)).Select(t => t.Code).ToList();
+        if (empty.Count > 0)
+            r.Warnings.Add($"players: {empty.Count} team(s) with no players ({string.Join(", ", empty)}): Edit Player on this league may crash the game; give each at least one player");
         if (notCreated.Count > 0)
             r.Lines.Add($"players: league {league}: {notCreated.Count} not in the game, not created (players.create = false)");
         if (needDetails.Count > 0)
@@ -404,27 +430,45 @@ public static class PackagePlayers
         if (badDraft.Count > 0) r.Warnings.Add($"players: draft team not an NHL team, draft left as the game has it: {string.Join(", ", badDraft)}");
     }
 
-    /// <summary>After the portraits step: the classed players' class offsets by art id (part 10's table). An art id
-    /// another bio shares is skipped (the table would give the year to both).</summary>
-    public static void EntryYears(T3Db db, PackageInstaller.Result r)
+    /// <summary>
+    /// After the portraits step: the classed players' class offsets by art id (part 10's table). An art id another bio
+    /// shares can't carry a class (the table would give the year to both): such a player's class goes into the name
+    /// table instead (part 11, matched by "first last" as the game stores it; offset = minus his class), when his name
+    /// is his alone in the game, his school (junior team) is in <paramref name="block"/> and no commit by name uses it.
+    /// </summary>
+    public static void EntryYears(T3Db db, PackageInstaller.Result r, IReadOnlyCollection<int> block = null)
     {
         if (r.EntryGames.Count == 0) return;
         var roster = new Roster(db);
         var bioT = db.Table(Roster.BioTable);
         var art = bioT.Fields.First(f => f.Name == "artid");
+        var junior = bioT.Fields.First(f => f.Name == "juniorteam");
         var count = new Dictionary<int, int>();
         foreach (int row in Enumerable.Range(0, bioT.WrittenRecords))
             if (!db.IsInvalid(bioT, row)) { int a = Convert.ToInt32(db.Get(bioT, row, art)); count[a] = count.GetValueOrDefault(a) + 1; }
+        string Key(RosterPlayer p) => $"{p.FirstName?.Trim()} {p.LastName?.Trim()}";
+        var names = roster.Players.GroupBy(p => NcaaCodeMods.NameHash(Key(p))).ToDictionary(g => g.Key, g => g.Count());
+        var commitNames = r.NameCommits.Select(c => NcaaCodeMods.NameHash(c.Name)).ToHashSet();
         var skipped = new List<string>();
+        int byName = 0;
         foreach (var (id, off) in r.EntryGames)
         {
             var p = roster.Find(id);
             int a = p == null ? 0 : Convert.ToInt32(db.Get(bioT, p.BioRow, art));
-            if (a <= 0 || a > 0xFFFF || count.GetValueOrDefault(a) != 1) { skipped.Add(p?.Name ?? $"game id {id}"); continue; }
-            r.Entries.Add((a, off));
+            if (a > 0 && a <= 0xFFFF && count.GetValueOrDefault(a) == 1) { r.Entries.Add((a, off)); continue; }
+            uint h = p == null ? 0 : NcaaCodeMods.NameHash(Key(p));
+            int school = p == null ? -1 : Convert.ToInt32(db.Get(bioT, p.BioRow, junior));    // NCAA players: team -1, school = junior team
+            if (p != null && block?.Contains(school) == true && !(p.FirstName ?? "").Trim().Contains(' ') && off is >= 0 and <= 4
+                && names.GetValueOrDefault(h) == 1 && commitNames.Add(h))
+            {
+                r.NameCommits.Add((Key(p), school, -off));
+                byName++;
+                continue;
+            }
+            skipped.Add(p?.Name ?? $"game id {id}");
         }
-        r.Lines.Add($"players: classes stored for {r.Entries.Count} players");
-        if (skipped.Count > 0) r.Warnings.Add($"players: class not stored (art id shared with another player; no portrait gave him his own): {string.Join(", ", skipped)}");
+        r.Lines.Add($"players: classes stored for {r.Entries.Count + byName} players ({byName} by name: their art id is shared)");
+        if (skipped.Count > 0) r.Warnings.Add($"players: class not stored (art id shared, name not his alone): {string.Join(", ", skipped)}");
     }
 
     private static string TeamName(Roster roster, int team) => roster.Teams.TryGetValue(team, out var t) ? t.Name : $"team {team}";
@@ -465,6 +509,9 @@ public sealed class PlayersSpec
     public string Details { get; set; }
     /// <summary>false: players not in the game are listed, not created (e.g. the USHL: only existing prospects move).</summary>
     public bool Create { get; set; } = true;
+    /// <summary>With <see cref="Create"/> false: a team none of whose players are in the game still gets the file's players
+    /// created (an empty team crashes the game's Edit Player screen). Default true.</summary>
+    public bool CreateForEmpty { get; set; } = true;
     /// <summary>"none": every placed player's NHL contract is cleared the way the game's own NCAA prospects have it
     /// (status 0, length 0, salary 0, not two-way), whatever deal he had; null leaves contracts alone.</summary>
     public string Contract { get; set; }

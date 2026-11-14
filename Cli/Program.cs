@@ -20,6 +20,12 @@ public static class Program
             return 0;
         }
         var opts = Options.Parse(args.Skip(1).ToArray());
+        // package zips need no game folder
+        if (args[0] is "package-export" or "package-unzip")
+        {
+            try { return args[0] == "package-export" ? PackageExportCmd(opts) : PackageUnzipCmd(opts); }
+            catch (Exception e) { Console.Error.WriteLine($"error: {e.Message}"); return 1; }
+        }
         string game = opts.Get("game") ?? KitPaths.FindGame();
         if (game == null || !File.Exists(Path.Combine(game, "Data", "layout.toc")))
         {
@@ -1270,6 +1276,28 @@ public static class Program
         return 0;
     }
 
+    /// <summary>package-export FOLDER OUT.zip: the package as one file to share (no source photos, backups, build reports or
+    /// caches). HMS's Mods page installs it (Install package… → the zip).</summary>
+    private static int PackageExportCmd(Options opts)
+    {
+        var p = opts.Positional.ToList();
+        if (p.Count < 2) throw new ArgumentException("package-export needs the package folder and the zip to write");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var (n, bytes) = NHL27Kit.Core.Packages.PackageZip.Export(p[0], p[1], Console.WriteLine);
+        Console.WriteLine($"{n} files, {bytes / 1048576.0:0.0} MB -> {p[1]} ({new FileInfo(p[1]).Length / 1048576.0:0.0} MB) in {sw.Elapsed.TotalSeconds:0.0} s");
+        return 0;
+    }
+
+    /// <summary>package-unzip ZIP: unpacks a shared package into the kit's packages folder (what HMS's Install package…
+    /// does with a zip before installing) and prints the folder to pass to package-install.</summary>
+    private static int PackageUnzipCmd(Options opts)
+    {
+        string zip = opts.Positional.FirstOrDefault() ?? throw new ArgumentException("package-unzip needs the zip");
+        string folder = NHL27Kit.Core.Packages.PackageZip.Extract(zip, Console.WriteLine);
+        Console.WriteLine($"package folder: {folder}");
+        return 0;
+    }
+
     /// <summary>package-status: installed packages, their state and resolved choices.</summary>
     private static int PackageStatusCmd(string game, Options opts)
     {
@@ -1298,7 +1326,7 @@ public static class Program
         var db = new Legacy(OpenIndex(game, false)).OpenDb(Roster.Database);
         var r = new NHL27Kit.Core.Packages.PackageInstaller.Result();
         NHL27Kit.Core.Packages.PackagePlayers.Apply(db, spec, r);
-        NHL27Kit.Core.Packages.PackagePlayers.EntryYears(db, r);   // (no portraits step here: shared art ids are skipped)
+        NHL27Kit.Core.Packages.PackagePlayers.EntryYears(db, r, spec.Teams.Select(t => t.Index).ToHashSet());   // (no portraits step here)
         foreach (var l in r.Lines) Console.WriteLine("  " + l);
         foreach (var w in r.Warnings) Console.WriteLine("  warning: " + w);
         var (ok, total) = db.CheckCrcs();

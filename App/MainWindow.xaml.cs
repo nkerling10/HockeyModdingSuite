@@ -215,6 +215,12 @@ public partial class MainWindow : Window
             try
             {
                 var mods = new ModService(index);
+                // a package install or removal changes the game's TOCs: read the game again
+                mods.IndexStale += () => Dispatcher.BeginInvoke(new Action(() => _ = LoadIndex(false)));
+                mods.ConfirmPackageDetour = pkg => Task.FromResult(MessageBox.Show(this,
+                    $"The {Path.GetFileName(pkg.Source)} package wrote this database after your earlier edits, so they can't be saved over it directly.\n\n" +
+                    "Take the package off, save, and install it again? (A few minutes; the package's own teams and players come back as the package has them.)",
+                    "HMS", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes);
                 TexturePage.SetMods(mods);
                 SoundPage.SetMods(mods);
                 VideoPage.SetMods(mods);

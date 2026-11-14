@@ -27,7 +27,7 @@ top of those instead.
                       (home, away, third first). A team with none keeps the template's jerseys.
   build/              pack output and install reports
 ```
-`package-build` zips the folder into a format-2 `.nhl27mod` with one item of kind `package`.
+`package-export` zips the folder to share (the planned format-2 `.nhl27mod` pack was not needed).
 
 ## package.json
 ```json
@@ -57,7 +57,11 @@ draft: { year, round, pick, team } } } } }. `draft` (NHL team abbreviation) is w
 unless the game has his rights with another team. No `draft`: the game's draft stays (a created player is undrafted).
 Current-season roster players are matched and moved (taking the file's number and size), or created from the file, then given the NCAA bio (team -1, juniorteam = school, juniorleague) and
 rules.faceProtector; later seasons (commits) are only listed for now.
-Not built yet: the DbEditor take-down/re-apply hook, pack build (format 2), App UI, standalone installer.
+Built 2026-11-14: the take-down/re-apply hook (a database save blocked by a package offers to take it off, save,
+and reinstall it: ModService.SaveDbAsync), the App UI (Mods page: Install package… / Reinstall / Remove package; a
+package row is installed and removed as a whole, and left out of Apply all / Restore all / Export pack), and a plain
+zip as the shared form (`package-export`, `package-unzip`; the App unzips into `<kit>/packages/<name>`). Not built: the
+format-2 `.nhl27mod` pack (the zip does the job), a standalone installer (HMS's Mods page is it for now).
 Shared placeholder textures get their own copy at the end of the CAS file (ChunkGrower + Framing.Reframe).
 
 ## What an install does (`package-install <folder|pack>`)
@@ -104,11 +108,11 @@ art ids, and the resolver skips ids another package already holds.
 | Command | What |
 |---|---|
 | `package-check <folder>` | read-only: loads the recipe, checks images, says what it would resolve and change |
-| `package-build <folder>` | makes `build/<id>.nhl27mod` |
+| `package-export <folder> <zip>` | the package as one zip to share (no photos/, backups/, build/, cache/, *.bak) |
+| `package-unzip <zip>` | unpacks a shared zip into `<kit>/packages/<name>` (what Install package… does first) |
 | `package-install <folder\|pack>` | install or rebuild (teardown + build + apply) |
 | `package-remove <id>` | restore and remove |
 | `package-status` | installed packages, their state and resolved ids |
 
 ## Later
-- App UI: the Mods page lists packages as one row; Install pack accepts format 2.
 - Standalone installer: one exe on Core, with a game folder, an emulator folder, Install and Uninstall.

@@ -17,7 +17,8 @@ public sealed class ModRow
         int slash = name.LastIndexOf('/');
         Leaf = (slash < 0 ? name : name[(slash + 1)..]) + take;
         Folder = slash < 0 ? "" : name[..slash];
-        Glyph = e.Kind == "sound" ? "" : e.Kind == LegacyEditor.Kind ? "" : e.Kind == DbEditor.Kind ? "" : "";
+        IsPackage = e.Kind == Core.Packages.PackageInstaller.Kind;
+        Glyph = IsPackage ? "\uE7B8" : e.Kind == "sound" ? "" : e.Kind == LegacyEditor.Kind ? "" : e.Kind == DbEditor.Kind ? "" : "";
         Tint = (Brush)Application.Current.FindResource(e.Kind == "sound" ? "Violet" : e.Kind == DbEditor.Kind ? "Good" : e.Kind == LegacyEditor.Kind ? "Patch" : "Accent");
         long bytes = e.Patches.Sum(p => (long)p.Length);
         Detail = $"{e.Summary}  ·  {e.Patches.Count} range{(e.Patches.Count == 1 ? "" : "s")}, {Visuals.Size(bytes)}  ·  from {System.IO.Path.GetFileName(e.Source)}  ·  {e.Created:MMM d, HH:mm}";
@@ -33,9 +34,12 @@ public sealed class ModRow
     public string Detail { get; }
     public string WarningText { get; }
     public bool HasWarnings => WarningText.Length > 0;
-    public bool CanApply => State is ModState.NotApplied or ModState.Partial;
-    public bool CanRestore => State is ModState.Applied or ModState.Partial;
-    public bool CanRemove => State is ModState.NotApplied or ModState.Missing or ModState.Changed;
+    /// <summary>A mod package (e.g. NCAA_Mod): installed, reinstalled and removed as a whole, code mods included.</summary>
+    public bool IsPackage { get; }
+    public bool CanReinstall => IsPackage && System.IO.Directory.Exists(Entry.Source);
+    public bool CanApply => !IsPackage && State is ModState.NotApplied or ModState.Partial;
+    public bool CanRestore => !IsPackage && State is ModState.Applied or ModState.Partial;
+    public bool CanRemove => !IsPackage && State is ModState.NotApplied or ModState.Missing or ModState.Changed;
 
     public string StateText => State switch
     {
@@ -84,8 +88,8 @@ public partial class ModsPage : UserControl
         ApplyAllLabel.Text = pending > 0 ? $"Apply all ({pending})" : "Apply all";
         ApplyAllButton.IsEnabled = pending > 0 && !_busy;
         RestoreAllButton.IsEnabled = rows.Any(r => r.CanRestore) && !_busy;
-        ExportButton.IsEnabled = rows.Count > 0 && !_busy;
-        ImportButton.IsEnabled = !_busy;
+        ExportButton.IsEnabled = rows.Any(r => !r.IsPackage) && !_busy;
+        ImportButton.IsEnabled = PackageButton.IsEnabled = !_busy;
     }
 
     private static ModRow RowOf(object sender) => (sender as FrameworkElement)?.DataContext as ModRow;
@@ -150,7 +154,7 @@ public partial class ModsPage : UserControl
 
     public async Task ExportPack(string file)
     {
-        var entries = _mods.Store.Entries.ToList();
+        var entries = _mods.Store.Entries.Where(x => x.Kind != Core.Packages.PackageInstaller.Kind).ToList();   // a package is shared as its folder
         if (entries.Count == 0) return;
         await Do("Exporting the pack", async () =>
         {
@@ -180,6 +184,79 @@ public partial class ModsPage : UserControl
             if (!App.Args.ContainsKey("shot"))
                 MessageBox.Show(Window.GetWindow(this), string.Join("\n", results), $"Imported {ok} of {results.Count}", MessageBoxButton.OK,
                                 ok == results.Count ? MessageBoxImage.Information : MessageBoxImage.Warning);
+        });
+    }
+
+    // ---------------------------------------------------------------- packages
+
+    private async void OnInstallPackage(object sender, RoutedEventArgs e)
+    {
+        var dlg = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "Install a mod package: its .zip, or the package.json in its folder",
+            Filter = "Mod package (.zip or package.json)|*.zip;package.json|All files|*.*",
+        };
+        if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
+        bool zip = dlg.FileName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase);
+        string folder = zip ? null : System.IO.Path.GetDirectoryName(dlg.FileName);
+        if (!zip && !System.IO.File.Exists(System.IO.Path.Combine(folder, "package.json")))
+        {
+            MessageBox.Show(Window.GetWindow(this), $"{folder} has no package.json.", "HMS", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        string name = zip ? System.IO.Path.GetFileNameWithoutExtension(dlg.FileName) : System.IO.Path.GetFileName(folder);
+        bool had = !zip && _mods.Packages.Any(p => string.Equals(System.IO.Path.GetFullPath(p.Source), System.IO.Path.GetFullPath(folder), StringComparison.OrdinalIgnoreCase));
+        if (MessageBox.Show(Window.GetWindow(this), (had ? "This package is installed already: it will be taken off and installed again.\n\n" : "") +
+                            (zip ? $"The zip is unpacked into {System.IO.Path.Combine(Core.Packages.PackageZip.Root, name)} first.\n\n" : "") +
+                            $"Install {name} into the game? It takes a few minutes. The originals stay in the kit's mods folder, and Remove package puts them back.",
+                            "HMS", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
+        if (zip)
+        {
+            try { folder = await Task.Run(() => Core.Packages.PackageZip.Extract(dlg.FileName)); }
+            catch (Exception ex) when (ex is System.IO.IOException or System.IO.InvalidDataException or UnauthorizedAccessException)
+            {
+                MessageBox.Show(Window.GetWindow(this), ex.Message, "HMS", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+        }
+        await InstallPackage(folder);
+    }
+
+    private async void OnReinstallPackage(object sender, RoutedEventArgs e)
+    {
+        var row = RowOf(sender);
+        if (row == null) return;
+        if (MessageBox.Show(Window.GetWindow(this), $"Install {System.IO.Path.GetFileName(row.Entry.Source)} again from {row.Entry.Source}? It takes a few minutes.",
+                            "HMS", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
+        await InstallPackage(row.Entry.Source);
+    }
+
+    /// <summary>Installs a package folder, showing its progress in the status bar and its report at the end.</summary>
+    public async Task InstallPackage(string folder)
+    {
+        string name = System.IO.Path.GetFileName(folder);
+        await Do($"Installing {name}", async () =>
+        {
+            var r = await _mods.InstallPackageAsync(folder, line => Dispatcher.BeginInvoke(() => StatusChanged?.Invoke($"Installing {name}: {line.Trim()}")));
+            StatusChanged?.Invoke($"{name} installed");
+            if (App.Args.ContainsKey("shot")) return;
+            string report = string.Join("\n", r.Lines.Where(l => !l.StartsWith("  ")).Take(30));
+            if (r.Warnings.Count > 0) report += "\n\nWarnings:\n" + string.Join("\n", r.Warnings.Take(15).Select(w => "• " + (w.Length > 300 ? w[..300] + "…" : w)));
+            MessageBox.Show(Window.GetWindow(this), report + $"\n\nFull report: {System.IO.Path.Combine(folder, "build", "install-report.md")}",
+                            $"{name} installed", MessageBoxButton.OK, r.Warnings.Count > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
+        });
+    }
+
+    private async void OnRemovePackage(object sender, RoutedEventArgs e)
+    {
+        var row = RowOf(sender);
+        if (row == null) return;
+        if (MessageBox.Show(Window.GetWindow(this), $"Take {System.IO.Path.GetFileName(row.Entry.Source)} out of the game? Its teams, players, art and code mods go; the game is put back as it was before it.\n\nFranchises started with the package won't load correctly without it.",
+                            "HMS", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
+        await Do($"Removing {row.Leaf}", async () =>
+        {
+            var lines = await _mods.RemovePackageAsync(row.Entry.Name, line => Dispatcher.BeginInvoke(() => StatusChanged?.Invoke("Removing: " + line.Trim())));
+            StatusChanged?.Invoke(lines.FirstOrDefault() ?? "Package removed");
         });
     }
 

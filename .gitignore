@@ -19,3 +19,4 @@ release/
 ThirdParty/*.dll
 *.dll
 *.exe
+/packages/

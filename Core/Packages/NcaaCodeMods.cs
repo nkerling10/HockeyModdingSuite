@@ -337,11 +337,12 @@ public static class NcaaCodeMods
             var seen = new Dictionary<uint, (int Team, int Offset)>();
             foreach (var (name, team, off) in nameCommits ?? Array.Empty<(string, int, int)>())
             {
-                if (team < first || team > last || off < 0 || off > 15) throw new ArgumentException($"Bad commit by name ({name}, team {team}, offset {off}).");
+                // offset: seasons after the roster season (a commit), or minus the class (a player at school whose art id is shared)
+                if (team < first || team > last || off < -4 || off > 15) throw new ArgumentException($"Bad commit by name ({name}, team {team}, offset {off}).");
                 seen.TryAdd(NameHash(name), (team, off));
             }
             var ntab = new List<byte>(BitConverter.GetBytes(seen.Count));
-            foreach (var (h, (team, off)) in seen) { ntab.AddRange(BitConverter.GetBytes(h)); ntab.Add((byte)(team - first)); ntab.Add((byte)off); ntab.AddRange(new byte[2]); }
+            foreach (var (h, (team, off)) in seen) { ntab.AddRange(BitConverter.GetBytes(h)); ntab.Add((byte)(team - first)); ntab.Add((byte)(sbyte)off); ntab.AddRange(new byte[2]); }
             if (ntab.Count > NcaaPart8Code.P11NameRoom) throw new InvalidOperationException($"Too many commits by name ({seen.Count}).");
             hookEntries.Add(Entry(NcaaPart8Code.P11LoopAt, region11, orig11));   // code only: its tables are in part 12's caves
             var resp = At(NcaaPart8Code.P11RespHook, 5);

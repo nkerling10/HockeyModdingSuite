@@ -28,6 +28,8 @@ public sealed record CenterIceLook(double Saturation = 1, double CutOut = 0.06, 
 public static class CenterIce
 {
     public const int LogoSize = 1024, LineWidth = 64, LineLength = 4096;
+    /// <summary>Kept cuts (PlanCache "centerice") are keyed by this: change it whenever Measure or Logo draws differently.</summary>
+    public const string Version = "1";
     public const double LogoSpanFeet = 15 * 1024 / 380.8, RinkWidthFeet = 85;
     private const int LineLeft = 4, LineRight = 60;
     private const double TintBlack = 85, TintWhite = 238, PaintLow = 19, PaintHigh = 228;
