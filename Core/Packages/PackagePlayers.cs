@@ -436,7 +436,8 @@ public static class PackagePlayers
     /// A commit already in the game is matched by full name + birth date (PlayerMatcher), by his unique full name when
     /// the birth dates are a typo or days apart (SamePerson; Rogowski Jun 24 / Jun 28), or by first name +
     /// birth date with a last name one letter off (Dinneen / Dineen, the only such player); his art id must be his
-    /// alone. Commits not in the game go to the name table for the game's generated prospects.
+    /// alone: one on a shared art id without a portrait (the generic 12586/12587) is given his own, after the highest
+    /// art or audio id. Commits not in the game go to the name table for the game's generated prospects.
     /// </summary>
     public static void ApplyCommits(T3Db db, PackageInstaller.Result r)
     {
@@ -449,6 +450,10 @@ public static class PackagePlayers
         var nhlByCode = RosterSync.TeamIndex(db);
         var artCount = new Dictionary<int, int>();
         foreach (var p in roster.Players) artCount[p.ArtId] = artCount.GetValueOrDefault(p.ArtId) + 1;
+        // a commit on a shared art id (the generic 12586/12587 of 300-odd players without a portrait) gets an art id of
+        // his own, as a created player does: after the highest art or audio id, so none clashes
+        var audio = bf.GetValueOrDefault("audioid");
+        int nextArt = 1 + roster.Players.Max(p => Math.Max(p.ArtId, audio == null ? 0 : Convert.ToInt32(db.Get(bioT, p.BioRow, audio))));
         var byBorn = new Dictionary<DateTime, List<RosterPlayer>>();
         foreach (var p in roster.Players)
             if (matcher.Born(p) is { } b) (byBorn.TryGetValue(b, out var l) ? l : byBorn[b] = new List<RosterPlayer>()).Add(p);
@@ -456,7 +461,7 @@ public static class PackagePlayers
         {
             var skipped = new List<string>();
             var badDraft = new List<string>();
-            int drafted = 0, close = 0, spelled = 0, before = r.Commits.Count;
+            int drafted = 0, close = 0, spelled = 0, own = 0, before = r.Commits.Count;
             foreach (var l in commits)
             {
                 var (p, nameOnly) = matcher.Find(l.First, l.Last, l.Born);
@@ -479,14 +484,23 @@ public static class PackagePlayers
                 if (p == null || nameOnly || !int.TryParse(l.Season, out int year) || !int.TryParse(current, out int cur) || year <= cur || year - cur > 15)
                 { skipped.Add($"{l.Name} ({l.Team.Code} {l.Season}){(nameOnly ? ": birth date differs" : "")}"); continue; }
                 if (SetFileDraft(db, bioT, bf, nhlByCode, badDraft, p.BioRow, l)) drafted++;
-                int art = p.ArtId;
+                int art = Convert.ToInt32(db.Get(bioT, p.BioRow, bf["artid"]));
+                if (artCount.GetValueOrDefault(art) != 1 && !p.HasPortrait && nextArt <= 0xFFFF)
+                {
+                    // his own art id (no portrait uses the shared one, so nothing he shows changes)
+                    artCount[art]--;
+                    art = nextArt++;
+                    db.Set(bioT, p.BioRow, bf["artid"], art);
+                    artCount[art] = 1;
+                    own++;
+                }
                 if (art <= 0 || art > 0xFFFF || artCount.GetValueOrDefault(art) != 1) { skipped.Add($"{l.Name}: art id {art} not his alone"); continue; }
                 r.Commits.Add((art, l.Team.Index, year - cur));        // seasons after the roster season: the game adds the franchise's year
             }
             r.Lines.Add($"players: commits ({commits.Count}): " +
                         string.Join("; ", commits.GroupBy(c => (c.Team.Code, c.Season)).Select(g => $"{g.Key.Code} {g.Key.Season}: {g.Count()}")) +
                         $"; {r.Commits.Count - before} in the game join their school in their commit year ({close} with a birth date a typo or a few days off, " +
-                        $"{spelled} with a last name one letter off); {drafted} given the file's draft");
+                        $"{spelled} with a last name one letter off, {own} given an art id of their own); {drafted} given the file's draft");
             if (skipped.Count > 0)
                 r.Lines.Add($"players: commits not in the game or not matched exactly ({skipped.Count}): {string.Join(", ", skipped)}");
             if (badDraft.Count > 0) r.Warnings.Add($"players: commits' draft team not an NHL team, draft left as the game has it: {string.Join(", ", badDraft)}");
