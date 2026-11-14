@@ -1282,7 +1282,8 @@ public partial class RosterSyncView : UserControl
 
     private void SetButtons()
     {
-        var all = _rows.Concat(_lineupRows).Concat(_nameRows).Concat(_contractRows).Concat(_positionRows).Concat(_bioRows).Concat(_pickRows).Concat(_lineRows).ToList();
+        SetPortraitButtons();
+        var all =_rows.Concat(_lineupRows).Concat(_nameRows).Concat(_contractRows).Concat(_positionRows).Concat(_bioRows).Concat(_pickRows).Concat(_lineRows).ToList();
         int n = all.Count(r => r.Selected), total = all.Count;
         ApplyButton.IsEnabled = !_busy && !_planning && n > 0;
         TickAll.IsEnabled = TickNone.IsEnabled = !_busy && Shown.Any();

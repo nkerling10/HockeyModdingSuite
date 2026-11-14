@@ -119,6 +119,8 @@ public partial class RosterPage : UserControl
 
     /// <summary>The sync list as text (scripted runs).</summary>
     public string SyncDump() => SyncView.DumpRows();
+    /// <summary>NHL Sync step 3's Find (scripted runs): players with no portrait, photos fetched and fitted, nothing written.</summary>
+    public Task<string> SyncFindPortraitsAsync() => SyncView.FindPortraitsAsync();
 
     /// <summary>Shows one kind of sync row (scripted runs).</summary>
     public void SyncShow(string kind) => SyncView.ShowKind(kind);

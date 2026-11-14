@@ -244,6 +244,46 @@
                 </Grid>
             </DockPanel>
         </Border>
+
+        <!-- step 3 (optional): portraits for NHL and AHL players who have none, after step 2's changes are in -->
+        <Border x:Name="PortraitCard" Style="{StaticResource Card}" Padding="16,10" Margin="0,10,0,0"
+                ToolTip="After applying step 2: players on NHL and AHL teams with no portrait get their NHL.com headshot. Players who already have one keep it. Each goes into a free portrait slot in HMS's range (1–9,999), as mod entries the Mods page can restore.">
+            <StackPanel>
+                <DockPanel>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                        <CheckBox x:Name="PortraitNhl" Content="NHL" IsChecked="True" VerticalAlignment="Center" Margin="0,0,12,0" />
+                        <CheckBox x:Name="PortraitAhl" Content="AHL" IsChecked="True" VerticalAlignment="Center" Margin="0,0,4,0" />
+                        <Button x:Name="PortraitSkippedButton" Style="{StaticResource Ghost}" Padding="10,6" Margin="8,0,0,0" Click="OnPortraitSkipped" Visibility="Collapsed"
+                                ToolTip="The players who got no portrait, and why (a CSV in HMS's export folder)">
+                            <TextBlock x:Name="PortraitSkippedText" Text="Skipped list" />
+                        </Button>
+                        <Button x:Name="PortraitFindButton" Padding="12,6" Margin="8,0,0,0" Click="OnPortraitFind" IsEnabled="False"
+                                ToolTip="Find NHL and AHL players with no portrait and fetch their photos. Nothing in the game changes yet.">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE721;" Style="{StaticResource Icon}" FontSize="13" />
+                                <TextBlock Text="Find missing" Margin="8,0,0,0" />
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="PortraitAddButton" Style="{StaticResource Primary}" Padding="12,6" Margin="8,0,0,0" Click="OnPortraitAdd" IsEnabled="False"
+                                ToolTip="Show the fitted portraits, then write the ones you keep ticked into the game">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE8B9;" Style="{StaticResource Icon}" FontSize="13" />
+                                <TextBlock x:Name="PortraitAddLabel" Text="Add portraits" Margin="8,0,0,0" />
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,16,0">
+                        <Border CornerRadius="999" Padding="7,1" Background="{StaticResource Surface2}" VerticalAlignment="Center" Margin="0,0,8,0">
+                            <TextBlock Text="STEP 3" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource Accent}" />
+                        </Border>
+                        <TextBlock Text="Player portraits" Foreground="{StaticResource Text}" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" />
+                        <TextBlock Text="optional" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="8,0,0,0" />
+                    </StackPanel>
+                </DockPanel>
+                <TextBlock x:Name="PortraitStatus" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,8,0,0"
+                           Text="After step 2: fetch, apply, then find the NHL and AHL players who still have no portrait." />
+            </StackPanel>
+        </Border>
     </StackPanel>
     </ScrollViewer>
 </UserControl>
