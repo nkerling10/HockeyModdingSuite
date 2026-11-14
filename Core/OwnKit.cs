@@ -41,120 +41,192 @@ public static class OwnKit
         return index.GetEbx(name) != null ? name : null;
     }
 
-    /// <summary>
-    /// A font's outline zones: those whose glyph texels mostly touch both the outside (the glyph's alpha) and another zone.
-    /// A fill touches its outline only at its rim, and a fill with no outline (the name's letters) touches no other zone.
-    /// </summary>
-    public static HashSet<int> Outlines(StudioPattern font) => OutlineShares(font).Where(c => c.Value > 0.75).Select(c => c.Key).ToHashSet();
+    /// <summary>What a font zone paints: its ring (0 the fill, 1 the outline round it, 2 the outer outline round that)
+    /// and whether it belongs to the name letters (the sheet's top <see cref="LetterRows"/>) rather than the numbers.</summary>
+    public sealed record FontRole(int Ring, bool Name);
 
-    /// <summary>Each zone's share of glyph texels that touch both the outside and another zone.</summary>
-    public static Dictionary<int, double> OutlineShares(StudioPattern font)
+    /// <summary>A font's lettering colours. The name's (null: the numbers'), and the outer ring's for the fonts that
+    /// have a third ring (null: the outline's).</summary>
+    public sealed record FontColors(int Fill, int Outline, int? Outer = null, int? NameFill = null, int? NameOutline = null);
+
+    /// <summary>
+    /// Each zone's role in a font: the zones are read inside the glyphs only (the masks' alpha). Of two zones that
+    /// meet, the one lying deeper in the glyph (further from its edge, on average) is the inner; a zone's ring is how
+    /// many zones lie inside it (0 the fill, 1 its outline, 2 an outer outline). A zone mostly in the top rows is the
+    /// name's.
+    /// </summary>
+    public static Dictionary<int, FontRole> Roles(StudioPattern font)
     {
-        int size = font.Size, n = size * size;
-        bool Inside(int i) => font.Detail[i * 4 + 3] >= 64;
+        int size = font.Size, n = size * size, rows = LetterRows(size);
+        int zoneCount = font.Masks.Count * 3;
+        var inside = new bool[n];
+        for (int i = 0; i < n; i++) inside[i] = font.Detail[i * 4 + 3] >= 128;
+        // each glyph texel's zone: its strongest channel (faint lines too); -1 for none
         var zoneOf = new sbyte[n];
-        for (int i = 0; i < n; i++)
+        Parallel.For(0, size, y =>
         {
-            int best = -1, bestV = 127;
-            foreach (var (zone, _) in font.Zones)
+            for (int x = 0; x < size; x++)
             {
-                int v = font.Masks[zone / 3][i * 4 + zone % 3];
-                if (v > bestV) { bestV = v; best = zone; }
+                int i = y * size + x, best = -1, bestV = 63;
+                if (inside[i])
+                    foreach (var (zone, _) in font.Zones)
+                    {
+                        int v = font.Masks[zone / 3][i * 4 + zone % 3];
+                        if (v > bestV) { bestV = v; best = zone; }
+                    }
+                zoneOf[i] = (sbyte)best;
             }
-            zoneOf[i] = Inside(i) ? (sbyte)best : (sbyte)-1;
-        }
-        int r = Math.Max(3, size / 128);
-        var count = new Dictionary<int, (long All, long Band)>();
-        for (int y = 0; y < size; y += 2)
-        for (int x = 0; x < size; x += 2)
+        });
+        var depth = Depth(inside, size);
+        var count = new long[zoneCount];
+        var top = new long[zoneCount];
+        var depthSum = new double[zoneCount];
+        var border = new long[zoneCount];
+        var touch = new long[zoneCount, zoneCount];
+        var steps = new[] { (2, 0), (0, 2), (2, 2), (-2, 2) };
+        for (int y = 0; y < size; y++)
+        for (int x = 0; x < size; x++)
         {
-            int z = zoneOf[y * size + x];
-            if (z < 0) continue;
-            bool edge = false, other = false;
-            for (int dy = -r; dy <= r && !(edge && other); dy++)
-            for (int dx = -r; dx <= r; dx++)
+            int i = y * size + x, z = zoneOf[i];
+            if (z >= 0) { count[z]++; depthSum[z] += depth[i]; if (y < rows) top[z]++; }
+            foreach (var (dx, dy) in steps)
             {
                 int xx = x + dx, yy = y + dy;
                 if (xx < 0 || yy < 0 || xx >= size || yy >= size) continue;
-                int j = yy * size + xx;
-                if (!Inside(j)) edge = true;
-                else if (zoneOf[j] >= 0 && zoneOf[j] != z) other = true;
+                int j = yy * size + xx, w = zoneOf[j];
+                if (z == w) continue;
+                if (z >= 0) border[z]++;
+                if (w >= 0) border[w]++;
+                if (z >= 0 && w >= 0) { touch[z, w]++; touch[w, z]++; }
             }
-            var c = count.GetValueOrDefault(z);
-            count[z] = (c.All + 1, c.Band + (edge && other ? 1 : 0));
         }
-        return count.ToDictionary(c => c.Key, c => c.Value.Band / (double)c.Value.All);
+        long least = Math.Max(8, n / 50000);
+        var zones = Enumerable.Range(0, zoneCount).Where(z => count[z] >= least).ToList();
+        double Mean(int z) => depthSum[z] / count[z];
+        // the zones lying inside each zone (they meet along a good share of the smaller one's edge, and lie deeper)
+        var inner = zones.ToDictionary(z => z, z => zones.Where(a => a != z && touch[z, a] >= Math.Max(4, 0.05 * Math.Min(border[z], border[a])) && Mean(a) > Mean(z)).ToList());
+        var ring = new Dictionary<int, int>();
+        int Ring(int z, HashSet<int> seen)
+        {
+            if (ring.TryGetValue(z, out int r)) return r;
+            seen.Add(z);
+            r = 0;
+            foreach (int a in inner[z]) if (!seen.Contains(a)) r = Math.Max(r, 1 + Ring(a, seen));
+            seen.Remove(z);
+            return ring[z] = r;
+        }
+        return zones.ToDictionary(z => z, z => new FontRole(Math.Min(2, Ring(z, new HashSet<int>())), top[z] * 2 > count[z]));
+    }
+
+    /// <summary>Each texel's distance (in texels, 3-4 chamfer) from the nearest texel outside the glyphs.</summary>
+    private static float[] Depth(bool[] inside, int size)
+    {
+        var d = new float[size * size];
+        const float big = 1e9f;
+        for (int i = 0; i < d.Length; i++) d[i] = inside[i] ? big : 0;
+        for (int y = 0; y < size; y++)
+        for (int x = 0; x < size; x++)
+        {
+            int i = y * size + x;
+            if (d[i] == 0) continue;
+            float v = d[i];
+            if (x > 0) v = Math.Min(v, d[i - 1] + 3);
+            if (y > 0)
+            {
+                v = Math.Min(v, d[i - size] + 3);
+                if (x > 0) v = Math.Min(v, d[i - size - 1] + 4);
+                if (x < size - 1) v = Math.Min(v, d[i - size + 1] + 4);
+            }
+            d[i] = v;
+        }
+        for (int y = size - 1; y >= 0; y--)
+        for (int x = size - 1; x >= 0; x--)
+        {
+            int i = y * size + x;
+            if (d[i] == 0) continue;
+            float v = d[i];
+            if (x < size - 1) v = Math.Min(v, d[i + 1] + 3);
+            if (y < size - 1)
+            {
+                v = Math.Min(v, d[i + size] + 3);
+                if (x < size - 1) v = Math.Min(v, d[i + size + 1] + 4);
+                if (x > 0) v = Math.Min(v, d[i + size - 1] + 4);
+            }
+            d[i] = v;
+        }
+        for (int i = 0; i < d.Length; i++) d[i] = d[i] >= big ? size : d[i] / 3;
+        return d;
     }
 
     /// <summary>
-    /// Loads a font design. Most have no colour texture: their masks paint the glyphs and each mask has a background
-    /// zone round its glyphs (those covering much of the sheet's border), so the glyph's alpha is the other zones'
-    /// strongest channel. The background zones are left out of the zones.
-    /// Their name letters (the top two rows) have no shape in the masks, only relief in the normal map, so the letters
-    /// are font 0's (<see cref="LetterRows"/>), which has a colour texture.
+    /// Loads a font design: its glyphs (numbers, the name letters in the top <see cref="LetterRows"/>, the captain's
+    /// letters) are the masks' alpha, and the masks' channels are the colour zones: fills, outlines and the
+    /// backgrounds round them (which the alpha cuts down to an outer ring). The detail's alpha is the glyphs.
     /// </summary>
     public static StudioPattern LoadFont(AssetIndex index, StudioTemplate t, int size)
     {
         var p = JerseyStudio.LoadPattern(index, t, size);
-        if (t.Color != null) return p;
-        var border = new Dictionary<int, int>();
-        for (int k = 0; k < size; k++)
-            foreach (int i in new[] { k, (size - 1) * size + k, k * size, k * size + size - 1 })
-                foreach (var (zone, _) in p.Zones)
-                    if (p.Masks[zone / 3][i * 4 + zone % 3] > 127) border[zone] = border.GetValueOrDefault(zone) + 1;
-        // each mask has its own background channel round its rows of glyphs
-        int most = border.Count > 0 ? border.Values.Max() : 0;
-        var bg = border.Where(b => b.Value > most * 0.2).Select(b => b.Key).ToHashSet();
-        var zones = p.Zones.Where(z => !bg.Contains(z.Zone)).ToList();
         var detail = new byte[size * size * 4];
+        bool masked = false;
         for (int i = 0; i < size * size; i++)
         {
             int a = 0;
-            foreach (var (zone, _) in zones) a = Math.Max(a, p.Masks[zone / 3][i * 4 + zone % 3]);
+            foreach (var m in p.Masks) a = Math.Max(a, m[i * 4 + 3]);
             detail[i * 4 + 3] = (byte)a;
+            if (a < 128) masked = true;
         }
-        if (LetterFont(index, t, "color") is { } letters && Kits.Load(index, letters, size, 0) is { Rgba: not null } lt)
-        {
-            var l = JerseyStudio.Resize(lt.Rgba, lt.Width, lt.Height, size);
-            int rows = LetterRows(size);
-            for (int i = 0; i < rows * size; i++) detail[i * 4 + 3] = l[i * 4 + 3];
-        }
-        return new StudioPattern { Template = t, Size = size, Detail = detail, Masks = p.Masks, Zones = zones };
+        // masks with no alpha: the colour sheet's
+        if (!masked && t.Color != null)
+            for (int i = 0; i < size * size; i++) detail[i * 4 + 3] = p.Detail[i * 4 + 3];
+        return new StudioPattern { Template = t, Size = size, Detail = detail, Masks = p.Masks, Zones = p.Zones };
     }
 
     /// <summary>How many rows of a font sheet <paramref name="size"/> square the name letters take (two rows of 192 in 2048).</summary>
     public static int LetterRows(int size) => size * 384 / 2048;
 
-    /// <summary>The map ("color", "normal", "coeff") of the font a mask-only font takes its name letters from; null for a font with its own.</summary>
-    public static string LetterFont(AssetIndex index, StudioTemplate t, string kind)
-    {
-        if (t.Color != null) return null;
-        string name = $"{t.Folder[..t.Folder.LastIndexOf('/')]}/custom_0/font_{t.Brand}_custom_0_{kind}";
-        return index.GetEbx(name) != null ? name : null;
-    }
+    /// <summary>A font's normal or coeff map at its full size.</summary>
+    public static (byte[] Rgba, int Width, int Height)? FontMap(AssetIndex index, StudioTemplate t, string kind) =>
+        Map(index, t, kind) is { } name && Kits.Load(index, name, 4096, 0) is { Rgba: not null } m ? (m.Rgba, m.Width, m.Height) : null;
 
-    /// <summary>A font's normal or coeff map at its full size, with the letter rows of the font its letters come from.</summary>
-    public static (byte[] Rgba, int Width, int Height)? FontMap(AssetIndex index, StudioTemplate t, string kind)
+    /// <summary>
+    /// A font painted in <paramref name="colors"/>: each zone in its ring's colour (the name's zones in the name's),
+    /// blended in by its mask over the fill; the alpha is the glyphs'.
+    /// </summary>
+    public static byte[] PaintFont(StudioPattern font, Dictionary<int, FontRole> roles, FontColors colors)
     {
-        if (Map(index, t, kind) is not { } name || Kits.Load(index, name, 4096, 0) is not { Rgba: not null } m) return null;
-        if (LetterFont(index, t, kind) is { } letters && Kits.Load(index, letters, m.Width, 0) is { Rgba: not null } lt)
+        int size = font.Size, rows = LetterRows(size);
+        int Color(FontRole r) => (r.Name, r.Ring) switch
         {
-            var l = lt.Width == m.Width && lt.Height == m.Height ? lt.Rgba : MipChain.Resize(lt.Rgba, lt.Width, lt.Height, m.Width, m.Height, false);
-            Array.Copy(l, m.Rgba, LetterRows(m.Height) * m.Width * 4);
-        }
-        return (m.Rgba, m.Width, m.Height);
-    }
-
-    /// <summary>A font painted: its fill zones in <paramref name="fill"/>, its outlines in <paramref name="outline"/> (the glyphs' alpha kept).</summary>
-    public static byte[] PaintFont(StudioPattern font, HashSet<int> outlines, int fill, int outline)
-    {
-        var img = JerseyStudio.Paint(font.Detail, font.Size, font, font.Zones.ToDictionary(z => z.Zone, z => outlines.Contains(z.Zone) ? outline : fill));
-        // glyph texels no zone paints (borrowed letters) take the fill
-        for (int i = 0; i < font.Size * font.Size; i++)
+            (false, 0) => colors.Fill,
+            (false, 1) => colors.Outline,
+            (false, _) => colors.Outer ?? colors.Outline,
+            (true, 0) => colors.NameFill ?? colors.Fill,
+            (true, 1) => colors.NameOutline ?? colors.Outline,
+            _ => colors.Outer ?? colors.NameOutline ?? colors.Outline,
+        };
+        var zones = roles.OrderBy(r => r.Key).Select(r => (Zone: r.Key, Color: Color(r.Value))).ToList();
+        var img = new byte[size * size * 4];
+        Parallel.For(0, size, y =>
         {
-            if (img[i * 4 + 3] == 0 || font.Zones.Any(z => font.Masks[z.Zone / 3][i * 4 + z.Zone % 3] > 127)) continue;
-            img[i * 4] = (byte)(fill >> 16); img[i * 4 + 1] = (byte)(fill >> 8); img[i * 4 + 2] = (byte)fill;
-        }
+            int start = y < rows ? colors.NameFill ?? colors.Fill : colors.Fill;
+            for (int x = 0; x < size; x++)
+            {
+                int o = (y * size + x) * 4;
+                double r = start >> 16 & 255, g = start >> 8 & 255, b = start & 255;
+                foreach (var (zone, c) in zones)
+                {
+                    double w = font.Masks[zone / 3][o + zone % 3] / 255.0;
+                    if (w <= 0) continue;
+                    r = r * (1 - w) + (c >> 16 & 255) * w;
+                    g = g * (1 - w) + (c >> 8 & 255) * w;
+                    b = b * (1 - w) + (c & 255) * w;
+                }
+                img[o] = (byte)Math.Round(r);
+                img[o + 1] = (byte)Math.Round(g);
+                img[o + 2] = (byte)Math.Round(b);
+                img[o + 3] = font.Detail[o + 3];
+            }
+        });
         return img;
     }
 

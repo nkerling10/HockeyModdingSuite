@@ -218,6 +218,8 @@ public sealed class Settings
     public string BaselineRoster { get; set; }
     /// <summary>The "start from a shared roster?" question was answered No: don't ask again.</summary>
     public bool BaselineDeclined { get; set; }
+    /// <summary>The folder a jersey design was last saved to or opened from (the Studio's Open and Save start there).</summary>
+    public string DesignFolder { get; set; }
 
     private static string File => System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NHL27Kit", "settings.json");
 

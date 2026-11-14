@@ -104,6 +104,7 @@ public static class Program
                 "package-codemods" => PackageCodeModsCmd(game, opts),
                 "package-players" => PackagePlayersCmd(game, opts),
                 "package-uniforms" => PackageUniformsCmd(game, opts),
+                "font-letters" => FontLettersCmd(game, opts),
                 "who" => WhoCmd(game, opts),
                 "string-room" => StringRoomCmd(game, opts),
                 "kyty-releases" => KytyReleasesCmd(opts),
@@ -1321,6 +1322,41 @@ public static class Program
         return 0;
     }
 
+    /// <summary>font-letters N|all OUT.png [--fill HEX --outline HEX --outer HEX --name-fill HEX --name-outline HEX --on HEX]:
+    /// a create-a-team font's name letters and front numbers as the Jersey Studio paints them, on a background colour
+    /// (all: every font, four to a row). Read only.</summary>
+    private static int FontLettersCmd(string game, Options opts)
+    {
+        var p = opts.Positional.ToList();
+        var index = OpenIndex(game, false);
+        int? Hex(string k) => opts.Get(k) is { } v ? Convert.ToInt32(v.TrimStart('#'), 16) : null;
+        var colors = new OwnKit.FontColors(Hex("fill") ?? 0xFFB71E, Hex("outline") ?? 0xFFFFFF, Hex("outer"), Hex("name-fill"), Hex("name-outline"));
+        int bg = Hex("on") ?? 0x7A0019;
+        var fonts = OwnKit.Parts(index, "font").Where(x => p[0] == "all" || x.Number == int.Parse(p[0])).ToList();
+        int size = 512, band = size * 960 / 2048, cols = Math.Min(4, fonts.Count), rowsOut = (fonts.Count + cols - 1) / cols;
+        var img = new byte[cols * size * rowsOut * band * 4];
+        int stride = cols * size;
+        for (int k = 0; k < fonts.Count; k++)
+        {
+            var font = OwnKit.LoadFont(index, fonts[k], size);
+            var roles = OwnKit.Roles(font);
+            var painted = OwnKit.PaintFont(font, roles, colors);
+            Console.WriteLine($"font {fonts[k].Number}: {string.Join(" ", roles.Select(r => $"{r.Key}:{(r.Value.Name ? "name" : "num")}{r.Value.Ring}"))}");
+            int ox = k % cols * size, oy = k / cols * band;
+            for (int y = 0; y < band; y++)
+            for (int x = 0; x < size; x++)
+            {
+                int s0 = (y * size + x) * 4, d = ((oy + y) * stride + ox + x) * 4;
+                double a = painted[s0 + 3] / 255.0;
+                for (int c = 0; c < 3; c++) img[d + c] = (byte)Math.Round(painted[s0 + c] * a + (bg >> (16 - 8 * c) & 255) * (1 - a));
+                img[d + 3] = 255;
+            }
+        }
+        File.WriteAllBytes(p[1], ImageFiles.Png(img, stride, rowsOut * band));
+        Console.WriteLine($"written {p[1]}");
+        return 0;
+    }
+
     /// <summary>package-uniforms FOLDER: read only. The package's exported uniforms: the jersey menus they make (in memory)
     /// and the texture and stamp bytes an install would write.</summary>
     private static int PackageUniformsCmd(string game, Options opts)
@@ -2385,7 +2421,7 @@ public static class Program
             byte[] img;
             if (garment == "font")
             {
-                var outl = OwnKit.Outlines(pat);
+                var roles = OwnKit.Roles(pat);
                 byte[] probeN = null, probeC = null;
                 if (opts.Has("probe"))
                 {
@@ -2399,8 +2435,8 @@ public static class Program
                         Console.WriteLine($"    x{x}: a{pat.Detail[i * 4 + 3]} " + string.Join(" ", pat.Masks.Select(m => $"{m[i * 4]},{m[i * 4 + 1]},{m[i * 4 + 2]}"))
                             + "  n " + string.Join(",", Enumerable.Range(0, 4).Select(c => probeN[i * 4 + c])) + "  c " + string.Join(",", Enumerable.Range(0, 4).Select(c => probeC[i * 4 + c])));
                     }
-                Console.WriteLine($"  {t.Label}: zones {string.Join(" ", pat.Zones.Select(z => $"{z.Zone}{(outl.Contains(z.Zone) ? "o" : "f")}{OwnKit.OutlineShares(pat).GetValueOrDefault(z.Zone):0.00}/{z.Share:P1}"))}, normal {OwnKit.Map(index, t, "normal") != null}");
-                img = OwnKit.PaintFont(pat, outl, palette[1], palette[2]);
+                Console.WriteLine($"  {t.Label}: zones {string.Join(" ", roles.Select(r => $"{r.Key}:{(r.Value.Name ? "name" : "num")}{r.Value.Ring}"))}, normal {OwnKit.Map(index, t, "normal") != null}");
+                img = OwnKit.PaintFont(pat, roles, new OwnKit.FontColors(palette[1], palette[2]));
                 var th = OwnKit.FontThumb(img, pat.Size);
                 File.WriteAllBytes(Path.Combine(outDir, "own_font_thumb.png"), ImageFiles.Png(th.Rgba, th.Width, th.Height));
             }

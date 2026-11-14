@@ -322,15 +322,20 @@ public partial class JerseyStudioPage : UserControl
     private Kit _carrier;
     private List<StudioTemplate> _fonts, _pants, _socks;
     private StudioPattern _fontPat, _pantPat, _sockPat;
-    private HashSet<int> _outlines;
+    private Dictionary<int, OwnKit.FontRole> _fontRoles;
     private byte[] _fontImg;
     private ImageSource _pantTex, _sockTex;
     private readonly int[] _ownColors = { 0x0B2D6B, 0xFFFFFF, 0xC8102E };
     private int _letterFill = 0xFFFFFF, _letterOutline = 0xC8102E, _pantShift, _sockShift, _thumbGen, _tplGen;
+    /// <summary>The name letters' own colours (null: the numbers'), and the outer ring's of fonts with three (null: the outline's).</summary>
+    private int? _nameFill, _nameOutline, _letterOuter;
+    /// <summary>Your own pants / socks images (in the game's pant / sock texture layout), used instead of the painted parts.</summary>
+    private string _pantImageFile, _sockImageFile;
+    private (byte[] Rgba, int W, int H)? _pantImage, _sockImage;
     private bool _ownColorsChanged;
     private readonly DispatcherTimer _ownTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private const int PartSize = 1024;
-    private static readonly Dictionary<StudioTemplate, (StudioPattern Pattern, HashSet<int> Outlines)> PartThumbs = new();
+    private static readonly Dictionary<StudioTemplate, (StudioPattern Pattern, Dictionary<int, OwnKit.FontRole> Roles)> PartThumbs = new();
 
     private Dictionary<(string League, string Team), JerseySlots.KitTeam> _kitTeams;
     private HashSet<(int ArtId, int Style, int Variant)> _used;
@@ -522,21 +527,25 @@ public partial class JerseyStudioPage : UserControl
         var index = _mods.Index;
         var palette = Palette();
         var (ft, pt, st) = (Picked(OwnFonts), Picked(OwnPants), Picked(OwnSocks));
-        int fill = _letterFill, outline = _letterOutline, ps = _pantShift, ss = _sockShift;
-        var (fontPat, outlines, pantPat, sockPat) = (_fontPat, _outlines, _pantPat, _sockPat);
+        int ps = _pantShift, ss = _sockShift;
+        var colors = LetterColors();
+        var (fontPat, roles, pantPat, sockPat) = (_fontPat, _fontRoles, _pantPat, _sockPat);
         var r = await Task.Run(() =>
         {
-            if (ft != null && fontPat?.Template != ft) { fontPat = OwnKit.LoadFont(index, ft, PartSize); outlines = OwnKit.Outlines(fontPat); }
+            if (ft != null && fontPat?.Template != ft) { fontPat = OwnKit.LoadFont(index, ft, PartSize); roles = OwnKit.Roles(fontPat); }
             if (pt != null && pantPat?.Template != pt) pantPat = JerseyStudio.LoadPattern(index, pt, PartSize);
             if (st != null && sockPat?.Template != st) sockPat = JerseyStudio.LoadPattern(index, st, PartSize);
-            return (Font: fontPat != null ? OwnKit.PaintFont(fontPat, outlines, fill, outline) : null,
+            return (Font: fontPat != null ? OwnKit.PaintFont(fontPat, roles, colors) : null,
                 Pant: pantPat != null ? OwnKit.PaintPart(pantPat, palette, ps) : null,
                 Sock: sockPat != null ? OwnKit.PaintPart(sockPat, palette, ss) : null);
         });
-        (_fontPat, _outlines, _pantPat, _sockPat) = (fontPat, outlines, pantPat, sockPat);
+        (_fontPat, _fontRoles, _pantPat, _sockPat) = (fontPat, roles, pantPat, sockPat);
         _fontImg = r.Font;
-        _pantTex = r.Pant != null ? TextureService.ToBitmap(r.Pant, PartSize, PartSize, Channel.Rgb) : null;
-        _sockTex = r.Sock != null ? TextureService.ToBitmap(r.Sock, PartSize, PartSize, Channel.Rgb) : null;
+        // your own pants / socks images take the painted parts' place
+        var pantShow = _pantImage is { } pi ? JerseyStudio.Resize(pi.Rgba, pi.W, pi.H, PartSize) : r.Pant;
+        var sockShow = _sockImage is { } si ? JerseyStudio.Resize(si.Rgba, si.W, si.H, PartSize) : r.Sock;
+        _pantTex = pantShow != null ? TextureService.ToBitmap(pantShow, PartSize, PartSize, Channel.Rgb) : null;
+        _sockTex = sockShow != null ? TextureService.ToBitmap(sockShow, PartSize, PartSize, Channel.Rgb) : null;
         if (_studioSrc?.Own == true && _fontImg != null) { _studioSrc.Font = _fontImg; _studioSrc.FontSize = PartSize; }
         if (_shown != null && _own) _shown = WithOwnParts(_shown);
         ScheduleStudio();
@@ -547,7 +556,8 @@ public partial class JerseyStudioPage : UserControl
     {
         var index = _mods.Index;
         var palette = Palette();
-        int fill = _letterFill, outline = _letterOutline, gen = ++_thumbGen;
+        var colors = LetterColors();
+        int gen = ++_thumbGen;
         var rows = new[] { OwnFonts, OwnPants, OwnSocks }.SelectMany(l => l.ItemsSource as IEnumerable<StudioTemplateRow> ?? Enumerable.Empty<StudioTemplateRow>()).ToList();
         _ = Task.Run(async () =>
         {
@@ -555,19 +565,19 @@ public partial class JerseyStudioPage : UserControl
             {
                 if (gen != _thumbGen) return;
                 var t = row.Template;
-                (StudioPattern Pattern, HashSet<int> Outlines) c;
+                (StudioPattern Pattern, Dictionary<int, OwnKit.FontRole> Roles) c;
                 lock (PartThumbs) PartThumbs.TryGetValue(t, out c);
                 if (c.Pattern == null)
                 {
                     try
                     {
                         var pat = t.Garment == "font" ? OwnKit.LoadFont(index, t, 256) : JerseyStudio.LoadPattern(index, t, 128);
-                        c = (pat, t.Garment == "font" ? OwnKit.Outlines(pat) : null);
+                        c = (pat, t.Garment == "font" ? OwnKit.Roles(pat) : null);
                     }
                     catch { continue; }
                     lock (PartThumbs) PartThumbs[t] = c;
                 }
-                var (img, w, h) = t.Garment == "font" ? OwnKit.FontThumb(OwnKit.PaintFont(c.Pattern, c.Outlines, fill, outline), c.Pattern.Size)
+                var (img, w, h) = t.Garment == "font" ? OwnKit.FontThumb(OwnKit.PaintFont(c.Pattern, c.Roles, colors), c.Pattern.Size)
                     : OwnKit.Thumb(OwnKit.PaintPart(c.Pattern, palette, 0), c.Pattern.Size);
                 var bmp = TextureService.ToBitmap(img, w, h, Channel.Rgb);
                 await Dispatcher.InvokeAsync(() => row.Thumb = bmp);
@@ -583,6 +593,9 @@ public partial class JerseyStudioPage : UserControl
         OwnColor2.Text = GearZone.Hex(_ownColors[2]);
         LetterFill.Text = GearZone.Hex(_letterFill);
         LetterOutline.Text = GearZone.Hex(_letterOutline);
+        NameFill.Text = _nameFill is int nf ? GearZone.Hex(nf) : "";
+        NameOutline.Text = _nameOutline is int no ? GearZone.Hex(no) : "";
+        LetterOuter.Text = _letterOuter is int lo ? GearZone.Hex(lo) : "";
         _suppress = false;
         OwnSwatches();
     }
@@ -595,6 +608,9 @@ public partial class JerseyStudioPage : UserControl
         OwnColor2Swatch.Background = HexColor.Brush(HexColor.Parse(OwnColor2.Text));
         LetterFillSwatch.Background = HexColor.Brush(HexColor.Parse(LetterFill.Text));
         LetterOutlineSwatch.Background = HexColor.Brush(HexColor.Parse(LetterOutline.Text));
+        NameFillSwatch.Background = HexColor.Brush(HexColor.Parse(NameFill.Text) ?? HexColor.Parse(LetterFill.Text));
+        NameOutlineSwatch.Background = HexColor.Brush(HexColor.Parse(NameOutline.Text) ?? HexColor.Parse(LetterOutline.Text));
+        LetterOuterSwatch.Background = HexColor.Brush(HexColor.Parse(LetterOuter.Text) ?? HexColor.Parse(LetterOutline.Text));
     }
 
     private void OnOwnColor(object sender, TextChangedEventArgs e)
@@ -610,11 +626,59 @@ public partial class JerseyStudioPage : UserControl
     private void OnLetterColor(object sender, TextChangedEventArgs e)
     {
         OwnSwatches();
-        if (_suppress || sender is not TextBox { Tag: string tag } box || HexColor.Parse(box.Text) is not int c) return;
+        if (_suppress || sender is not TextBox { Tag: string tag } box) return;
+        // the name's colours and the outer ring's (their Tag is the empty box's hint): blank follows the numbers' / the outline's
+        if (box == NameFill || box == NameOutline || box == LetterOuter)
+        {
+            if (box.Text.Trim().Length > 0 && HexColor.Parse(box.Text) == null) return;
+            if (box == NameFill) _nameFill = HexColor.Parse(box.Text);
+            else if (box == NameOutline) _nameOutline = HexColor.Parse(box.Text);
+            else _letterOuter = HexColor.Parse(box.Text);
+            _ownTimer.Stop();
+            _ownTimer.Start();
+            return;
+        }
+        if (HexColor.Parse(box.Text) is not int c) return;
         if (tag == "fill") _letterFill = c; else _letterOutline = c;
         _ownTimer.Stop();
         _ownTimer.Start();
     }
+
+    /// <summary>Uses an image for the pants or socks (null: back to the painted part).</summary>
+    private void SetPartImage(string garment, string file)
+    {
+        (byte[], int, int)? img = null;
+        if (file != null)
+        {
+            try { img = ImageLoader.Load(file); }
+            catch (Exception ex) { StudioStatus.Text = $"Can't use {Path.GetFileName(file)}: {ex.Message}"; file = null; }
+        }
+        if (garment == "pant") { _pantImageFile = file; _pantImage = img; PantImageClear.Visibility = file != null ? Visibility.Visible : Visibility.Collapsed; }
+        else { _sockImageFile = file; _sockImage = img; SockImageClear.Visibility = file != null ? Visibility.Visible : Visibility.Collapsed; }
+    }
+
+    private async void OnPartImage(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is not string garment) return;
+        var dlg = new OpenFileDialog
+        {
+            Title = $"{(garment == "pant" ? "Pants" : "Socks")} texture in the game's {garment} layout (PNG or DDS)", Filter = ImageLoader.Filter,
+            InitialDirectory = DesignFolder(),
+        };
+        if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
+        SetPartImage(garment, dlg.FileName);
+        await PaintOwnParts();
+    }
+
+    private async void OnPartImageClear(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is not string garment) return;
+        SetPartImage(garment, null);
+        await PaintOwnParts();
+    }
+
+    /// <summary>The lettering colours as set.</summary>
+    private OwnKit.FontColors LetterColors() => new(_letterFill, _letterOutline, _letterOuter, _nameFill, _nameOutline);
 
     private void OnLetterSwap(object sender, RoutedEventArgs e)
     {
@@ -648,6 +712,7 @@ public partial class JerseyStudioPage : UserControl
         _ownColorsChanged = false;
         if (colors)
         {
+            if (!_gearDirty) FillGear();
             OwnKit.Fill(_studioSrc.Base, _ownColors[0]);
             var crest = OwnKit.Crest(_ownColors);
             foreach (var (spot, layer) in KitStamp.Brands(_studioSrc.Spots))
@@ -769,6 +834,7 @@ public partial class JerseyStudioPage : UserControl
             _helmetZones = gear.Helmet;
             _gloveZones = gear.Gloves;
             _teamColors = gear.Colors;
+            if (!_gearDirty) FillGear();
             var parts = await KitScene.BuildAsync(index, _textures, kit, Lettering(),
                 g => KitScene.GearAsync(index, kit, g, _helmetZones, _gloveZones, Lettering().Number), TextureSize, () => version != _version);
             if (parts == null || version != _version) return;
@@ -1896,9 +1962,59 @@ public partial class JerseyStudioPage : UserControl
         public List<CollarStripeFile> CollarStripes { get; set; } = new();
         /// <summary>A uniform of your own: its colours, font, pants and socks.</summary>
         public OwnFile Own { get; set; }
+        /// <summary>Team menu: the team, menu name, kit folder and switches it was made for.</summary>
+        public TargetFile Target { get; set; }
+        /// <summary>Helmet and glove zone colours you set (zone number to colour); null: the design's own.</summary>
+        public GearFile Gear { get; set; }
     }
 
-    private sealed record OwnFile(List<string> Colors, int? Font, int? Pant, int? Sock, string LetterFill, string LetterOutline, int PantShift, int SockShift);
+    private sealed record TargetFile(string Team, int TeamId, string Code, int Label, string Folder, bool Light, bool Outfit, bool Top);
+    private sealed record GearFile(Dictionary<string, string> Helmet, Dictionary<string, string> Gloves);
+
+    /// <summary>The file name Export to mod saves the design under, in the uniform's folder.</summary>
+    private const string DesignName = "design.jersey.json";
+
+    /// <summary>
+    /// Where designs are saved and opened: the picked mod school's uniforms folder (its exported uniform's own folder
+    /// when there is one, for opening), else the folder a design was last saved to or opened from, else the first mod
+    /// package's uniforms folder, else the shown kit's export folder.
+    /// </summary>
+    private string DesignFolder(bool open = false)
+    {
+        if (PickedPackageTeam() is { } p && NHL27Kit.Core.Packages.PackageUniforms.Folder(p.Group) is { } root)
+        {
+            string dir = Path.Combine(root, p.Team.Code);
+            Directory.CreateDirectory(dir);
+            if (open && SlotLabel.SelectedItem is PickItem l && Path.Combine(dir, KitName(l.Value)) is var made && File.Exists(Path.Combine(made, DesignName)))
+                return made;
+            return dir;
+        }
+        var settings = Settings.Load();
+        if (!string.IsNullOrEmpty(settings.DesignFolder) && Directory.Exists(settings.DesignFolder)) return settings.DesignFolder;
+        if (_pkgTeams.Values.Select(t => NHL27Kit.Core.Packages.PackageUniforms.Folder(t.Group)).FirstOrDefault(Directory.Exists) is { } any) return any;
+        return _kit != null ? StudioFolder(_kit) : KitPaths.Export;
+    }
+
+    /// <summary>Remembers the folder of a design just saved or opened, for the next Open or Save.</summary>
+    private static void RememberDesignFolder(string file)
+    {
+        var settings = Settings.Load();
+        settings.DesignFolder = Path.GetDirectoryName(Path.GetFullPath(file));
+        settings.Save();
+    }
+
+    /// <summary>A design's file name for the Team menu's picks: "MINN_home", else the picked team's and kit's.</summary>
+    private string DesignFileName()
+    {
+        string kit = SlotLabel.SelectedItem is PickItem l ? KitName(l.Value) : _kit?.Name ?? "kit";
+        if (PickedPackageTeam() is { } p) return $"{p.Team.Code}_{kit}.jersey.json";
+        string team = (SlotTeam.SelectedItem as StudioTeamItem)?.Team.Name ?? _kit?.Team ?? "design";
+        return $"{string.Concat(team.Select(c => char.IsLetterOrDigit(c) ? char.ToLowerInvariant(c) : '_')).Trim('_')}_{kit}.jersey.json";
+    }
+
+    private sealed record OwnFile(List<string> Colors, int? Font, int? Pant, int? Sock, string LetterFill, string LetterOutline, int PantShift, int SockShift,
+                                  string NameFill = null, string NameOutline = null, bool? OwnNameLetters = null, string PantImage = null, string SockImage = null,
+                                  string LetterOuter = null);
 
     private sealed record SpotFile(int Id, string Name, bool Enabled, double R, double Sx, double Sy, double Tx, double Ty);
     private sealed record CollarStripeFile(double From, double Width, string Color);
@@ -1910,10 +2026,18 @@ public partial class JerseyStudioPage : UserControl
         if (_design == null) return;
         var dlg = new SaveFileDialog
         {
-            Title = "Save the design", Filter = "Jersey design|*.jersey.json", InitialDirectory = StudioFolder(_kit),
-            FileName = $"{_kit.Team}_{_kit.Name}.jersey.json",
+            Title = "Save the design", Filter = "Jersey design|*.jersey.json", InitialDirectory = DesignFolder(),
+            FileName = DesignFileName(),
         };
         if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
+        WriteDesign(dlg.FileName);
+        RememberDesignFolder(dlg.FileName);
+        StatusChanged?.Invoke($"Saved the design to {dlg.FileName}");
+    }
+
+    /// <summary>Writes the design as it is now (with the Team menu's picks and your helmet and glove colours) to a file.</summary>
+    private void WriteDesign(string file)
+    {
         var f = new DesignFile
         {
             Template = _design.Pattern is { } p ? $"{p.Template.Brand}:{p.Template.Number}" : null,
@@ -1930,16 +2054,24 @@ public partial class JerseyStudioPage : UserControl
         f.Added = Spots.Where(s => s.IsDecal).Select(s => new AddedFile(s.Decal.File, s.Spot.Enabled, s.Spot.R, s.Spot.Sx, s.Spot.Sy, s.Spot.Tx, s.Spot.Ty)).ToList();
         if (_studioSrc?.Own == true)
             f.Own = new OwnFile(_ownColors.Select(GearZone.Hex).ToList(), Picked(OwnFonts)?.Number, Picked(OwnPants)?.Number, Picked(OwnSocks)?.Number,
-                GearZone.Hex(_letterFill), GearZone.Hex(_letterOutline), _pantShift, _sockShift);
-        File.WriteAllText(dlg.FileName, JsonSerializer.Serialize(f, new JsonSerializerOptions { WriteIndented = true }));
-        StatusChanged?.Invoke($"Saved the design to {dlg.FileName}");
+                GearZone.Hex(_letterFill), GearZone.Hex(_letterOutline), _pantShift, _sockShift,
+                _nameFill is int nf ? GearZone.Hex(nf) : null, _nameOutline is int no ? GearZone.Hex(no) : null, null, _pantImageFile, _sockImageFile,
+                _letterOuter is int lo ? GearZone.Hex(lo) : null);
+        if (SlotTeam.SelectedItem is StudioTeamItem ti && SlotLabel.SelectedItem is PickItem lab)
+            f.Target = new TargetFile(ti.Team.Name, ti.Team.TeamId, PickedPackageTeam()?.Team.Code, lab.Value, (SlotFolder.SelectedItem as SlotKitItem)?.Kit.Folder,
+                SlotLight.IsChecked == true, SlotOutfit.IsChecked == true, SlotTop.IsChecked == true);
+        if (_gearDirty)
+            f.Gear = new GearFile(StudioGearRows.Where(z => z.Piece == "helmet" && z.Value is int).ToDictionary(z => z.Zone.ToString(), z => GearZone.Hex(z.Value.Value)),
+                                  StudioGearRows.Where(z => z.Piece == "gloves" && z.Value is int).ToDictionary(z => z.Zone.ToString(), z => GearZone.Hex(z.Value.Value)));
+        File.WriteAllText(file, JsonSerializer.Serialize(f, new JsonSerializerOptions { WriteIndented = true }));
     }
 
     private async void OnStudioOpen(object sender, RoutedEventArgs e)
     {
         if (_studioSrc == null) return;
-        var dlg = new OpenFileDialog { Title = "Open a jersey design", Filter = "Jersey design|*.jersey.json|All files|*.*", InitialDirectory = StudioFolder(_kit) };
+        var dlg = new OpenFileDialog { Title = "Open a jersey design", Filter = "Jersey design|*.jersey.json|All files|*.*", InitialDirectory = DesignFolder(open: true) };
         if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
+        RememberDesignFolder(dlg.FileName);
         await OpenDesign(dlg.FileName);
     }
 
@@ -1950,7 +2082,13 @@ public partial class JerseyStudioPage : UserControl
         {
             var f = JsonSerializer.Deserialize<DesignFile>(File.ReadAllText(file));
             if (f.Own is { } own)
+            {
+                (_nameFill, _nameOutline) = (HexColor.Parse(own.NameFill ?? ""), HexColor.Parse(own.NameOutline ?? ""));
+                _letterOuter = HexColor.Parse(own.LetterOuter ?? "");
+                SetPartImage("pant", own.PantImage != null && File.Exists(own.PantImage) ? own.PantImage : null);
+                SetPartImage("sock", own.SockImage != null && File.Exists(own.SockImage) ? own.SockImage : null);
                 await SetOwn(string.Join(",", own.Colors ?? new()), own.Font, own.Pant, own.Sock, $"{own.LetterFill},{own.LetterOutline}", own.PantShift, own.SockShift);
+            }
             await WaitStudio();
             var t = f.Template?.Split(':') is { Length: 2 } tp ? _templates.FirstOrDefault(x => x.Brand == tp[0] && x.Number.ToString() == tp[1]) : null;
             _suppress = true;
@@ -1985,12 +2123,38 @@ public partial class JerseyStudioPage : UserControl
             SelectSpot(null);
             _artDirty = true;
             ScheduleStudio();
+            RestoreTarget(f.Target, f.Gear);
             StatusChanged?.Invoke($"Opened the design {Path.GetFileName(file)}" + (_studioSrc?.Own == true ? "" : $" on {_kit}"));
         }
         catch (Exception ex)
         {
             StudioStatus.Text = $"Can't open {Path.GetFileName(file)}: {ex.Message}";
         }
+    }
+
+    /// <summary>The Team menu as a design file left it: team, menu name, kit folder, switches, then your helmet and glove colours.</summary>
+    private void RestoreTarget(TargetFile tg, GearFile gear)
+    {
+        if (tg != null && SlotTeam.ItemsSource is IEnumerable<StudioTeamItem> teams)
+        {
+            var team = teams.FirstOrDefault(t => t.Team.TeamId == tg.TeamId && t.Team.Name == tg.Team) ?? teams.FirstOrDefault(t => t.Team.Name == tg.Team);
+            _suppress = true;
+            if (team != null) SlotTeam.SelectedItem = team;
+            if ((SlotLabel.ItemsSource as IEnumerable<PickItem>)?.FirstOrDefault(i => i.Value == tg.Label) is { } li) SlotLabel.SelectedItem = li;
+            SlotOutfit.IsChecked = tg.Outfit;
+            SlotTop.IsChecked = tg.Top;
+            _suppress = false;
+            _gearDirty = false;
+            FillFolders();
+            if (tg.Folder != null && (SlotFolder.ItemsSource as IEnumerable<SlotKitItem>)?.FirstOrDefault(i => i.Kit.Folder.Equals(tg.Folder, StringComparison.OrdinalIgnoreCase)) is { } fi)
+                SlotFolder.SelectedItem = fi;
+            SlotLight.IsChecked = tg.Light;
+            SlotButtons();
+        }
+        if (gear == null) return;
+        FillGear();
+        foreach (var z in StudioGearRows)
+            if ((z.Piece == "helmet" ? gear.Helmet : gear.Gloves)?.TryGetValue(z.Zone.ToString(), out var hex) == true) z.Text = hex;
     }
 
     // ================================================================ writing over the kit
@@ -2137,6 +2301,7 @@ public partial class JerseyStudioPage : UserControl
         var palette = Palette();
         var (fontT, pantT, sockT) = (_fontPat?.Template, _pantPat?.Template, _sockPat?.Template);
         var (fontImg, ps, ss) = (_fontImg, _pantShift, _sockShift);
+        var (pantImg, sockImg) = (_pantImage, _sockImage);
         await Task.Run(() =>
         {
             var painted = JerseyStudio.PaintBase(src, d);
@@ -2172,6 +2337,26 @@ public partial class JerseyStudioPage : UserControl
                 File.WriteAllBytes(file, ImageFiles.Png(t.Rgba, t.Width, t.Height));
                 return file;
             }
+            // your own pants / socks image for a garment: its colour texture, and its base keeping the folder's fabric
+            // map (alpha), each at the folder's texture size
+            void PartImage(string garment, (byte[] Rgba, int W, int H) im)
+            {
+                if (target.Slot($"{garment}_color") is not { } tc) return;
+                var head = Texture.Load(index, tc.Name, decode: false).Header;
+                int w = head.Width, h = head.Height;
+                var rgba = im.W == w && im.H == h ? (byte[])im.Rgba.Clone() : MipChain.Resize(im.Rgba, im.W, im.H, w, h, true);
+                for (int i = 3; i < rgba.Length; i += 4) rgba[i] = 255;
+                Put($"{garment}_color", rgba, w, h, true);
+                if (target.Slot($"{garment}_base_color") is { } tb)
+                {
+                    var bh = Texture.Load(index, tb.Name, decode: false).Header;
+                    var b = bh.Width == w && bh.Height == h ? (byte[])rgba.Clone() : MipChain.Resize(rgba, w, h, bh.Width, bh.Height, true);
+                    if (Kits.Load(index, tb.Name, Math.Max((int)bh.Width, (int)bh.Height), 0) is { Rgba: not null } ob && ob.Width == bh.Width && ob.Height == bh.Height)
+                        for (int i = 3; i < b.Length; i += 4) b[i] = ob.Rgba[i];
+                    Put($"{garment}_base_color", b, bh.Width, bh.Height, true);
+                }
+                if (garment == "pant") PantLogosOff();
+            }
             // the folder's pant logos off: the pants carry the design's own
             void PantLogosOff()
             {
@@ -2190,7 +2375,8 @@ public partial class JerseyStudioPage : UserControl
                         if (OwnKit.FontMap(index, fontT, kind) is { } t) Put(slot, t.Rgba, t.Width, t.Height, false);
                 }
                 if (!outfit) return;
-                if (pantT != null)
+                if (pantImg is { } pim) PartImage("pant", pim);
+                else if (pantT != null)
                 {
                     var pp = JerseyStudio.LoadPattern(index, pantT, 2048);
                     var pant = OwnKit.PaintPart(pp, palette, ps);
@@ -2205,7 +2391,8 @@ public partial class JerseyStudioPage : UserControl
                             foreach (var slot in slots) Put(slot, t.Rgba, t.Width, t.Height, false);
                     PantLogosOff();
                 }
-                if (sockT != null)
+                if (sockImg is { } sim) PartImage("sock", sim);
+                else if (sockT != null)
                 {
                     var sp = JerseyStudio.LoadPattern(index, sockT, 1024);
                     var sock = OwnKit.PaintPart(sp, palette, ss);
@@ -2219,8 +2406,9 @@ public partial class JerseyStudioPage : UserControl
                 foreach (var slot in new[] { "font_color", "font_normal", "font_coeff" })
                     if (Copy(slot) is { } f) items.Add((target.Slot(slot), f));
             if (!outfit || from == target) return;
-            // pants: the start kit's as the game draws them (logos stamped on), its fabric map kept
-            if (Kits.Compose(index, from, "pant", TextureSize) is { } pc && from.Slot("pant_base_color") is { } pbs)
+            // pants: your own image, else the start kit's as the game draws them (logos stamped on), its fabric map kept
+            if (pantImg is { } kpi) PartImage("pant", kpi);
+            else if (Kits.Compose(index, from, "pant", TextureSize) is { } pc && from.Slot("pant_base_color") is { } pbs)
             {
                 var pb = Kits.Load(index, pbs.Name, pc.Width, 0);
                 var withAlpha = (byte[])pc.Rgba.Clone();
@@ -2233,8 +2421,10 @@ public partial class JerseyStudioPage : UserControl
                 PantLogosOff();
             }
             else if (Copy("pant_color") is { } pcf) items.Add((target.Slot("pant_color"), pcf));
-            foreach (var slot in new[] { "sock_base_color", "sock_color" })
-                if (Copy(slot) is { } f) items.Add((target.Slot(slot), f));
+            if (sockImg is { } ksi) PartImage("sock", ksi);
+            else
+                foreach (var slot in new[] { "sock_base_color", "sock_color" })
+                    if (Copy(slot) is { } f) items.Add((target.Slot(slot), f));
         });
         return new Prepared(items, stampEbx, stampNew, pantEbx, pantNew);
     }
@@ -2392,12 +2582,15 @@ public partial class JerseyStudioPage
         var folder = SlotFolder.SelectedItem as SlotKitItem;
         var team = SlotTeam.SelectedItem as StudioTeamItem;
         bool errors = StudioZoneRows.Any(z => z.HasError) || LineRows.Any(l => l.HasError);
-        SlotWrite.IsEnabled = !_busy && _studioSrc != null && folder != null && team != null && !errors;
+        bool canWrite = !_busy && _studioSrc != null && folder != null && team != null && !errors;
         var pkg = PickedPackageTeam();
+        // a mod's school gets its uniforms from the package (Export to mod, then install it): writing into the game
+        // directly would clash with the package's next install
+        SlotWrite.IsEnabled = canWrite && pkg == null;
+        SlotWrite.Visibility = pkg != null ? Visibility.Collapsed : Visibility.Visible;
         SlotExport.Visibility = pkg != null ? Visibility.Visible : Visibility.Collapsed;
-        SlotGear.Visibility = pkg != null ? Visibility.Visible : Visibility.Collapsed;
-        if (pkg != null) FillGear();
-        SlotExport.IsEnabled = SlotWrite.IsEnabled && pkg != null && folder.Label.StartsWith("free");
+        if (!_gearDirty) FillGear();
+        SlotExport.IsEnabled = canWrite && pkg != null && folder.Label.StartsWith("free");
         if (folder == null) { SlotStatus.Text = _kitTeams == null ? "" : "No folder to write into: switch on Used folders."; return; }
         bool free = folder.Label.StartsWith("free");
         if (pkg != null && SlotLabel.SelectedItem is PickItem pl)
@@ -2417,9 +2610,13 @@ public partial class JerseyStudioPage
 
     // ================================================================ helmet & gloves of an exported uniform
 
-    private bool _gearDirty, _gearFilling;
+    private bool _gearDirty;
     private DispatcherTimer _gearTimer;
-    private TextBox[] GearBoxes => new[] { GearH0, GearH1, GearH2, GearG0, GearG1, GearG2 };
+    private List<(int Zone, double Share)> _helmetUsed, _gloveUsed;
+    private static readonly string[] HelmetZoneNames = { "Shell", "Trim", "Maker's logo" };
+    private IEnumerable<GearZone> StudioGearRows =>
+        (StudioHelmetZones.ItemsSource as IEnumerable<GearZone> ?? Enumerable.Empty<GearZone>())
+        .Concat(StudioGloveZones.ItemsSource as IEnumerable<GearZone> ?? Enumerable.Empty<GearZone>());
 
     /// <summary>The design's own helmet and glove zones: your colours for your own uniform, else the start kit's (15 each).</summary>
     private (int[] Helmet, int[] Gloves) DesignGear()
@@ -2431,34 +2628,38 @@ public partial class JerseyStudioPage
         return (_helmetZones, _gloveZones);
     }
 
-    /// <summary>The boxes from the design, unless you changed them.</summary>
+    /// <summary>The zone rows from the design (the zones the helmet's and gloves' masks use), unless you changed them.</summary>
     private void FillGear()
     {
-        if (_gearDirty || GearH0 == null) return;
+        if (_gearDirty || StudioHelmetZones == null || _mods == null) return;
+        try
+        {
+            _helmetUsed ??= KitEquipment.UsedZones(_mods.Index, "helmet");
+            _gloveUsed ??= KitEquipment.UsedZones(_mods.Index, "gloves");
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException) { return; }
         var (h, g) = DesignGear();
-        var v = new[] { h[0], h[1], h[2], g[0], g[1], g[2] };
-        _gearFilling = true;
-        for (int i = 0; i < 6; i++) GearBoxes[i].Text = GearZone.Hex(v[i]);
-        _gearFilling = false;
+        StudioHelmetZones.ItemsSource = _helmetUsed.Select(u => new GearZone("helmet", u.Zone, u.Zone <= 3 ? HelmetZoneNames[u.Zone - 1] : $"Zone {u.Zone}",
+            u.Share, h[u.Zone - 1], OnStudioGearChanged)).ToList();
+        StudioGloveZones.ItemsSource = _gloveUsed.OrderByDescending(u => u.Share).Select(u => new GearZone("gloves", u.Zone, $"Zone {u.Zone}",
+            u.Share, g[u.Zone - 1], OnStudioGearChanged)).ToList();
     }
 
-    /// <summary>The zones the export writes: once you change a box, helmet shell / trim / maker's logo (its other zones
-    /// follow the shell) and gloves main / second / third in turn; else the design's own.</summary>
+    /// <summary>The zones the export writes: the design's, with every zone row's colour on top (a row that isn't a
+    /// colour keeps the design's).</summary>
     private (int[] Helmet, int[] Gloves) ExportGear()
     {
         var (h0, g0) = DesignGear();
-        if (!_gearDirty) return (h0.ToArray(), g0.ToArray());
-        var v = GearBoxes.Select(b => HexColor.Parse(b.Text)).ToArray();
         var helmet = h0.ToArray();
-        for (int i = 0; i < 3; i++) if (v[i] is int c) helmet[i] = c;
-        for (int i = 3; i < helmet.Length; i++) helmet[i] = helmet[0];
-        var gloves = Enumerable.Range(0, 15).Select(i => v[3 + i % 3] ?? g0[i]).ToArray();
+        var gloves = g0.ToArray();
+        if (!_gearDirty) return (helmet, gloves);
+        foreach (var z in StudioGearRows)
+            if (z.Value is int c && z.Zone is >= 1 and <= 15) (z.Piece == "helmet" ? helmet : gloves)[z.Zone - 1] = c;
         return (helmet, gloves);
     }
 
-    private void OnGearColor(object sender, TextChangedEventArgs e)
+    private void OnStudioGearChanged(GearZone z)
     {
-        if (_gearFilling) return;
         _gearDirty = true;
         if (_gearTimer == null)
         {
@@ -2467,6 +2668,14 @@ public partial class JerseyStudioPage
         }
         _gearTimer.Stop();
         _gearTimer.Start();
+    }
+
+    /// <summary>A zone's box: a swatch click fills it.</summary>
+    private void OnStudioGearFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not GearZone z) return;
+        SelectColor(z, t => z.Text = t);
+        foreach (var r in StudioGearRows) r.IsSelected = r == z;
     }
 
     private async void OnGearReset(object sender, RoutedEventArgs e)
@@ -2511,9 +2720,15 @@ public partial class JerseyStudioPage
         try
         {
             Directory.CreateDirectory(dir);
-            foreach (string old in Directory.GetFiles(dir).Where(x => x.EndsWith(".png", StringComparison.OrdinalIgnoreCase) || x.EndsWith(".ebx", StringComparison.OrdinalIgnoreCase)
-                                                                  || Path.GetFileName(x).Equals(NHL27Kit.Core.Packages.PackageUniform.FileName, StringComparison.OrdinalIgnoreCase)))
-                File.Delete(old);
+            // the earlier export's own files only (kit-named textures, stamps, uniform.json): anything else you keep here stays
+            bool Ours(string x)
+            {
+                string n = Path.GetFileName(x);
+                return n.StartsWith(kitName + "_", StringComparison.OrdinalIgnoreCase) && n.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
+                       || n.StartsWith("stamp_", StringComparison.OrdinalIgnoreCase) && n.EndsWith(".ebx", StringComparison.OrdinalIgnoreCase)
+                       || n.Equals(NHL27Kit.Core.Packages.PackageUniform.FileName, StringComparison.OrdinalIgnoreCase);
+            }
+            foreach (string old in Directory.GetFiles(dir).Where(Ours)) File.Delete(old);
             var p = await PrepareInto(folder.Kit, SlotOutfit.IsChecked == true, Path.Combine(dir, kitName));
             var u = new NHL27Kit.Core.Packages.PackageUniform
             {
@@ -2529,9 +2744,11 @@ public partial class JerseyStudioPage
             if (p.StampNew != null) { File.WriteAllBytes(Path.Combine(dir, "stamp_jersey.ebx"), p.StampNew); u.Stamps["jersey"] = "stamp_jersey.ebx"; }
             if (p.PantNew != null) { File.WriteAllBytes(Path.Combine(dir, "stamp_pant.ebx"), p.PantNew); u.Stamps["pant"] = "stamp_pant.ebx"; }
             // the rendering's working files no texture slot took
-            foreach (string extra in Directory.GetFiles(dir, "*.png").Where(x => !u.Textures.Values.Contains(Path.GetFileName(x), StringComparer.OrdinalIgnoreCase)))
+            foreach (string extra in Directory.GetFiles(dir, "*.png").Where(x => Ours(x) && !u.Textures.Values.Contains(Path.GetFileName(x), StringComparer.OrdinalIgnoreCase)))
                 File.Delete(extra);
             u.Save(dir);
+            // the design itself, so the uniform can be opened again, changed and exported again
+            WriteDesign(Path.Combine(dir, DesignName));
             string msg = $"Exported {pkg.Team.Name} {kitName} ({u.Textures.Count} textures, {u.Stamps.Count} stamps, kit folder {folder.Kit}) to {dir}. Install the package to see it in the game.";
             SlotStatus.Text = msg;
             StatusChanged?.Invoke("Jersey studio: " + msg);
@@ -2557,6 +2774,7 @@ public partial class JerseyStudioPage
     public async Task AddToTeam(bool noAsk = false)
     {
         if (_busy || _studioSrc == null || SlotFolder.SelectedItem is not SlotKitItem folder || SlotTeam.SelectedItem is not StudioTeamItem team) return;
+        if (PickedPackageTeam() != null) return;          // a mod's school: Export to mod instead
         if (!GameClosed()) return;
         var label = (SlotLabel.SelectedItem as PickItem) ?? new PickItem("Third", 2);
         bool light = SlotLight.IsChecked == true, top = SlotTop.IsChecked == true, outfit = SlotOutfit.IsChecked == true;

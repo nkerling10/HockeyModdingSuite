@@ -3,6 +3,32 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:local="clr-namespace:NHL27Kit.App">
     <UserControl.Resources>
+        <!-- one helmet or glove zone (as on Uniforms, Helmet & gloves) -->
+        <DataTemplate x:Key="StudioGearTemplate" DataType="{x:Type local:GearZone}">
+            <Border x:Name="Bd" Margin="0,0,0,5" Padding="9,6" CornerRadius="8" Background="{StaticResource Surface2}" BorderBrush="{StaticResource Line}" BorderThickness="1">
+                <DockPanel>
+                    <Border DockPanel.Dock="Left" Width="20" Height="20" CornerRadius="5" Margin="0,0,9,0" Background="{Binding Swatch}"
+                            BorderBrush="#40FFFFFF" BorderThickness="1" VerticalAlignment="Center" />
+                    <TextBox DockPanel.Dock="Right" Width="84" Height="26" Text="{Binding Text, UpdateSourceTrigger=PropertyChanged}" GotKeyboardFocus="OnStudioGearFocus"
+                             HorizontalContentAlignment="Right" FontFamily="{StaticResource MonoFont}" FontSize="12" CharacterCasing="Upper" />
+                    <StackPanel VerticalAlignment="Center" Margin="0,0,8,0">
+                        <TextBlock Text="{Binding Label}" Foreground="{StaticResource Text}" FontSize="12" />
+                        <TextBlock Text="{Binding Meta}" Style="{StaticResource Caption}" FontSize="10.5" />
+                    </StackPanel>
+                </DockPanel>
+            </Border>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding IsChanged}" Value="True">
+                    <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource Patch}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                    <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource Accent}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding HasError}" Value="True">
+                    <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource Danger}" />
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
         <!-- a team colour: clicking it fills the selected colour box -->
         <DataTemplate x:Key="SwatchTemplate">
             <Button Width="26" Height="26" Margin="0,0,6,6" Padding="0" Click="OnSwatch" Tag="{Binding Hex}" ToolTip="{Binding Hex}" Cursor="Hand">
@@ -185,6 +211,21 @@
                                     <TextBox x:Name="LetterOutline" DockPanel.Dock="Right" Style="{StaticResource Hex}" Tag="outline" TextChanged="OnLetterColor" GotKeyboardFocus="OnOwnColorFocus" />
                                     <TextBlock Text="Outline" Style="{StaticResource Caption}" VerticalAlignment="Center" />
                                 </DockPanel>
+                                <DockPanel Style="{StaticResource OwnRow}" ToolTip="The outermost ring of the fonts that have three (fill, outline, outer outline), numbers and name. Blank: the same as the outline.">
+                                    <Border x:Name="LetterOuterSwatch" Width="22" Height="22" CornerRadius="5" BorderBrush="#40FFFFFF" BorderThickness="1" Margin="0,0,8,0" />
+                                    <TextBox x:Name="LetterOuter" DockPanel.Dock="Right" Style="{StaticResource Hex}" Tag="same" TextChanged="OnLetterColor" GotKeyboardFocus="OnOwnColorFocus" />
+                                    <TextBlock Text="Outer outline" Style="{StaticResource Caption}" VerticalAlignment="Center" />
+                                </DockPanel>
+                                <DockPanel Style="{StaticResource OwnRow}" ToolTip="The name on the back in its own colour. Blank: the same as the numbers.">
+                                    <Border x:Name="NameFillSwatch" Width="22" Height="22" CornerRadius="5" BorderBrush="#40FFFFFF" BorderThickness="1" Margin="0,0,8,0" />
+                                    <TextBox x:Name="NameFill" DockPanel.Dock="Right" Style="{StaticResource Hex}" Tag="same" TextChanged="OnLetterColor" GotKeyboardFocus="OnOwnColorFocus" />
+                                    <TextBlock Text="Name fill" Style="{StaticResource Caption}" VerticalAlignment="Center" />
+                                </DockPanel>
+                                <DockPanel Style="{StaticResource OwnRow}" ToolTip="The name's outline colour (fonts whose name letters have one). Blank: the same as the numbers.">
+                                    <Border x:Name="NameOutlineSwatch" Width="22" Height="22" CornerRadius="5" BorderBrush="#40FFFFFF" BorderThickness="1" Margin="0,0,8,0" />
+                                    <TextBox x:Name="NameOutline" DockPanel.Dock="Right" Style="{StaticResource Hex}" Tag="same" TextChanged="OnLetterColor" GotKeyboardFocus="OnOwnColorFocus" />
+                                    <TextBlock Text="Name outline" Style="{StaticResource Caption}" VerticalAlignment="Center" />
+                                </DockPanel>
                                 <ListBox x:Name="OwnFonts" Height="150" Background="{StaticResource Surface2}" BorderThickness="0" Padding="3" Margin="0,2,0,10"
                                          ScrollViewer.HorizontalScrollBarVisibility="Disabled" ItemContainerStyle="{StaticResource PickItem}" SelectionChanged="OnOwnPart">
                                     <ListBox.ItemsPanel>
@@ -201,6 +242,10 @@
 
                                 <DockPanel>
                                     <Button DockPanel.Dock="Right" Style="{StaticResource Ghost}" Content="Shuffle" Padding="6,2" Click="OnPantShuffle" ToolTip="Move the colours round the pants' zones" />
+                                    <Button x:Name="PantImageClear" DockPanel.Dock="Right" Style="{StaticResource Ghost}" Content="Clear" Padding="6,2" Tag="pant" Click="OnPartImageClear"
+                                            Visibility="Collapsed" ToolTip="Back to the painted pants" />
+                                    <Button DockPanel.Dock="Right" Style="{StaticResource Ghost}" Content="Image…" Padding="6,2" Tag="pant" Click="OnPartImage"
+                                            ToolTip="Use your own pants texture (PNG or DDS, in the game's pant layout) instead of the painted pants" />
                                     <TextBlock Text="PANTS" Style="{StaticResource SectionHead}" />
                                 </DockPanel>
                                 <ListBox x:Name="OwnPants" Height="104" Background="{StaticResource Surface2}" BorderThickness="0" Padding="3" Margin="0,0,0,10"
@@ -213,6 +258,10 @@
 
                                 <DockPanel>
                                     <Button DockPanel.Dock="Right" Style="{StaticResource Ghost}" Content="Shuffle" Padding="6,2" Click="OnSockShuffle" ToolTip="Move the colours round the socks' zones" />
+                                    <Button x:Name="SockImageClear" DockPanel.Dock="Right" Style="{StaticResource Ghost}" Content="Clear" Padding="6,2" Tag="sock" Click="OnPartImageClear"
+                                            Visibility="Collapsed" ToolTip="Back to the painted socks" />
+                                    <Button DockPanel.Dock="Right" Style="{StaticResource Ghost}" Content="Image…" Padding="6,2" Tag="sock" Click="OnPartImage"
+                                            ToolTip="Use your own socks texture (PNG or DDS, in the game's sock layout) instead of the painted socks" />
                                     <TextBlock Text="SOCKS" Style="{StaticResource SectionHead}" />
                                 </DockPanel>
                                 <ListBox x:Name="OwnSocks" Height="104" Background="{StaticResource Surface2}" BorderThickness="0" Padding="3" Margin="0,0,0,10"
@@ -223,7 +272,7 @@
                                     </ListBox.ItemsPanel>
                                 </ListBox>
                                 <TextBlock Style="{StaticResource Caption}" FontSize="11" TextWrapping="Wrap"
-                                           Text="In game the helmet and gloves take the team's equipment colours: set them on Uniforms, Helmet &amp; gloves." />
+                                           Text="Helmet and gloves: set each zone on the Team menu tab. They're saved with the uniform when you export it to a mod school." />
                             </StackPanel>
                         </ScrollViewer>
 
@@ -268,7 +317,7 @@
                         </StackPanel>
                     </DockPanel>
                     <DockPanel VerticalAlignment="Bottom" Margin="18,0,18,14">
-                        <Border DockPanel.Dock="Right" Background="#B0101318" CornerRadius="9" Padding="3">
+                        <Border DockPanel.Dock="Bottom" HorizontalAlignment="Right" Background="#B0101318" CornerRadius="9" Padding="3" Margin="0,8,0,0">
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{StaticResource Ghost}" Content="Front" Padding="10,4" Click="OnFront" />
                                 <Button Style="{StaticResource Ghost}" Content="Side" Padding="10,4" Click="OnSide" />
@@ -276,7 +325,7 @@
                                 <Button Style="{StaticResource Ghost}" Content="Collar" Padding="10,4" Tag="front" Click="OnCollarView" ToolTip="The collar up close" />
                             </StackPanel>
                         </Border>
-                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" ToolTip="Drag to turn  ·  scroll to zoom  ·  double-click to reset">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" ToolTip="The name and number drawn on the jersey (and the helmet's number)">
                             <TextBlock Text="Name" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="0,0,6,0" />
                             <TextBox x:Name="LetterName" Width="120" MaxLength="16" CharacterCasing="Upper" TextChanged="OnLetteringChanged" />
                             <TextBlock Text="No." Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="12,0,6,0" />
@@ -716,23 +765,18 @@
                                                       ToolTip="Also write the start kit's pants (with their logos) and socks into the folder, so the slot is the whole uniform" />
                                         </UniformGrid>
                                     </Grid>
-                                    <StackPanel x:Name="SlotGear" Margin="0,0,0,10" Visibility="Collapsed">
-                                        <TextBlock Style="{StaticResource Caption}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,6"
-                                                   Text="Helmet &amp; gloves for this uniform (exported with it; the mod writes them as the school's own equipment colours)." />
-                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
-                                            <TextBlock Text="Helmet" Width="78" Style="{StaticResource Caption}" VerticalAlignment="Center" />
-                                            <TextBox x:Name="GearH0" Style="{StaticResource Hex}" Tag="h0" TextChanged="OnGearColor" ToolTip="Shell" />
-                                            <TextBox x:Name="GearH1" Style="{StaticResource Hex}" Tag="h1" TextChanged="OnGearColor" ToolTip="Trim" Margin="6,0,0,0" />
-                                            <TextBox x:Name="GearH2" Style="{StaticResource Hex}" Tag="h2" TextChanged="OnGearColor" ToolTip="Maker's logo" Margin="6,0,0,0" />
-                                        </StackPanel>
-                                        <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="Gloves" Width="78" Style="{StaticResource Caption}" VerticalAlignment="Center" />
-                                            <TextBox x:Name="GearG0" Style="{StaticResource Hex}" Tag="g0" TextChanged="OnGearColor" ToolTip="Main" />
-                                            <TextBox x:Name="GearG1" Style="{StaticResource Hex}" Tag="g1" TextChanged="OnGearColor" ToolTip="Second" Margin="6,0,0,0" />
-                                            <TextBox x:Name="GearG2" Style="{StaticResource Hex}" Tag="g2" TextChanged="OnGearColor" ToolTip="Third" Margin="6,0,0,0" />
-                                            <Button Style="{StaticResource Ghost}" Content="Reset" Padding="8,3" Margin="8,0,0,0" Click="OnGearReset"
+                                    <StackPanel x:Name="SlotGear" Margin="0,0,0,10">
+                                        <DockPanel Margin="0,4,0,4">
+                                            <Button DockPanel.Dock="Right" Style="{StaticResource Ghost}" Content="Reset" Padding="8,3" Click="OnGearReset"
                                                     ToolTip="Back to the design's own helmet and glove colours" />
-                                        </StackPanel>
+                                            <TextBlock Text="HELMET &amp; GLOVES" Style="{StaticResource SectionHead}" VerticalAlignment="Center" />
+                                        </DockPanel>
+                                        <TextBlock Style="{StaticResource Caption}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8"
+                                                   Text="Each zone of the helmet and gloves, shown on the model as you type (click a box, then a colour swatch to fill it). Export to mod saves them with the uniform: the mod gives the school these equipment colours for it." />
+                                        <TextBlock Text="Helmet" Style="{StaticResource Caption}" Margin="0,0,0,4" />
+                                        <ItemsControl x:Name="StudioHelmetZones" ItemTemplate="{StaticResource StudioGearTemplate}" Margin="0,0,0,8" />
+                                        <TextBlock Text="Gloves" Style="{StaticResource Caption}" Margin="0,0,0,4" />
+                                        <ItemsControl x:Name="StudioGloveZones" ItemTemplate="{StaticResource StudioGearTemplate}" />
                                     </StackPanel>
                                     <DockPanel>
                                         <Button x:Name="SlotWrite" DockPanel.Dock="Right" Style="{StaticResource Primary}" Padding="12,6" Click="OnAddToTeam" IsEnabled="False">
