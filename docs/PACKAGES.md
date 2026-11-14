@@ -52,7 +52,8 @@ package).
 `package-status`, `package-codemods`. Core/Packages: PackageSpec, PackageCheck, PackageInstaller, Png, NcaaCodeMods.
 Players step built (PackagePlayers; `package-players FOLDER` runs it read-only). The players file is
 { team: { season: { "First Last": { birthdate, position, shoots, height, weight, hometown, jersey_number, class,
-draft: { year, round, pick, team } } } } }. `draft` (NHL team abbreviation) is written to the bio of a placed player
+draft: { year, round, pick, team } } } } }. `"bubble": "true"` (or true/yes/1) gives a skater a clear full shield
+(faceprotectortype `rules.bubbleFaceProtector`, default 9) instead of `rules.faceProtector` (the cage, 7). `draft` (NHL team abbreviation) is written to the bio of a placed player
 (created or moved) and of an exactly matched commit: draftyear/round/position/team, and proteam = the drafting team
 unless the game has his rights with another team. No `draft`: the game's draft stays (a created player is undrafted).
 Current-season roster players are matched and moved (taking the file's number and size), or created from the file, then given the NCAA bio (team -1, juniorteam = school, juniorleague) and

@@ -50,6 +50,8 @@ public static class PackagePlayers
         public int? Entry { get; set; }
         /// <summary>His NHL draft, from "draft" { year, round, pick, team }; null when the file gives none.</summary>
         public DraftInfo Draft { get; set; }
+        /// <summary>"bubble": true in the file: he wears a clear full shield instead of the package's cage.</summary>
+        public bool Bubble { get; set; }
     }
 
     /// <summary>"draft": { "year": 2025, "round": 2, "pick": 63, "team": "NJ" } → DraftInfo; null when absent or incomplete.</summary>
@@ -99,6 +101,16 @@ public static class PackagePlayers
         if (Provinces.Contains(tail)) return (city, tail.ToUpperInvariant(), "CAN");
         return (city, "", Countries.TryGetValue(tail, out var code) ? code : tail);
     }
+
+    /// <summary>A yes/no field: true, "true", "yes", "1" or 1 (any case); anything else or missing is no.</summary>
+    private static bool Flag(JsonElement o, string name) =>
+        o.ValueKind == JsonValueKind.Object && o.TryGetProperty(name, out var v) && v.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.String => v.GetString()?.Trim().ToLowerInvariant() is "true" or "yes" or "1",
+            JsonValueKind.Number => v.TryGetInt32(out int n) && n != 0,
+            _ => false,
+        };
 
     private static string Str(JsonElement o, string name) =>
         o.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
@@ -182,7 +194,7 @@ public static class PackagePlayers
                     { r.Warnings.Add($"players: {name} ({teamName}): birth date '{born}' isn't MM-DD-YYYY; skipped"); continue; }
                     var (first, last) = SplitPersonName(name);
                     if (info == null || string.IsNullOrWhiteSpace(info.Pos)) info = details.GetValueOrDefault(name) ?? info;
-                    var item = new Listed(team, season, name, first, last, b, info) { Draft = DraftOf(el) };
+                    var item = new Listed(team, season, name, first, last, b, info) { Draft = DraftOf(el), Bubble = Flag(el, "bubble") };
                     if (el.ValueKind == JsonValueKind.Object && Str(el, "class") is { } cls)
                     {
                         item.Entry = ClassOffset(cls);
@@ -324,7 +336,7 @@ public static class PackagePlayers
         var eqFace = eq.Fields.FirstOrDefault(f => f.Name == "faceprotectortype");
         var eqRow = Enumerable.Range(0, eq.WrittenRecords).Where(i => !db.IsInvalid(eq, i))
                               .GroupBy(i => Convert.ToInt32(db.Get(eq, i, eqId))).ToDictionary(g => g.Key, g => g.First());
-        int league = spec.League?.Id ?? 32, cages = 0, repositioned = 0, drafted = 0, uncontracted = 0;
+        int league = spec.League?.Id ?? 32, cages = 0, bubbles = 0, repositioned = 0, drafted = 0, uncontracted = 0;
         var moved = moves.Select(m => m.GameId).ToHashSet();
         // the file's draft (year, round, pick, team) on his bio; the drafting team holds his rights (proteam) unless the
         // game has them with another team (a traded pick). No "draft" in the file: his draft stays as the game has it
@@ -364,8 +376,12 @@ public static class PackagePlayers
                 }
                 uncontracted++;
             }
+            // the package's cage, or a clear bubble for a player the file marks "bubble"
             if (spec.Rules?.FaceProtector is int fp && eqFace != null && !p.IsGoalie && eqRow.TryGetValue(id, out int er))
-            { db.Set(eq, er, eqFace, fp); cages++; }
+            {
+                if (l.Bubble) { db.Set(eq, er, eqFace, spec.Rules.BubbleFaceProtector ?? 9); bubbles++; }
+                else { db.Set(eq, er, eqFace, fp); cages++; }
+            }
         }
 
         // lines from the final positions
@@ -373,7 +389,7 @@ public static class PackagePlayers
 
         r.Lines.Add($"players: season {current}: {now.Count} listed, {placed.Count} placed ({moves.Count - already} moved, {already} already there, " +
                     $"{placed.Count - moves.Count} created), {needDetails.Count} need details; {drafted} drafted (file's draft); " +
-                    (ps.NoContract ? $"{uncontracted} contracts cleared; " : "") + $"{cages} face protectors; " +
+                    (ps.NoContract ? $"{uncontracted} contracts cleared; " : "") + $"{cages} cages, {bubbles} bubbles; " +
                     $"{repositioned} existing players' positions from the file; {forwardsPlaced} \"F\" given a spot; lines rebuilt");
         // which game player each roster-file entry is (the game may spell him differently: "Nic Sima" for Nicholas)
         foreach (var (l, gid) in placed) r.Placed[(l.Team.Code, PackagePortraits.Slug(l.Name))] = gid;

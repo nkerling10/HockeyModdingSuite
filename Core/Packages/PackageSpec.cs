@@ -322,6 +322,9 @@ public sealed class RulesSpec
 {
     /// <summary>faceprotectortype for the package's players: 7 full cage, 9 full shield (bubble); null leaves it.</summary>
     public int? FaceProtector { get; set; }
+    /// <summary>faceprotectortype for a player whose roster entry has "bubble": true (a clear full shield instead of the
+    /// cage). Default 9.</summary>
+    public int? BubbleFaceProtector { get; set; }
     /// <summary>Game days the US regions keep per 16 (the NCAA-length season, code mod); 16 = unchanged. Default 9.</summary>
     public int? SeasonKeep { get; set; }
     /// <summary>NCAA seasons before an undrafted NCAA player leaves school for free agency (code mod). Default 4.</summary>
