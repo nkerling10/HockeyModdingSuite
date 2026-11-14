@@ -716,6 +716,24 @@
                                                       ToolTip="Also write the start kit's pants (with their logos) and socks into the folder, so the slot is the whole uniform" />
                                         </UniformGrid>
                                     </Grid>
+                                    <StackPanel x:Name="SlotGear" Margin="0,0,0,10" Visibility="Collapsed">
+                                        <TextBlock Style="{StaticResource Caption}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,6"
+                                                   Text="Helmet &amp; gloves for this uniform (exported with it; the mod writes them as the school's own equipment colours)." />
+                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                            <TextBlock Text="Helmet" Width="78" Style="{StaticResource Caption}" VerticalAlignment="Center" />
+                                            <TextBox x:Name="GearH0" Style="{StaticResource Hex}" Tag="h0" TextChanged="OnGearColor" ToolTip="Shell" />
+                                            <TextBox x:Name="GearH1" Style="{StaticResource Hex}" Tag="h1" TextChanged="OnGearColor" ToolTip="Trim" Margin="6,0,0,0" />
+                                            <TextBox x:Name="GearH2" Style="{StaticResource Hex}" Tag="h2" TextChanged="OnGearColor" ToolTip="Maker's logo" Margin="6,0,0,0" />
+                                        </StackPanel>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="Gloves" Width="78" Style="{StaticResource Caption}" VerticalAlignment="Center" />
+                                            <TextBox x:Name="GearG0" Style="{StaticResource Hex}" Tag="g0" TextChanged="OnGearColor" ToolTip="Main" />
+                                            <TextBox x:Name="GearG1" Style="{StaticResource Hex}" Tag="g1" TextChanged="OnGearColor" ToolTip="Second" Margin="6,0,0,0" />
+                                            <TextBox x:Name="GearG2" Style="{StaticResource Hex}" Tag="g2" TextChanged="OnGearColor" ToolTip="Third" Margin="6,0,0,0" />
+                                            <Button Style="{StaticResource Ghost}" Content="Reset" Padding="8,3" Margin="8,0,0,0" Click="OnGearReset"
+                                                    ToolTip="Back to the design's own helmet and glove colours" />
+                                        </StackPanel>
+                                    </StackPanel>
                                     <DockPanel>
                                         <Button x:Name="SlotWrite" DockPanel.Dock="Right" Style="{StaticResource Primary}" Padding="12,6" Click="OnAddToTeam" IsEnabled="False">
                                             <StackPanel Orientation="Horizontal">

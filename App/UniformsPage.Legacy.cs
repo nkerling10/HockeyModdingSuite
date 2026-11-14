@@ -91,6 +91,7 @@ public partial class UniformsPage
     /// <summary>Writes the previewed jersey over the kit's jersey color and base color, and optionally blanks its jersey logos.</summary>
     public async Task WriteLegacy(bool hideLogos)
     {
+        if (ModTeamReadOnly()) return;
         if (_legacyFile == null || _kit == null) return;
         var items = new[] { "jersey_color", "jersey_base_color" }
             .Select(s => _kit.Slot(s)).Where(t => t != null).Select(t => (t, _legacyFile)).ToList();

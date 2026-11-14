@@ -28,6 +28,11 @@ public sealed class PackageUniform
     public Dictionary<string, string> Textures { get; set; } = new();
     /// <summary>Garment (jersey, pant) → its stamp EBX, rewritten for the design, in this folder.</summary>
     public Dictionary<string, string> Stamps { get; set; } = new();
+    /// <summary>Helmet and glove zone colours (0xRRGGBB, 15 each; helmet 1-3 shell, trim, maker's logo; gloves 1-12):
+    /// the team's equipment rows for this uniform (stockteamequipmenttable, by its kit's art id, era and variant).
+    /// Null: the template's.</summary>
+    public int[] Helmet { get; set; }
+    public int[] Gloves { get; set; }
     /// <summary>What it was made from, for the report.</summary>
     public string From { get; set; }
     public DateTime Exported { get; set; }
@@ -106,12 +111,57 @@ public static class PackageUniforms
                     taken[u.Folder] = who;
                     slots.Add(new JerseySlot { ArtId = u.ArtId, Style = a.Style, Variant = a.Variant, Label = u.Label, IsDefault = u.IsDefault, IsLight = u.Light });
                     done.Add((t, u, kit));
+                    WriteGear(db, t.Index, u, a.Style, a.Variant, who, problems);
                 }
                 if (slots.Count == 0) continue;
+                // a team needs a home and an away uniform: until both are exported, the template's stays for the missing one
+                var before = JerseySlots.Read(db, t.Index);
+                foreach (int label in new[] { 0, 1 })
+                    if (!slots.Any(s => s.Label == label) && before.FirstOrDefault(b => b.Label == label && b.IsDefault) is { } keep)
+                        slots.Insert(Math.Min(label, slots.Count), keep);
                 string summary = JerseySlots.Write(db, t.Index, slots);
                 r.Lines.Add($"{t.Code}: jersey menu {string.Join(", ", done.Where(x => x.Item1 == t).Select(x => x.Item2.Name))} ({summary})");
             }
         foreach (var p in problems) r.Warnings.Add("uniforms: " + p);
+        int gear = done.Count(x => x.Item2.Helmet != null || x.Item2.Gloves != null);
+        if (gear > 0) r.Lines.Add($"uniforms: helmet and glove colours for {gear} uniform(s)");
         return done;
+    }
+
+    /// <summary>
+    /// The uniform's helmet and glove colours as the team's own equipment rows (stockteamequipmenttable: team, kind 7
+    /// helmet / 4 gloves, the kit's art id, era = brand, variant = the kit's number, brand -1): the row for exactly that
+    /// kit is updated, or a copy of one of the team's rows of that kind is added with a new key.
+    /// </summary>
+    private static void WriteGear(T3Db db, int team, PackageUniform u, int era, int variant, string who, List<string> problems)
+    {
+        if (u.Helmet == null && u.Gloves == null) return;
+        var t = db.Table("stockteamequipmenttable");
+        var f = t.Fields.ToDictionary(x => x.Name);
+        int I(int r, string n) => Convert.ToInt32(db.Get(t, r, f[n]));
+        var rows = Enumerable.Range(0, t.WrittenRecords).Where(r => !db.IsInvalid(t, r)).ToList();
+        foreach (var (kind, zones) in new[] { (KitEquipment.HelmetKind, u.Helmet), (KitEquipment.GloveKind, u.Gloves) })
+        {
+            if (zones == null || zones.Length == 0) continue;
+            int row = rows.FirstOrDefault(r => I(r, "team") == team && I(r, "equipment") == kind && I(r, "brand") == -1
+                                               && I(r, "jerseyartid") == u.ArtId && I(r, "era") == era && I(r, "variant") == variant, -1);
+            if (row < 0)
+            {
+                int src = rows.FirstOrDefault(r => I(r, "team") == team && I(r, "equipment") == kind, -1);
+                if (src < 0) { problems.Add($"{who}: the team has no {(kind == KitEquipment.HelmetKind ? "helmet" : "glove")} row to copy; colours left out"); continue; }
+                if (t.WrittenRecords >= t.Records) { problems.Add($"{who}: stockteamequipmenttable is full; colours left out"); continue; }
+                int key = rows.Max(r => I(r, "index")) + 1;
+                row = t.WrittenRecords;
+                db.SetWritten(t, row + 1);
+                db.WriteRecord(t, row, db.RecordBytes(t, src));
+                rows.Add(row);
+                db.Set(t, row, f["index"], key);
+                db.Set(t, row, f["jerseyartid"], u.ArtId);
+                db.Set(t, row, f["era"], era);
+                db.Set(t, row, f["variant"], variant);
+                db.Set(t, row, f["brand"], -1);
+            }
+            for (int z = 1; z <= 15; z++) db.Set(t, row, f["zone" + z], zones[Math.Min(z - 1, zones.Length - 1)] & 0xFFFFFF);
+        }
     }
 }

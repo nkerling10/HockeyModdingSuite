@@ -2383,7 +2383,7 @@ public partial class JerseyStudioPage
     {
         if (_suppress) return;
         // a package team's exported uniform keeps its folder: the list follows the team
-        if (sender == SlotTeam) FillFolders(); else SlotButtons();
+        if (sender == SlotTeam) { _gearDirty = false; FillFolders(); } else SlotButtons();
     }
 
     private void SlotButtons()
@@ -2395,6 +2395,8 @@ public partial class JerseyStudioPage
         SlotWrite.IsEnabled = !_busy && _studioSrc != null && folder != null && team != null && !errors;
         var pkg = PickedPackageTeam();
         SlotExport.Visibility = pkg != null ? Visibility.Visible : Visibility.Collapsed;
+        SlotGear.Visibility = pkg != null ? Visibility.Visible : Visibility.Collapsed;
+        if (pkg != null) FillGear();
         SlotExport.IsEnabled = SlotWrite.IsEnabled && pkg != null && folder.Label.StartsWith("free");
         if (folder == null) { SlotStatus.Text = _kitTeams == null ? "" : "No folder to write into: switch on Used folders."; return; }
         bool free = folder.Label.StartsWith("free");
@@ -2412,6 +2414,79 @@ public partial class JerseyStudioPage
     private async void OnAddToTeam(object sender, RoutedEventArgs e) => await AddToTeam(App.Args.ContainsKey("shot"));
 
     private async void OnExportToMod(object sender, RoutedEventArgs e) => await ExportToMod();
+
+    // ================================================================ helmet & gloves of an exported uniform
+
+    private bool _gearDirty, _gearFilling;
+    private DispatcherTimer _gearTimer;
+    private TextBox[] GearBoxes => new[] { GearH0, GearH1, GearH2, GearG0, GearG1, GearG2 };
+
+    /// <summary>The design's own helmet and glove zones: your colours for your own uniform, else the start kit's (15 each).</summary>
+    private (int[] Helmet, int[] Gloves) DesignGear()
+    {
+        var p = Palette();
+        if (p.Count == 0) p = _ownColors.ToList();
+        if (_studioSrc?.Own != false || _helmetZones is not { Length: 15 } || _gloveZones is not { Length: 15 })
+            return (OwnKit.HelmetZones(p), OwnKit.GloveZones(p));
+        return (_helmetZones, _gloveZones);
+    }
+
+    /// <summary>The boxes from the design, unless you changed them.</summary>
+    private void FillGear()
+    {
+        if (_gearDirty || GearH0 == null) return;
+        var (h, g) = DesignGear();
+        var v = new[] { h[0], h[1], h[2], g[0], g[1], g[2] };
+        _gearFilling = true;
+        for (int i = 0; i < 6; i++) GearBoxes[i].Text = GearZone.Hex(v[i]);
+        _gearFilling = false;
+    }
+
+    /// <summary>The zones the export writes: once you change a box, helmet shell / trim / maker's logo (its other zones
+    /// follow the shell) and gloves main / second / third in turn; else the design's own.</summary>
+    private (int[] Helmet, int[] Gloves) ExportGear()
+    {
+        var (h0, g0) = DesignGear();
+        if (!_gearDirty) return (h0.ToArray(), g0.ToArray());
+        var v = GearBoxes.Select(b => HexColor.Parse(b.Text)).ToArray();
+        var helmet = h0.ToArray();
+        for (int i = 0; i < 3; i++) if (v[i] is int c) helmet[i] = c;
+        for (int i = 3; i < helmet.Length; i++) helmet[i] = helmet[0];
+        var gloves = Enumerable.Range(0, 15).Select(i => v[3 + i % 3] ?? g0[i]).ToArray();
+        return (helmet, gloves);
+    }
+
+    private void OnGearColor(object sender, TextChangedEventArgs e)
+    {
+        if (_gearFilling) return;
+        _gearDirty = true;
+        if (_gearTimer == null)
+        {
+            _gearTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+            _gearTimer.Tick += async (_, _) => { _gearTimer.Stop(); await PreviewGear(); };
+        }
+        _gearTimer.Stop();
+        _gearTimer.Start();
+    }
+
+    private async void OnGearReset(object sender, RoutedEventArgs e)
+    {
+        _gearDirty = false;
+        FillGear();
+        await PreviewGear();
+    }
+
+    /// <summary>The model's helmet and gloves in the colours the export would write.</summary>
+    private async Task PreviewGear()
+    {
+        if (_shown == null || _kit == null || _mods == null) return;
+        var (h, g) = ExportGear();
+        var gear = new Dictionary<string, ImageSource>();
+        foreach (var garment in new[] { "helmet", "glove_left", "glove_right" })
+            if (await KitScene.GearAsync(_mods.Index, _kit, garment, h, g, Lettering().Number) is { } tex) gear[garment] = tex;
+        _shown = _shown.Select(p => gear.TryGetValue(p.Garment, out var t) ? (p.Garment, p.Part, t) : p).ToList();
+        ScheduleStudio();
+    }
 
     /// <summary>
     /// Saves the design, rendered for the picked free kit folder, as the picked package team's uniform in the package's
@@ -2445,6 +2520,7 @@ public partial class JerseyStudioPage
                 Folder = folder.Kit.Folder, ArtId = folder.Team.ArtId, Label = label.Value, Light = SlotLight.IsChecked == true,
                 From = _studioSrc.Own ? "own design" : _studioSrc.Kit.ToString(), Exported = DateTime.Now,
             };
+            (u.Helmet, u.Gloves) = ExportGear();
             // the pants' and socks' fabric maps (relief, shine) stay the folder's: they're generic, and the game stores most
             // of them once for hundreds of kits, so each school would carry big copies of nearly the same map
             foreach (var (slot, file) in p.Items.Where(i => !System.Text.RegularExpressions.Regex.IsMatch(i.Slot.Slot, @"^(pant|sock)(_base)?_(normal|coeff)$")))

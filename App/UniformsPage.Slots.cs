@@ -211,6 +211,7 @@ public partial class UniformsPage
 
     private void OnAddSlot(object sender, RoutedEventArgs e)
     {
+        if (ModTeamReadOnly()) return;
         if (AddKitPicker.SelectedItem is SlotKitItem item) _ = AddSlot(item);
         else StatusChanged?.Invoke("Pick a kit to add first (type to search, e.g. boston adidas home).");
     }
@@ -277,6 +278,16 @@ public partial class UniformsPage
     {
         var drafts = _slotDrafts.Where(d => d.Value.Any(r => r.IsSlotChanged) || Removed(d.Key, d.Value))
             .Select(d => (TeamId: d.Key, Name: TeamName(d.Key), Slots: d.Value.Select(r => r.Slot).ToList())).ToList();
+        // a mod package's teams get their jersey menus from the package (its next install sets them again)
+        var modIds = _teams.Where(t => t.KitTeam != null).Select(t => t.KitTeam.TeamId).ToHashSet();
+        if (drafts.Any(d => modIds.Contains(d.TeamId)))
+        {
+            var mod = _team;
+            _team = _teams.First(t => t.KitTeam != null && drafts.Any(d => d.TeamId == t.KitTeam.TeamId));
+            ModTeamReadOnly();
+            _team = mod;
+            return;
+        }
         // a kit shown by two slots has one name: the last edit wins
         var renames = _slotDrafts.Values.SelectMany(v => v).Where(r => r.IsNameChanged && !r.HasNameError)
             .GroupBy(r => r.NameKey).ToDictionary(g => g.Key, g => (Old: g.Last().OriginalName, New: g.Last().Name));

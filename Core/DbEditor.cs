@@ -28,6 +28,11 @@ public static class DbEditor
         if (existing != null)
         {
             var state = store.State(existing, game);
+            // an entry whose bytes something else changed since (a package writing the same database) can't be put back:
+            // replacing it would drop its record and its backups, so nothing is saved
+            if (state is ModState.Changed or ModState.Missing)
+                throw new InvalidOperationException($"The mod list's entry for {name} ({existing.Summary?.Split(';')[0]}) no longer matches the game: " +
+                    "another mod (e.g. a package) wrote the same database after it. Saving would drop that entry. Remove the package, save, then install it again.");
             if (state is ModState.Applied or ModState.Partial)
             {
                 store.Restore(existing, game, log);

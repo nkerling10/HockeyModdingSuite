@@ -848,15 +848,24 @@ public static class Program
         return 0;
     }
 
-    /// <summary>restore NAME: puts the original bytes of a mod back (NAME as the mods command lists it).</summary>
+    /// <summary>restore NAME [--kind KIND] [--forget]: puts the original bytes of a mod back (NAME as the mods command
+    /// lists it); --forget then takes it off the mod list (only once its original bytes are back).</summary>
     private static int RestoreCmd(string game, Options opts)
     {
         RefuseWhileRunning();
         string name = opts.Positional.FirstOrDefault() ?? throw new ArgumentException("restore needs a mod name");
         var store = Mods();
-        var e = store.Entries.FirstOrDefault(x => x.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) ?? throw new ArgumentException($"no mod named {name}");
+        string kind = opts.Get("kind");
+        var e = store.Entries.FirstOrDefault(x => x.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && (kind == null || x.Kind == kind)) ?? throw new ArgumentException($"no mod named {name}");
         store.Restore(e, game, Console.WriteLine);
-        Console.WriteLine($"state: {store.State(e, game)}");
+        var state = store.State(e, game);
+        Console.WriteLine($"state: {state}");
+        if (opts.Has("forget"))
+        {
+            if (state != ModState.NotApplied) throw new InvalidOperationException($"{name} isn't fully restored ({state}); it stays on the mod list.");
+            store.Remove(e);
+            Console.WriteLine($"{name}: taken off the mod list");
+        }
         return 0;
     }
 

@@ -469,6 +469,7 @@ public partial class UniformsPage : UserControl
     /// <summary>Writes the changed zone colours into the kit's helmet and glove rows of the game's database, then redraws from the game.</summary>
     public async Task SaveGearAsync()
     {
+        if (ModTeamReadOnly()) return;
         var changed = GearZones.Where(z => z.IsChanged && z.Value is not null).ToList();
         if (changed.Count == 0 || _busy || _gearKit == null) return;
         int helmetRow = _helmetRow?.Row ?? -1, gloveRow = _gloveRow?.Row ?? -1;
@@ -519,9 +520,30 @@ public partial class UniformsPage : UserControl
     private void OnSide(object sender, RoutedEventArgs e) => Viewer.Face(90);
     private void OnBack(object sender, RoutedEventArgs e) => Viewer.Face(180);
 
+    /// <summary>
+    /// A mod package's team shows the kits its jersey menu uses. Until it has uniforms of its own those are the template
+    /// team's, shared by every team of the package (and by that team), and the package's next install rewrites its menu
+    /// anyway: so nothing is written for it here. Its uniforms are made in the Jersey Studio (Export to mod). True, with
+    /// a message, when the shown team is one.
+    /// </summary>
+    private bool ModTeamReadOnly()
+    {
+        if (_team?.KitTeam == null) return false;
+        StatusChanged?.Invoke($"Uniforms: {_team.Name} is a mod team: its kits are shared, so they're read-only here. Use Jersey Studio → Team menu → Export to mod.");
+        if (!App.Args.ContainsKey("shot"))
+            MessageBox.Show(Window.GetWindow(this),
+                $"{_team.Name} is a team of an installed mod package. The kits shown are the ones its jersey menu uses: until it has " +
+                "uniforms of its own, that's the template team's kit, shared by every school of the package, so a change here would " +
+                "change all of them (and the package's next install sets the menu again).\n\nMake its uniforms in Jersey Studio → " +
+                "Team menu: pick the school, Home or Away, a free kit folder, then Export to mod, and reinstall the package.",
+                "Read-only for mod teams", MessageBoxButton.OK, MessageBoxImage.Information);
+        return true;
+    }
+
     private async void OnReplace(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not KitTexRow row) return;
+        if (ModTeamReadOnly()) return;
         var dlg = new OpenFileDialog { Title = $"Replace {row.Label} ({row.Map})", Filter = ImageLoader.Filter };
         if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
         await ReplaceWith(row.Texture, dlg.FileName);
