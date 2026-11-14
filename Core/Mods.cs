@@ -424,16 +424,21 @@ public sealed class ModStore
         }
         string file = Path.Combine(game, rel.Replace('/', Path.DirectorySeparatorChar));
         int cut = 0;
+        bool Here(RangePatch p) => p.Append && string.Equals(p.File, rel, StringComparison.OrdinalIgnoreCase);
+        // the listed mods' data added to this file, by where it ends and where it starts (the list doesn't change while
+        // trimming): one lookup per cut, not a walk of every range
+        var listed = Entries.SelectMany(x => x.Patches.Where(Here).Select(p => (Entry: x, Patch: p))).ToList();
+        var byEnd = listed.GroupBy(t => t.Patch.Offset + t.Patch.Length).ToDictionary(g => g.Key, g => g.First());
+        var starts = listed.Select(t => t.Patch.Offset).ToHashSet();
         while (true)
         {
             long length = new FileInfo(file).Length;
-            bool Here(RangePatch p) => p.Append && string.Equals(p.File, rel, StringComparison.OrdinalIgnoreCase);
             // leftovers that were cut, or whose place a listed mod uses now, are forgotten
-            int dropped = _leftovers.RemoveAll(p => Here(p) && (p.Offset >= length || Entries.Any(x => x.Patches.Any(q => Here(q) && q.Offset == p.Offset))));
+            int dropped = _leftovers.RemoveAll(p => Here(p) && (p.Offset >= length || starts.Contains(p.Offset)));
             if (dropped > 0) Save();
-            var last = Entries.SelectMany(x => x.Patches.Select(p => (Entry: x, Patch: p)))
-                .Concat(_leftovers.Select(p => (Entry: (ModEntry)null, Patch: p)))
-                .FirstOrDefault(t => Here(t.Patch) && t.Patch.Offset + t.Patch.Length == length && t.Patch.Offset < length);
+            var last = byEnd.TryGetValue(length, out var hit) && hit.Patch.Offset < length ? hit
+                : _leftovers.Select(p => (Entry: (ModEntry)null, Patch: p))
+                            .FirstOrDefault(t => Here(t.Patch) && t.Patch.Offset + t.Patch.Length == length && t.Patch.Offset < length);
             if (last.Patch == null) break;
             if (last.Entry == null)
             {
