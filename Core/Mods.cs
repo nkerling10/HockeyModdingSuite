@@ -18,6 +18,14 @@ public sealed class RangePatch
     /// is at the end; otherwise it stays, unused, until what was added after it is restored too (<see cref="ModStore"/>).
     /// </summary>
     public bool Append { get; set; }
+    /// <summary>Where the range's old and new bytes are in its mod's old.pack / new.pack, and the old bytes' length. Null
+    /// for a mod saved before packs: its bytes are &lt;n&gt;.old and &lt;n&gt;.new files.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public long? OldAt { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public long? NewAt { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public int OldLength { get; set; }
 }
 
 /// <summary>A replacement of one asset: what it replaces, and the ranges it writes.</summary>
@@ -95,6 +103,66 @@ public sealed class ModStore
 
     private string Old(ModEntry e, int n) => Path.Combine(Dir, e.Id, $"{n}.old");
     private string New(ModEntry e, int n) => Path.Combine(Dir, e.Id, $"{n}.new");
+    private string OldPack(ModEntry e) => Path.Combine(Dir, e.Id, "old.pack");
+    private string NewPack(ModEntry e) => Path.Combine(Dir, e.Id, "new.pack");
+
+    /// <summary>A mod's kept bytes: from its packs (one file each for old and new, opened once), or the older one file per range.</summary>
+    private sealed class Kept : IDisposable
+    {
+        private readonly ModStore _s;
+        private readonly ModEntry _e;
+        private FileStream _old, _new;
+        public Kept(ModStore s, ModEntry e) { _s = s; _e = e; }
+        private static byte[] Slice(ref FileStream fs, string file, long at, int length)
+        {
+            fs ??= new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16);
+            fs.Position = at;
+            var b = new byte[length];
+            fs.ReadExactly(b);
+            return b;
+        }
+        public byte[] Old(int i) => _e.Patches[i].OldAt is long at ? Slice(ref _old, _s.OldPack(_e), at, _e.Patches[i].OldLength) : File.ReadAllBytes(_s.Old(_e, i));
+        public byte[] New(int i) => _e.Patches[i].NewAt is long at ? Slice(ref _new, _s.NewPack(_e), at, _e.Patches[i].Length) : File.ReadAllBytes(_s.New(_e, i));
+        public void Dispose() { _old?.Dispose(); _new?.Dispose(); }
+    }
+
+    /// <summary>Replaces a range's kept new bytes (its Length is set by the caller): at the end of the pack, or its file.</summary>
+    private void WriteNew(ModEntry e, int i, byte[] data)
+    {
+        var p = e.Patches[i];
+        if (p.NewAt == null) { File.WriteAllBytes(New(e, i), data); return; }
+        using var fs = new FileStream(NewPack(e), FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+        p.NewAt = fs.Position;
+        fs.Write(data);
+    }
+
+    /// <summary>The game files one apply or restore touches, each opened once.</summary>
+    private sealed class GameFiles : IDisposable
+    {
+        private readonly string _game;
+        private readonly bool _write;
+        private readonly Dictionary<string, FileStream> _open = new(StringComparer.OrdinalIgnoreCase);
+        public GameFiles(string game, bool write = true) { _game = game; _write = write; }
+        public FileStream Get(RangePatch p)
+        {
+            if (!_open.TryGetValue(p.File, out var fs))
+                _open[p.File] = fs = new FileStream(Path_(_game, p), FileMode.Open, _write ? FileAccess.ReadWrite : FileAccess.Read, FileShare.ReadWrite, 1 << 16);
+            return fs;
+        }
+        public void FlushAll() { foreach (var fs in _open.Values) fs.Flush(true); }
+        public void Dispose() { foreach (var fs in _open.Values) fs.Dispose(); _open.Clear(); }
+    }
+
+    /// <summary><see cref="Current(string, RangePatch)"/> on an open file.</summary>
+    private static string Current(FileStream fs, RangePatch p)
+    {
+        if (p.Append && fs.Length <= p.Offset) return Hex(SHA1.HashData(Array.Empty<byte>()));
+        if (p.Offset + p.Length > fs.Length) return null;
+        fs.Position = p.Offset;
+        var b = new byte[p.Length];
+        fs.ReadExactly(b);
+        return Hex(SHA1.HashData(b));
+    }
 
     /// <summary>Adds a mod, replacing any entry for the same asset (the caller restores that one first).</summary>
     public ModEntry Add(string kind, string name, string source, string summary, IReadOnlyList<PatchData> patches, IEnumerable<string> warnings = null)
@@ -121,12 +189,19 @@ public sealed class ModStore
     /// <summary>Keeps more ranges of a begun mod (their old and new bytes go to its folder).</summary>
     public void AddPatches(ModEntry e, IEnumerable<PatchData> patches)
     {
+        // every range's bytes go at the end of the mod's two packs (thousands of small files are slow to write and read)
+        using var oldFs = new FileStream(OldPack(e), FileMode.Append, FileAccess.Write, FileShare.None, 1 << 16);
+        using var newFs = new FileStream(NewPack(e), FileMode.Append, FileAccess.Write, FileShare.None, 1 << 16);
         foreach (var p in patches)
         {
-            int i = e.Patches.Count;
-            File.WriteAllBytes(Old(e, i), p.Old);
-            File.WriteAllBytes(New(e, i), p.New);
-            e.Patches.Add(new RangePatch { File = p.File, Offset = p.Offset, Length = p.New.Length, OldSha1 = Hex(SHA1.HashData(p.Old)), NewSha1 = Hex(SHA1.HashData(p.New)), Note = p.Note, Append = p.Append });
+            long oa = oldFs.Position, na = newFs.Position;
+            oldFs.Write(p.Old);
+            newFs.Write(p.New);
+            e.Patches.Add(new RangePatch
+            {
+                File = p.File, Offset = p.Offset, Length = p.New.Length, OldSha1 = Hex(SHA1.HashData(p.Old)), NewSha1 = Hex(SHA1.HashData(p.New)),
+                Note = p.Note, Append = p.Append, OldAt = oa, NewAt = na, OldLength = p.Old.Length,
+            });
         }
     }
 
@@ -179,12 +254,13 @@ public sealed class ModStore
         int old = 0, neu = 0, other = 0;
         // added data says nothing on its own (it may stay after a restore); the ranges that point at it decide
         bool appendsCount = e.Patches.All(p => p.Append);
+        using var files = new GameFiles(game, write: false);
         foreach (var p in e.Patches)
         {
             if (p.Append && !appendsCount) continue;
             string file = Path_(game, p);
             if (!File.Exists(file)) return ModState.Missing;
-            string h = Current(file, p);
+            string h = Current(files.Get(p), p);
             if (h == null) return ModState.Missing;
             // a range whose old and new bytes are the same (a size that didn't change) says nothing either way
             if (p.OldSha1 == p.NewSha1 && h == p.NewSha1) continue;
@@ -207,44 +283,54 @@ public sealed class ModStore
     {
         string verb = toNew ? "apply" : "restore";
         if (toNew) MoveAppended(e, game, log);
-        // check everything before writing anything
-        for (int i = 0; i < e.Patches.Count; i++)
-        {
-            var p = e.Patches[i];
-            string file = Path_(game, p);
-            if (!File.Exists(file)) throw new FileNotFoundException($"Can't {verb} {e.Name}: {p.File} is not in the game folder.");
-            // added data needs no check to restore: nothing points at it afterwards, and TrimAdded cuts only what it recognises
-            if (p.Append && !toNew) continue;
-            string h = Current(file, p) ?? throw new InvalidDataException($"Can't {verb} {e.Name}: {p.File} is shorter than the patch expects.");
-            if (h != p.OldSha1 && h != p.NewSha1)
-                throw new InvalidDataException($"Can't {verb} {e.Name}: {p.File} at 0x{p.Offset:X} holds neither the original nor the replacement. The game files changed since this mod was made; nothing was written.");
-        }
         int written = 0;
-        // restoring goes backwards, so appended ranges are cut off last-added first
-        foreach (int i in toNew ? Enumerable.Range(0, e.Patches.Count) : Enumerable.Range(0, e.Patches.Count).Reverse())
+        // each game file opened once; written ranges flushed to disk per file at the end, then read back
+        using (var files = new GameFiles(game))
+        using (var kept = new Kept(this, e))
         {
-            var p = e.Patches[i];
-            string file = Path_(game, p);
-            string want = toNew ? p.NewSha1 : p.OldSha1;
-            if (Current(file, p) == want) continue;
-            // added data comes off after the ranges pointing at it are back (TrimAdded)
-            if (p.Append && !toNew) continue;
-            var data = File.ReadAllBytes(toNew ? New(e, i) : Old(e, i));
-            if (Hex(SHA1.HashData(data)) != want) throw new InvalidDataException($"The stored {(toNew ? "new" : "old")} bytes of {e.Name} (patch {i}) are damaged.");
-            using (var fs = new FileStream(file, FileMode.Open, FileAccess.Write, FileShare.ReadWrite))
+            // check everything before writing anything
+            for (int i = 0; i < e.Patches.Count; i++)
             {
+                var p = e.Patches[i];
+                if (!File.Exists(Path_(game, p))) throw new FileNotFoundException($"Can't {verb} {e.Name}: {p.File} is not in the game folder.");
+                // added data needs no check to restore: nothing points at it afterwards, and TrimAdded cuts only what it recognises
+                if (p.Append && !toNew) continue;
+                string h = Current(files.Get(p), p) ?? throw new InvalidDataException($"Can't {verb} {e.Name}: {p.File} is shorter than the patch expects.");
+                if (h != p.OldSha1 && h != p.NewSha1)
+                    throw new InvalidDataException($"Can't {verb} {e.Name}: {p.File} at 0x{p.Offset:X} holds neither the original nor the replacement. The game files changed since this mod was made; nothing was written.");
+            }
+            var done = new List<int>();
+            // restoring goes backwards, so appended ranges are cut off last-added first
+            foreach (int i in toNew ? Enumerable.Range(0, e.Patches.Count) : Enumerable.Range(0, e.Patches.Count).Reverse())
+            {
+                var p = e.Patches[i];
+                string want = toNew ? p.NewSha1 : p.OldSha1;
+                // added data comes off after the ranges pointing at it are back (TrimAdded)
+                if (p.Append && !toNew) continue;
+                var fs = files.Get(p);
+                if (Current(fs, p) == want) continue;
+                var data = toNew ? kept.New(i) : kept.Old(i);
+                if (Hex(SHA1.HashData(data)) != want) throw new InvalidDataException($"The stored {(toNew ? "new" : "old")} bytes of {e.Name} (patch {i}) are damaged.");
                 fs.Position = p.Offset;
                 fs.Write(data);
-                fs.Flush(true);
+                done.Add(i);
+                if (p.Append) log?.Invoke($"{p.Note ?? "range"}: {p.Length:N0} bytes at 0x{p.Offset:X} in {p.File}");
             }
-            if (Current(file, p) != want)
-                throw new IOException($"{p.File} did not hold what was written at 0x{p.Offset:X}.");
-            written++;
-            log?.Invoke($"{p.Note ?? "range"}: {p.Length:N0} bytes at 0x{p.Offset:X} in {p.File}");
+            files.FlushAll();
+            foreach (int i in done)
+            {
+                var p = e.Patches[i];
+                if (Current(files.Get(p), p) != (toNew ? p.NewSha1 : p.OldSha1))
+                    throw new IOException($"{p.File} did not hold what was written at 0x{p.Offset:X}.");
+            }
+            written = done.Count;
         }
         if (!toNew)
+        {
+            var pointsAt = new Dictionary<ModEntry, bool>();
             foreach (var f in e.Patches.Where(p => p.Append).Select(p => p.File).Distinct(StringComparer.OrdinalIgnoreCase))
-                written += TrimAdded(game, f, log);
+                written += TrimAdded(game, f, log, pointsAt);
+        }
         log?.Invoke($"{e.Name}: {written} range(s) written, {e.Patches.Count - written} already as wanted");
     }
 
@@ -255,6 +341,7 @@ public sealed class ModStore
     /// </summary>
     private void MoveAppended(ModEntry e, string game, Action<string> log)
     {
+        using var kept = new Kept(this, e);
         var moves = new List<(int Index, byte[] Data, long At)>();
         var offsets = new Dictionary<uint, uint>();
         foreach (var group in e.Patches.Select((p, i) => (P: p, I: i)).Where(x => x.P.Append).GroupBy(x => x.P.File, StringComparer.OrdinalIgnoreCase))
@@ -266,7 +353,7 @@ public sealed class ModStore
             if (pending.All(x => end <= x.P.Offset)) continue;
             foreach (var (p, i) in pending)
             {
-                var data = File.ReadAllBytes(New(e, i));
+                var data = kept.New(i);
                 if (Hex(SHA1.HashData(data)) != p.NewSha1) throw new InvalidDataException($"The stored new bytes of {e.Name} (patch {i}) are damaged.");
                 long oldAt = (p.Offset + 15) & ~15L, newAt = (end + 15) & ~15L;
                 int pad = (int)(oldAt - p.Offset);
@@ -288,7 +375,7 @@ public sealed class ModStore
         {
             var p = e.Patches[i];
             if (p.Append || p.Length != 4 || p.Note == null || !p.Note.EndsWith(" offset", StringComparison.Ordinal)) continue;
-            var cur = File.ReadAllBytes(New(e, i));
+            var cur = kept.New(i);
             uint at = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(cur);
             if (!offsets.TryGetValue(at, out uint to)) continue;
             string file = Path_(game, p);
@@ -306,14 +393,14 @@ public sealed class ModStore
         {
             var p = e.Patches[i];
             log?.Invoke($"{p.Note ?? "range"}: its place at 0x{p.Offset:X} in {p.File} is taken, moved to 0x{at:X}");
-            File.WriteAllBytes(New(e, i), data);
+            WriteNew(e, i, data);
             p.Offset = at;
             p.Length = data.Length;
             p.NewSha1 = Hex(SHA1.HashData(data));
         }
         foreach (var (i, data) in pointers)
         {
-            File.WriteAllBytes(New(e, i), data);
+            WriteNew(e, i, data);
             e.Patches[i].NewSha1 = Hex(SHA1.HashData(data));
         }
         Save();
@@ -324,8 +411,17 @@ public sealed class ModStore
     /// that isn't applied (nothing points at it any more), so restoring every mod gives back the original file even
     /// when they were restored out of order. Returns how many ranges were cut.
     /// </summary>
-    private int TrimAdded(string game, string rel, Action<string> log)
+    private int TrimAdded(string game, string rel, Action<string> log, Dictionary<ModEntry, bool> pointsAt = null)
     {
+        // whether some range of a mod still holds other than its old bytes: read once per mod (cutting added data
+        // doesn't change them), not once per cut
+        pointsAt ??= new();
+        bool StillPoints(ModEntry x)
+        {
+            if (pointsAt.TryGetValue(x, out bool v)) return v;
+            using var files = new GameFiles(game, write: false);
+            return pointsAt[x] = x.Patches.Any(p => !p.Append && File.Exists(Path_(game, p)) && Current(files.Get(p), p) is { } h && h != p.OldSha1);
+        }
         string file = Path.Combine(game, rel.Replace('/', Path.DirectorySeparatorChar));
         int cut = 0;
         while (true)
@@ -350,7 +446,7 @@ public sealed class ModStore
                 continue;
             }
             // only when nothing of its mod points at it, and it's the data the mod added
-            if (last.Entry.Patches.Any(p => !p.Append && File.Exists(Path_(game, p)) && Current(Path_(game, p), p) is { } h && h != p.OldSha1)) break;
+            if (StillPoints(last.Entry)) break;
             if (Current(file, last.Patch) != last.Patch.NewSha1) break;
             using (var fs = new FileStream(file, FileMode.Open, FileAccess.Write, FileShare.ReadWrite)) { fs.SetLength(last.Patch.Offset); fs.Flush(true); }
             if (new FileInfo(file).Length != last.Patch.Offset) throw new IOException($"{rel} was not cut back to 0x{last.Patch.Offset:X}.");

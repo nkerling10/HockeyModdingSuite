@@ -265,6 +265,11 @@ public sealed class SpotRow : Observable
 }
 
 /// <summary>A team a design can be added to, with its kit folders' art id.</summary>
+/// <summary>A team an installed package adds: the package's recipe (read from its source folder), the team's league
+/// group in it, and the team.</summary>
+public sealed record StudioPackageTeam(NHL27Kit.Core.Packages.PackageSpec Spec, NHL27Kit.Core.Packages.PackageSpec Group,
+                                       NHL27Kit.Core.Packages.TeamSpec Team, JerseySlots.KitTeam KitTeam);
+
 public sealed record StudioTeamItem(JerseySlots.KitTeam Team, string League, string Label)
 {
     public override string ToString() => Label;
@@ -329,6 +334,8 @@ public partial class JerseyStudioPage : UserControl
 
     private Dictionary<(string League, string Team), JerseySlots.KitTeam> _kitTeams;
     private HashSet<(int ArtId, int Style, int Variant)> _used;
+    /// <summary>The installed packages' teams by team id (their source folder's recipe), for Export to mod.</summary>
+    private Dictionary<int, StudioPackageTeam> _pkgTeams = new();
 
     public event Action<string> StatusChanged;
     /// <summary>A team's jersey menu was changed here (its id).</summary>
@@ -351,6 +358,7 @@ public partial class JerseyStudioPage : UserControl
         LetterCaptain.SelectedIndex = 0;
         SlotLabel.ItemsSource = Enumerable.Range(0, 16).Select(i => new PickItem(JerseySlots.LabelName(i), i)).ToList();
         SlotLabel.SelectedIndex = 2;
+        SlotLabel.SelectionChanged += (_, _) => { if (!_suppress) FillFolders(); };
         LineList.ItemsSource = new System.Collections.ObjectModel.ObservableCollection<LineRow>();
         Viewer.Pick = PickLine;
         _suppress = false;
@@ -2085,11 +2093,44 @@ public partial class JerseyStudioPage : UserControl
     {
         var src = _studioSrc;
         var from = src.Kit;
-        var d = Snapshot();
-        var index = _mods.Index;
         var done = new List<string>();
         string folder = StudioFolder(target);
         string stem = Path.Combine(folder, src.Own ? $"{target.Name}_studio_own" : $"{target.Name}_studio_from_{from.Team}_{from.Name}");
+        var p = await PrepareInto(target, outfit, stem);
+        string label = src.Own ? $"Jersey studio: your own uniform into {target}" : $"Jersey studio: {from.Team} {from.Name} design into {target}";
+        if (p.StampNew != null && !p.StampNew.AsSpan().SequenceEqual(p.StampEbx))
+        {
+            StudioStatus.Text = "Writing the jersey stamp into the game…";
+            await _mods.SaveEbxAsync(target.Stamps["jersey"], p.StampNew, $"{label}: its logos switched off (painted into the base), lettering placed");
+            done.Add("jersey stamp");
+        }
+        if (p.PantNew != null && !p.PantNew.AsSpan().SequenceEqual(p.PantEbx))
+        {
+            await _mods.SaveEbxAsync(target.Stamps["pant"], p.PantNew, $"{label}: pant logos switched off");
+            done.Add("pant stamp");
+        }
+        foreach (var (texture, file) in p.Items)
+        {
+            StatusChanged?.Invoke(await KitWriter.WriteTextureAsync(_mods, target, texture, file, t => StudioStatus.Text = t));
+            done.Add(texture.Slot.Replace("_", " "));
+        }
+        _textures.ClearThumbs();
+        return done;
+    }
+
+    /// <summary>The design rendered for a kit folder: its textures as PNGs (stem_&lt;slot&gt;.png) and its new stamps.</summary>
+    private sealed record Prepared(List<(KitTexture Slot, string File)> Items, byte[] StampEbx, byte[] StampNew, byte[] PantEbx, byte[] PantNew);
+
+    /// <summary>
+    /// Renders the design for another kit folder (see <see cref="WriteInto"/>) without writing anything into the game:
+    /// the PNGs go to <paramref name="stem"/>_&lt;slot&gt;.png, the stamps come back as bytes.
+    /// </summary>
+    private async Task<Prepared> PrepareInto(Kit target, bool outfit, string stem)
+    {
+        var src = _studioSrc;
+        var from = src.Kit;
+        var d = Snapshot();
+        var index = _mods.Index;
         StudioStatus.Text = "Preparing the textures…";
         var items = new List<(KitTexture Slot, string File)>();
         byte[] stampEbx = null, stampNew = null, pantEbx = null, pantNew = null;
@@ -2114,7 +2155,8 @@ public partial class JerseyStudioPage : UserControl
             void Put(string slot, byte[] rgba, int w, int h, bool srgb)
             {
                 if (rgba == null || target.Slot(slot) is not { } ts) return;
-                var head = Texture.Load(index, ts.Name, decode: false);
+                // the texture's size from its header (an undecoded texture's Width/Height are 0)
+                var head = Texture.Load(index, ts.Name, decode: false).Header;
                 var img = head.Width == w && head.Height == h ? rgba : MipChain.Resize(rgba, w, h, head.Width, head.Height, srgb);
                 string file = $"{stem}_{slot}.png";
                 File.WriteAllBytes(file, ImageFiles.Png(img, head.Width, head.Height));
@@ -2194,25 +2236,7 @@ public partial class JerseyStudioPage : UserControl
             foreach (var slot in new[] { "sock_base_color", "sock_color" })
                 if (Copy(slot) is { } f) items.Add((target.Slot(slot), f));
         });
-        string label = src.Own ? $"Jersey studio: your own uniform into {target}" : $"Jersey studio: {from.Team} {from.Name} design into {target}";
-        if (stampNew != null && !stampNew.AsSpan().SequenceEqual(stampEbx))
-        {
-            StudioStatus.Text = "Writing the jersey stamp into the game…";
-            await _mods.SaveEbxAsync(target.Stamps["jersey"], stampNew, $"{label}: its logos switched off (painted into the base), lettering placed");
-            done.Add("jersey stamp");
-        }
-        if (pantNew != null && !pantNew.AsSpan().SequenceEqual(pantEbx))
-        {
-            await _mods.SaveEbxAsync(target.Stamps["pant"], pantNew, $"{label}: pant logos switched off");
-            done.Add("pant stamp");
-        }
-        foreach (var (texture, file) in items)
-        {
-            StatusChanged?.Invoke(await KitWriter.WriteTextureAsync(_mods, target, texture, file, t => StudioStatus.Text = t));
-            done.Add(texture.Slot.Replace("_", " "));
-        }
-        _textures.ClearThumbs();
-        return done;
+        return new Prepared(items, stampEbx, stampNew, pantEbx, pantNew);
     }
 
     // ================================================================ adding to a team's jersey menu
@@ -2225,15 +2249,18 @@ public partial class JerseyStudioPage : UserControl
             var db = await _mods.OpenDbAsync(JerseySlots.Database);
             var kits = _allKits;
             (_kitTeams, _used) = await Task.Run(() => (JerseySlots.Teams(db, kits), JerseySlots.Used(db)));
+            _pkgTeams = await Task.Run(() => PackageTeams(db));
         }
         catch (Exception ex)
         {
             SlotStatus.Text = "Can't read the jersey menus: " + ex.Message;
             return;
         }
-        var teams = _kitTeams.GroupBy(x => x.Value.TeamId).Select(g => g.OrderBy(x => x.Key.Team.Length).First())
+        var teams = _kitTeams.GroupBy(x => x.Value.TeamId).Where(g => !_pkgTeams.ContainsKey(g.Key)).Select(g => g.OrderBy(x => x.Key.Team.Length).First())
             .Select(x => new StudioTeamItem(x.Value, x.Key.League, $"{x.Value.Name}  ·  {x.Key.League.ToUpperInvariant()}"))
-            .OrderBy(t => t.League == "nhl" ? 0 : 1).ThenBy(t => t.League).ThenBy(t => t.Team.Name).ToList();
+            // the installed packages' teams (they have no kit folders of their own): Export to mod makes their uniforms
+            .Concat(_pkgTeams.Values.Select(p => new StudioTeamItem(p.KitTeam, "mod", $"{p.KitTeam.Name}  ·  {p.Team.Code}  ·  {p.Spec.Title} mod")))
+            .OrderBy(t => t.League == "nhl" ? 0 : t.League == "mod" ? 1 : 2).ThenBy(t => t.League).ThenBy(t => t.Team.Name).ToList();
         var mine = _studioSrc != null ? _kitTeams.GetValueOrDefault((_studioSrc.Kit.League, _studioSrc.Kit.Team)) : null;
         _suppress = true;
         SlotTeam.ItemsSource = teams;
@@ -2242,27 +2269,98 @@ public partial class JerseyStudioPage : UserControl
         FillFolders();
     }
 
+    private Dictionary<int, StudioPackageTeam> PackageTeams(T3Db db) => ModPackages.Teams(_mods, db);
+
+    /// <summary>The kit folder name an exported uniform takes from its menu name: home, away, third, else kit&lt;n&gt;.</summary>
+    private static string KitName(int label) => label switch { 0 => "home", 1 => "away", 2 => "third", _ => $"kit{label}" };
+
+    /// <summary>The picked team as a package team, or null.</summary>
+    private StudioPackageTeam PickedPackageTeam() =>
+        SlotTeam.SelectedItem is StudioTeamItem ti && _pkgTeams.TryGetValue(ti.Team.TeamId, out var p) ? p : null;
+
+    /// <summary>The kit folder the picked package team's picked uniform was exported for, if it was.</summary>
+    private string ExportedFolder(StudioPackageTeam p)
+    {
+        if (p == null || SlotLabel.SelectedItem is not PickItem label) return null;
+        return NHL27Kit.Core.Packages.PackageUniforms.Of(p.Group, p.Team)
+            .FirstOrDefault(u => u.Name.Equals(KitName(label.Value), StringComparison.OrdinalIgnoreCase))?.Folder;
+    }
+}
+
+/// <summary>The installed packages' teams, for the Jersey Studio and the Uniforms page.</summary>
+public static class ModPackages
+{
+    /// <summary>The teams of the installed packages (mod list entries of kind "package", recipe read from their source
+    /// folder), by team id; teams not in the database are left out.</summary>
+    public static Dictionary<int, StudioPackageTeam> Teams(ModService mods, T3Db db)
+    {
+        var map = new Dictionary<int, StudioPackageTeam>();
+        var t = db.Table("exhibitionteams");
+        var f = t.Fields.ToDictionary(x => x.Name);
+        var rowOf = new Dictionary<int, int>();
+        for (int r = 0; r < t.WrittenRecords; r++)
+            if (!db.IsInvalid(t, r)) rowOf.TryAdd((int)db.Get(t, r, f["index"]), r);
+        foreach (var e in mods.Store.Entries.Where(e => e.Kind == NHL27Kit.Core.Packages.PackageInstaller.Kind && Directory.Exists(e.Source)))
+        {
+            NHL27Kit.Core.Packages.PackageSpec spec;
+            try { spec = NHL27Kit.Core.Packages.PackageSpec.Load(e.Source); }
+            catch { continue; }
+            foreach (var g in spec.Groups)
+                foreach (var team in g.Teams)
+                    if (rowOf.TryGetValue(team.Index, out int row))
+                        map[team.Index] = new StudioPackageTeam(spec, g, team,
+                            new JerseySlots.KitTeam(row, team.Index, (int)db.Get(t, row, f["artid"]), (string)db.Get(t, row, f["teamname"])));
+        }
+        return map;
+    }
+
+    /// <summary>The kits a team's jersey menu shows, menu order (a slot whose kit folder isn't found is left out).</summary>
+    public static List<Kit> MenuKits(T3Db db, int teamId, IReadOnlyList<Kit> kits, Dictionary<(string League, string Team), JerseySlots.KitTeam> kitTeams)
+    {
+        var list = new List<Kit>();
+        foreach (var s in JerseySlots.Read(db, teamId))
+            if (kits.FirstOrDefault(k => kitTeams.TryGetValue((k.League, k.Team), out var kt) && kt.ArtId == s.ArtId
+                                         && JerseySlots.Address(k) is { } a && a.Style == s.Style && a.Variant == s.Variant) is { } kit && !list.Contains(kit))
+                list.Add(kit);
+        return list;
+    }
+}
+
+public partial class JerseyStudioPage
+{
     /// <summary>The folders the design can be written into: free ones (or all, with the switch), the start kit's maker and team first.</summary>
     private void FillFolders()
     {
         if (_kitTeams == null || _studioSrc == null) return;
         var from = _studioSrc.Kit;
         bool all = SlotShowUsed.IsChecked == true;
+        // a package team's uniform keeps the folder it was exported for; folders other exported uniforms took aren't free
+        var pkg = PickedPackageTeam();
+        string mine = ExportedFolder(pkg);
+        var reserved = _pkgTeams.Values.Select(p => p.Spec).Distinct()
+            .SelectMany(s => NHL27Kit.Core.Packages.PackageUniforms.Reserved(s))
+            .GroupBy(x => x.Key, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First().Value, StringComparer.OrdinalIgnoreCase);
         var list = _allKits.Where(k => k.Slot("jersey_base_color") != null || k.Slot("jersey_color") != null)
             .Select(k => (Kit: k, Team: _kitTeams.GetValueOrDefault((k.League, k.Team)), Address: JerseySlots.Address(k)))
             .Where(x => x.Team != null && x.Address != null)
-            .Select(x => (x.Kit, x.Team, Free: !_used.Contains((x.Team.ArtId, x.Address.Value.Style, x.Address.Value.Variant))))
+            .Select(x => (x.Kit, x.Team, Free: string.Equals(x.Kit.Folder, mine, StringComparison.OrdinalIgnoreCase)
+                                               || !_used.Contains((x.Team.ArtId, x.Address.Value.Style, x.Address.Value.Variant)) && !reserved.ContainsKey(x.Kit.Folder)))
             .Where(x => all || x.Free)
+            .OrderBy(x => string.Equals(x.Kit.Folder, mine, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
             // your own: free folders of the common cut first; from a team: its maker and team first
-            .OrderBy(x => _studioSrc.Own ? (x.Free ? 0 : 1) : x.Kit.Brand == from.Brand ? 0 : 1)
+            .ThenBy(x => _studioSrc.Own ? (x.Free ? 0 : 1) : x.Kit.Brand == from.Brand ? 0 : 1)
             .ThenBy(x => _studioSrc.Own ? (x.Kit.Brand == from.Brand ? 0 : 1) : x.Kit.Team == from.Team ? 0 : 1).ThenBy(x => x.Free ? 0 : 1)
             .ThenBy(x => x.Kit.League == "nhl" ? 0 : 1).ThenBy(x => x.Kit.ToString())
-            .Select(x => new SlotKitItem(x.Kit, x.Team, $"{(x.Free ? "free" : "in use")}  ·  {x.Kit.League.ToUpperInvariant()} {UniformNames.Pretty(x.Kit.Team)}  ·  {x.Kit.Brand} {x.Kit.Name}"))
+            .Select(x => new SlotKitItem(x.Kit, x.Team,
+                (string.Equals(x.Kit.Folder, mine, StringComparison.OrdinalIgnoreCase) ? "free (exported here)"
+                 : reserved.TryGetValue(x.Kit.Folder, out var who) ? $"taken by {who}" : x.Free ? "free" : "in use")
+                + $"  ·  {x.Kit.League.ToUpperInvariant()} {UniformNames.Pretty(x.Kit.Team)}  ·  {x.Kit.Brand} {x.Kit.Name}"))
             .ToList();
         var keep = (SlotFolder.SelectedItem as SlotKitItem)?.Kit;
         _suppress = true;
         SlotFolder.ItemsSource = list;
-        SlotFolder.SelectedItem = list.FirstOrDefault(i => i.Kit == keep) ?? list.FirstOrDefault();
+        SlotFolder.SelectedItem = list.FirstOrDefault(i => mine != null && i.Kit.Folder.Equals(mine, StringComparison.OrdinalIgnoreCase))
+                                  ?? list.FirstOrDefault(i => i.Kit == keep) ?? list.FirstOrDefault();
         _suppress = false;
         // a mostly white body is a light jersey
         SlotLight.IsChecked = LooksLight();
@@ -2283,7 +2381,9 @@ public partial class JerseyStudioPage : UserControl
 
     private void OnSlotTargetChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (!_suppress) SlotButtons();
+        if (_suppress) return;
+        // a package team's exported uniform keeps its folder: the list follows the team
+        if (sender == SlotTeam) FillFolders(); else SlotButtons();
     }
 
     private void SlotButtons()
@@ -2293,14 +2393,86 @@ public partial class JerseyStudioPage : UserControl
         var team = SlotTeam.SelectedItem as StudioTeamItem;
         bool errors = StudioZoneRows.Any(z => z.HasError) || LineRows.Any(l => l.HasError);
         SlotWrite.IsEnabled = !_busy && _studioSrc != null && folder != null && team != null && !errors;
+        var pkg = PickedPackageTeam();
+        SlotExport.Visibility = pkg != null ? Visibility.Visible : Visibility.Collapsed;
+        SlotExport.IsEnabled = SlotWrite.IsEnabled && pkg != null && folder.Label.StartsWith("free");
         if (folder == null) { SlotStatus.Text = _kitTeams == null ? "" : "No folder to write into: switch on Used folders."; return; }
         bool free = folder.Label.StartsWith("free");
+        if (pkg != null && SlotLabel.SelectedItem is PickItem pl)
+        {
+            SlotStatus.Text = !free ? $"{folder.Kit} isn't free: Export to mod needs a free folder (it becomes {pkg.Team.Code}'s for good)."
+                : $"Export to mod saves the {KitName(pl.Value)} uniform for {pkg.Team.Code} into the mod folder ({folder.Kit}); installing the package puts it in the game.";
+            return;
+        }
         SlotStatus.Text = folder.Kit == _studioSrc?.Kit && !_studioSrc.Own ? "Writes over the start kit itself, then adds it to the menu."
             : free ? $"{folder.Kit} isn't in any menu: only the new slot shows it."
             : $"{folder.Kit} is in a menu already: that jersey changes too.";
     }
 
     private async void OnAddToTeam(object sender, RoutedEventArgs e) => await AddToTeam(App.Args.ContainsKey("shot"));
+
+    private async void OnExportToMod(object sender, RoutedEventArgs e) => await ExportToMod();
+
+    /// <summary>
+    /// Saves the design, rendered for the picked free kit folder, as the picked package team's uniform in the package's
+    /// source folder (&lt;uniforms&gt;/&lt;team code&gt;/&lt;home|away|third&gt;/: the textures, the new stamps, uniform.json).
+    /// Nothing is written into the game: installing the package does that (PackageUniforms).
+    /// </summary>
+    public async Task ExportToMod()
+    {
+        var pkg = PickedPackageTeam();
+        if (_busy || _studioSrc == null || pkg == null || SlotFolder.SelectedItem is not SlotKitItem folder || SlotLabel.SelectedItem is not PickItem label) return;
+        if (NHL27Kit.Core.Packages.PackageUniforms.Folder(pkg.Group) is not { } root)
+        {
+            SlotStatus.Text = $"The package's recipe has no \"uniforms\" folder for league {pkg.Group.League?.Id}: add e.g. \"uniforms\": \"ncaa/uniforms\" to package.json.";
+            return;
+        }
+        string kitName = KitName(label.Value), who = $"{pkg.Team.Code} {kitName}";
+        var reserved = NHL27Kit.Core.Packages.PackageUniforms.Reserved(pkg.Spec);
+        if (reserved.TryGetValue(folder.Kit.Folder, out var owner) && owner != who) { SlotStatus.Text = $"{folder.Kit} is taken by {owner}."; return; }
+        string dir = Path.Combine(root, pkg.Team.Code, kitName);
+        _busy = true;
+        StudioButtons();
+        try
+        {
+            Directory.CreateDirectory(dir);
+            foreach (string old in Directory.GetFiles(dir).Where(x => x.EndsWith(".png", StringComparison.OrdinalIgnoreCase) || x.EndsWith(".ebx", StringComparison.OrdinalIgnoreCase)
+                                                                  || Path.GetFileName(x).Equals(NHL27Kit.Core.Packages.PackageUniform.FileName, StringComparison.OrdinalIgnoreCase)))
+                File.Delete(old);
+            var p = await PrepareInto(folder.Kit, SlotOutfit.IsChecked == true, Path.Combine(dir, kitName));
+            var u = new NHL27Kit.Core.Packages.PackageUniform
+            {
+                Folder = folder.Kit.Folder, ArtId = folder.Team.ArtId, Label = label.Value, Light = SlotLight.IsChecked == true,
+                From = _studioSrc.Own ? "own design" : _studioSrc.Kit.ToString(), Exported = DateTime.Now,
+            };
+            // the pants' and socks' fabric maps (relief, shine) stay the folder's: they're generic, and the game stores most
+            // of them once for hundreds of kits, so each school would carry big copies of nearly the same map
+            foreach (var (slot, file) in p.Items.Where(i => !System.Text.RegularExpressions.Regex.IsMatch(i.Slot.Slot, @"^(pant|sock)(_base)?_(normal|coeff)$")))
+                u.Textures[slot.Slot] = Path.GetFileName(file);
+            // the stamps as designed, whatever the game has now (a reinstall starts from the game's own)
+            if (p.StampNew != null) { File.WriteAllBytes(Path.Combine(dir, "stamp_jersey.ebx"), p.StampNew); u.Stamps["jersey"] = "stamp_jersey.ebx"; }
+            if (p.PantNew != null) { File.WriteAllBytes(Path.Combine(dir, "stamp_pant.ebx"), p.PantNew); u.Stamps["pant"] = "stamp_pant.ebx"; }
+            // the rendering's working files no texture slot took
+            foreach (string extra in Directory.GetFiles(dir, "*.png").Where(x => !u.Textures.Values.Contains(Path.GetFileName(x), StringComparer.OrdinalIgnoreCase)))
+                File.Delete(extra);
+            u.Save(dir);
+            string msg = $"Exported {pkg.Team.Name} {kitName} ({u.Textures.Count} textures, {u.Stamps.Count} stamps, kit folder {folder.Kit}) to {dir}. Install the package to see it in the game.";
+            SlotStatus.Text = msg;
+            StatusChanged?.Invoke("Jersey studio: " + msg);
+        }
+        catch (Exception ex)
+        {
+            SlotStatus.Text = "Can't export: " + ex.Message;
+            if (App.Args.ContainsKey("shot")) File.WriteAllText(Path.Combine(dir, "export-error.txt"), ex.ToString());
+            else MessageBox.Show(Window.GetWindow(this), ex.Message, "Can't export the uniform", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            _busy = false;
+        }
+        FillFolders();
+        StudioButtons();
+    }
 
     /// <summary>
     /// Writes the design into the picked kit folder and adds that folder to the picked team's jersey menu (a new
@@ -2436,7 +2608,10 @@ public partial class JerseyStudioPage : UserControl
         var p = spec.Split('|');
         if (SlotTeam.ItemsSource is IEnumerable<StudioTeamItem> teams && teams.FirstOrDefault(t => t.Team.Name.Contains(p[0], StringComparison.OrdinalIgnoreCase)) is { } team)
             SlotTeam.SelectedItem = team;
-        if (p.Length > 1)
+        // a third part: the menu name (0 Home, 1 Away, 2 Third…)
+        if (p.Length > 2 && int.TryParse(p[2], out int lab) && (SlotLabel.ItemsSource as IEnumerable<PickItem>)?.FirstOrDefault(i => i.Value == lab) is { } li)
+            SlotLabel.SelectedItem = li;
+        if (p.Length > 1 && p[1].Length > 0)
         {
             if (!(SlotFolder.ItemsSource as IEnumerable<SlotKitItem>)?.Any(i => i.Kit.ToString().Contains(p[1])) == true) { SlotShowUsed.IsChecked = true; FillFolders(); }
             if ((SlotFolder.ItemsSource as IEnumerable<SlotKitItem>)?.FirstOrDefault(i => i.Kit.ToString().Contains(p[1])) is { } folder) SlotFolder.SelectedItem = folder;

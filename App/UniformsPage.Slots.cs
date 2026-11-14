@@ -43,7 +43,7 @@ public partial class UniformsPage
             _names = await Task.Run(() => KitNames.Read(namesDb));
             if (load != _slotLoad) return;
             _slotLabels ??= Enumerable.Range(0, 16).Select(i => new PickItem(JerseySlots.LabelName(i), i)).ToList();
-            var kitTeam = _kitTeams.GetValueOrDefault((team.League, team.Team));
+            var kitTeam = team.KitTeam ?? _kitTeams.GetValueOrDefault((team.League, team.Team));
             _slotTeam = kitTeam;
             if (kitTeam == null)
             {

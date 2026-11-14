@@ -33,6 +33,18 @@ public sealed class PackageSpec
     /// <summary>Optional folder (relative) of team logos named after the team: "&lt;team-name-slug&gt;-logo.png" or
     /// "&lt;slug&gt;.png" (used when logos/teams/&lt;code&gt; has none).</summary>
     public string LogoFolder { get; set; }
+    /// <summary>Optional folder (relative) of top-down rink layouts (TheFaceoff.net's 5000×2236), "&lt;team code&gt;.png":
+    /// the team's centre-ice logo is cut from it (CenterIce) onto the team's own logo art id only. Default "rinks".</summary>
+    public string Rinks { get; set; }
+    /// <summary>Whether this league's teams get crowd lights in their colour (the team data's crowd_light_color, else its
+    /// primary). Default yes; false for a league that isn't played (e.g. the USHL).</summary>
+    public bool? CrowdLight { get; set; }
+    /// <summary>false for a league whose games are never played (e.g. the USHL: its teams only hold prospects): its teams
+    /// take logo art ids without a centre-ice texture first and get no crowd lights. Default true.</summary>
+    public bool? Playable { get; set; }
+    /// <summary>Optional folder (relative) of the teams' uniforms exported by the Jersey Studio:
+    /// &lt;folder&gt;/&lt;team code&gt;/&lt;kit&gt;/uniform.json (see PackageUniforms).</summary>
+    public string Uniforms { get; set; }
 
     /// <summary>The package and its extra leagues.</summary>
     [JsonIgnore] public IEnumerable<PackageSpec> Groups => new[] { this }.Concat(ExtraLeagues ?? new List<PackageSpec>());
@@ -65,7 +77,7 @@ public sealed class PackageSpec
             if (g != spec)
             {
                 g.Folder = spec.Folder; g.Id ??= spec.Id; g.Title ??= spec.Title; g.Version ??= spec.Version;
-                g.NameSets = spec.NameSets; g.Rules ??= spec.Rules;
+                g.NameSets = spec.NameSets; g.Rules ??= spec.Rules; g.Rinks ??= spec.Rinks;
             }
             g.Teams ??= new List<TeamSpec>();
             if (!string.IsNullOrEmpty(g.TeamsFile)) g.MergeTeamsFile();
@@ -141,7 +153,26 @@ public sealed class PackageSpec
     /// A team's main logo: logos/teams/&lt;code&gt;/logo.png, or the folder's only PNG when there's no logo.png and the
     /// folder holds just one (any name). Null when there's none.
     /// </summary>
-    public string TeamLogoFile(TeamSpec t) => LogoIn(TeamLogoFolder(t)) ?? NamedLogo(t);
+    public string TeamLogoFile(TeamSpec t) => LogoIn(TeamLogoFolder(t)) ?? FlatLogo(t, "") ?? NamedLogo(t);
+
+    /// <summary>
+    /// A team's optional extra logo image, kind "lightbg", "mono" or "ice": logos/teams/&lt;code&gt;/logo_lightbg.png,
+    /// mono.png, ice.png, or in the league's flat logo folder &lt;CODE&gt;_lightbg.png, &lt;CODE&gt;_mono.png, &lt;CODE&gt;_ice.png.
+    /// </summary>
+    public string TeamExtraFile(TeamSpec t, string kind)
+    {
+        string inFolder = Path.Combine(TeamLogoFolder(t), kind == "lightbg" ? "logo_lightbg.png" : kind + ".png");
+        return System.IO.File.Exists(inFolder) ? inFolder : FlatLogo(t, "_" + kind);
+    }
+
+    /// <summary>A logo named by the team's code or abbreviation in its league's flat logo folder: "&lt;CODE&gt;&lt;suffix&gt;.png".</summary>
+    private static string FlatLogo(TeamSpec t, string suffix)
+    {
+        if (string.IsNullOrEmpty(t.LogoDir) || !Directory.Exists(t.LogoDir)) return null;
+        foreach (string n in new[] { t.Code, t.Abbr }.Where(n => !string.IsNullOrEmpty(n)))
+            if (System.IO.File.Exists(Path.Combine(t.LogoDir, n + suffix + ".png"))) return Path.Combine(t.LogoDir, n + suffix + ".png");
+        return null;
+    }
 
     /// <summary>A logo named after the team in its league's logo folder: "&lt;slug&gt;-logo.png" or "&lt;slug&gt;.png".</summary>
     private static string NamedLogo(TeamSpec t)
@@ -156,6 +187,20 @@ public sealed class PackageSpec
     /// <summary>The league logo: league.logo, or logos/league's logo.png / only PNG.</summary>
     public string LeagueLogoFile() =>
         League?.Logo is { } l && System.IO.File.Exists(PathOf(l)) ? PathOf(l) : LogoIn(Path.Combine(Folder, "logos", "league"));
+
+    /// <summary>A team's rink layout: &lt;rinks&gt;/&lt;code&gt;.png (or its abbreviation). Null when there's none. A .jpg
+    /// of that name is reported by <see cref="RinkJpeg"/> (HMS reads PNG only).</summary>
+    public string RinkFile(TeamSpec t) => RinkNamed(t, ".png");
+    public string RinkJpeg(TeamSpec t) => RinkNamed(t, ".jpg") ?? RinkNamed(t, ".jpeg");
+
+    private string RinkNamed(TeamSpec t, string ext)
+    {
+        string dir = PathOf(Rinks ?? "rinks");
+        if (dir == null || !Directory.Exists(dir)) return null;
+        foreach (string n in new[] { t.Code, t.Abbr }.Where(n => !string.IsNullOrEmpty(n)))
+            if (System.IO.File.Exists(Path.Combine(dir, n + ext))) return Path.Combine(dir, n + ext);
+        return null;
+    }
 
     private static readonly string[] Extras = { "logo_lightbg.png", "mono.png", "ice.png" };
 

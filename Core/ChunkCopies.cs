@@ -30,6 +30,31 @@ public sealed class TocCache
 
 public static class ChunkCopies
 {
+    // Bundle records read once per planning pass (CacheRecords), not once per chunk: a package plans thousands of
+    // textures listed in the same few big bundles. Off by default: a record's SHA1s change when a mod is written.
+    [ThreadStatic] private static Dictionary<(int, int, bool, uint, uint), BundleRecord> _records;
+
+    private sealed class RecordCache : IDisposable { public void Dispose() => _records = null; }
+    private sealed class NoOp : IDisposable { public void Dispose() { } }
+
+    /// <summary>Keeps bundle records read on this thread until disposed (nested calls share the outer cache). Only for
+    /// planning that writes nothing in between.</summary>
+    public static IDisposable CacheRecords()
+    {
+        if (_records != null) return new NoOp();
+        _records = new();
+        return new RecordCache();
+    }
+
+    private static BundleRecord Record(AssetIndex index, TocRef r)
+    {
+        var key = (r.Catalog, r.Cas, r.Patch, r.Offset, r.Size);
+        if (_records != null && _records.TryGetValue(key, out var hit)) return hit;
+        var rec = BundleRecord.Read(index.ReadStored(r.Catalog, r.Cas, r.Patch, r.Offset, r.Size), r.Offset);
+        if (_records != null) _records[key] = rec;
+        return rec;
+    }
+
     /// <summary>A TOC's path below Data or Patch, which names the superbundle it belongs to.</summary>
     public static string SuperbundleKey(AssetIndex index, string toc)
     {
@@ -63,7 +88,7 @@ public static class ChunkCopies
                 var info = index.BundleList[b];
                 var toc = tocs.Get(info.Toc);
                 var tb = toc.Bundles[info.BundleIndex];
-                var rec = BundleRecord.Read(index.ReadStored(tb.Entries[0].Catalog, tb.Entries[0].Cas, tb.Entries[0].Patch, tb.Entries[0].Offset, tb.Entries[0].Size), tb.Entries[0].Offset);
+                var rec = Record(index, tb.Entries[0]);
                 int at = rec.Chunks.FindIndex(c => c.Id == id);
                 if (at < 0) continue;
                 var item = rec.Chunks[at];
@@ -95,7 +120,7 @@ public static class ChunkCopies
                     long key = LocationIndex.Key(tb.Entries[i]);
                     if (!places.Contains(key) || have.Contains((path, tb.Name, key))) continue;
                     var r0 = tb.Entries[0];
-                    var rec = BundleRecord.Read(index.ReadStored(r0.Catalog, r0.Cas, r0.Patch, r0.Offset, r0.Size), r0.Offset);
+                    var rec = Record(index, r0);
                     int at = i - 1 - rec.Ebx.Count - rec.Res.Count;
                     if (at < 0 || at >= rec.Chunks.Count) continue;
                     var item = rec.Chunks[at];

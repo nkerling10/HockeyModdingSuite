@@ -239,8 +239,8 @@ public static class NcaaCodeMods
                     throw new ArgumentException($"Bad commit entry (art id {art}, team {team}, offset {off}).");
                 data.AddRange(BitConverter.GetBytes((ushort)art)); data.Add((byte)(team - first)); data.Add((byte)off);
             }
-            // the data block lives in part 9's cave, after its code (room for ~170 commits)
-            if (NcaaPart8Code.DataAt + data.Count > NcaaPart8Code.P9RunEnd) throw new InvalidOperationException($"Too many commits for the code cave ({commits.Count}).");
+            // the data block lives in part 12's cave B (room for ~500 commits)
+            if (data.Count > NcaaPart8Code.P12DataRoom) throw new InvalidOperationException($"Too many commits for the code cave ({commits.Count}; room for {(NcaaPart8Code.P12DataRoom - 20) / 4}).");
             byte[] Call(int at, int to) => new byte[] { 0xE8 }.Concat(Rel32(at + 5, to)).ToArray();
             byte[] At(int va, int n) => eboot.AsSpan(CodeOff + va, n).ToArray();
             if (!At(NcaaPart8Code.E33Call, 5).SequenceEqual(Call(NcaaPart8Code.E33Call, NcaaPart8Code.E33Fn))) throw new InvalidDataException($"Unexpected code at {NcaaPart8Code.E33Call:x}.");
@@ -261,7 +261,6 @@ public static class NcaaCodeMods
             var region9 = new byte[orig9.Length]; Array.Fill(region9, (byte)0xCC);
             Convert.FromHexString(NcaaPart8Code.P9LoopHex).CopyTo(region9, 0);
             Convert.FromHexString(NcaaPart8Code.P9CodeHex).CopyTo(region9, NcaaPart8Code.P9CodeAt - NcaaPart8Code.P9LoopAt);
-            data.CopyTo(region9, NcaaPart8Code.DataAt - NcaaPart8Code.P9LoopAt);
             hookEntries.Add(Entry(NcaaPart8Code.P9LoopAt, region9, orig9));
             foreach (var (site, stub) in new[] { (NcaaPart8Code.P9CardCall, NcaaPart8Code.P9Card), (NcaaPart8Code.P9ScoutCall, NcaaPart8Code.P9Scout) })
             {
@@ -300,8 +299,8 @@ public static class NcaaCodeMods
                 if (nb.Length >= NcaaPart8Code.P11SchoolLen) throw new ArgumentException($"School name '{schools[i]}' is longer than {NcaaPart8Code.P11SchoolLen - 1} bytes.");
                 etab.AddRange(nb); etab.AddRange(new byte[NcaaPart8Code.P11SchoolLen - nb.Length]);
             }
-            // (the tables live in part 11's cave, built below)
-            if (NcaaPart8Code.P10EntryTable + etab.Count > NcaaPart8Code.P11RunEnd) throw new InvalidOperationException($"Too many classes / teams for the code cave ({entries.Count} classes, {last - first + 1} teams).");
+            // (the tables live in part 12's cave A, built below)
+            if (NcaaPart8Code.P10EntryTable + etab.Count > NcaaPart8Code.P12AEnd) throw new InvalidOperationException($"Too many classes / teams for the code cave ({entries.Count} classes, {last - first + 1} teams).");
             var chl10 = At(NcaaPart8Code.P10ChlHook, 7);
             if (Convert.ToHexString(chl10) != NcaaPart8Code.P10ChlHookOff) throw new InvalidDataException($"Unexpected code at {NcaaPart8Code.P10ChlHook:x}.");
             var pop10 = At(NcaaPart8Code.P10PopHook, 11);
@@ -344,9 +343,7 @@ public static class NcaaCodeMods
             var ntab = new List<byte>(BitConverter.GetBytes(seen.Count));
             foreach (var (h, (team, off)) in seen) { ntab.AddRange(BitConverter.GetBytes(h)); ntab.Add((byte)(team - first)); ntab.Add((byte)off); ntab.AddRange(new byte[2]); }
             if (ntab.Count > NcaaPart8Code.P11NameRoom) throw new InvalidOperationException($"Too many commits by name ({seen.Count}).");
-            ntab.CopyTo(region11, NcaaPart8Code.P11NameTable - NcaaPart8Code.P11LoopAt);
-            etab.CopyTo(region11, NcaaPart8Code.P10EntryTable - NcaaPart8Code.P11LoopAt);
-            hookEntries.Add(Entry(NcaaPart8Code.P11LoopAt, region11, orig11));
+            hookEntries.Add(Entry(NcaaPart8Code.P11LoopAt, region11, orig11));   // code only: its tables are in part 12's caves
             var resp = At(NcaaPart8Code.P11RespHook, 5);
             if (!resp.SequenceEqual(Call(NcaaPart8Code.P11RespHook, NcaaPart8Code.P11RespCall))) throw new InvalidDataException($"Unexpected code at {NcaaPart8Code.P11RespHook:x}.");
             hookEntries.Add(Entry(NcaaPart8Code.P11RespHook, Call(NcaaPart8Code.P11RespHook, NcaaPart8Code.P11Resp), resp));
@@ -369,6 +366,37 @@ public static class NcaaCodeMods
             var rights = At(NcaaPart8Code.P11RightsHook, 5);
             if (Convert.ToHexString(rights) != NcaaPart8Code.P11RightsHookOff) throw new InvalidDataException($"Unexpected code at {NcaaPart8Code.P11RightsHook:x}.");
             hookEntries.Add(Entry(NcaaPart8Code.P11RightsHook, Jmp(NcaaPart8Code.P11RightsHook, NcaaPart8Code.P11Rights), rights));
+
+            // part 12: room for every school's tables. Two EA copy runs (n x `lea rdi,[r15+X]; lea rdx,[rbx+X];
+            // mov rsi,r14; call`, X from 0x80 step 8) become loops making the same calls; after the loops, data only:
+            // A holds part 10's class table and team strings, B part 8's data block and part 11's name table.
+            foreach (var (at, end, lastX, loopHex, parts) in new (int, int, int, string, (int At, List<byte> Bytes)[])[]
+                     {
+                         (NcaaPart8Code.P12AAt, NcaaPart8Code.P12AEnd, NcaaPart8Code.P12ALast, NcaaPart8Code.P12ALoopHex, new[] { (NcaaPart8Code.P10EntryTable, etab) }),
+                         (NcaaPart8Code.P12BAt, NcaaPart8Code.P12BEnd, NcaaPart8Code.P12BLast, NcaaPart8Code.P12BLoopHex, new[] { (NcaaPart8Code.DataAt, data), (NcaaPart8Code.P11NameTable, ntab) }),
+                     })
+            {
+                byte[] orig12 = Unique(at, end - at);
+                // the run is exactly the calls the loop makes
+                for (int p = 0, x = NcaaPart8Code.P12FirstX; p < orig12.Length; p += 22, x += 8)
+                {
+                    bool ok = p + 22 <= orig12.Length;
+                    if (ok)
+                    {
+                        var e = orig12.AsSpan(p, 22);
+                        ok = e[..3].SequenceEqual(new byte[] { 0x49, 0x8D, 0xBF }) && e[7..10].SequenceEqual(new byte[] { 0x48, 0x8D, 0x93 })
+                             && e[14..17].SequenceEqual(new byte[] { 0x4C, 0x89, 0xF6 }) && e[17] == 0xE8
+                             && BinaryPrimitives.ReadInt32LittleEndian(e[3..]) == x && BinaryPrimitives.ReadInt32LittleEndian(e[10..]) == x
+                             && at + p + 22 + BinaryPrimitives.ReadInt32LittleEndian(e[18..]) == NcaaPart8Code.P12Call
+                             && (p + 22 < orig12.Length || x == lastX);
+                    }
+                    if (!ok) throw new InvalidDataException($"Unexpected code at {at + p:x} (part 12's cave).");
+                }
+                var region12 = new byte[orig12.Length]; Array.Fill(region12, (byte)0xCC);
+                Convert.FromHexString(loopHex).CopyTo(region12, 0);
+                foreach (var (va, bytes) in parts) bytes.CopyTo(region12, va - at);
+                hookEntries.Add(Entry(at, region12, orig12));
+            }
         }
 
         memory.Add(Entry(CapacitySite, con, coff));

@@ -29,7 +29,13 @@ public static class TextureBuilder
     /// (<see cref="TextureHeader.Width"/> x <see cref="TextureHeader.Height"/>). Mips are stored smallest first
     /// (NHL 24: largest first, <see cref="BuildPs4"/>).
     /// </summary>
-    public static byte[] BuildChunk(TextureHeader h, byte[] rgba, Action<string> log = null)
+    public static byte[] BuildChunk(TextureHeader h, byte[] rgba, Action<string> log = null) =>
+        // the encoded chunk depends only on the image and the texture's layout: a package reinstall reuses it (PlanCache)
+        PlanCache.Get("tex", () => BuildChunkCore(h, rgba, log),
+                      $"{h.Ps4}|{h.Type}|{h.PixelFormatId}|{h.Width}x{h.Height}x{h.Depth}|{h.SliceCount}|{h.MipCount}|{h.FirstMip}|{h.ChunkSize}|{string.Join(",", h.MipSizes)}|{string.Join(",", h.MipOffsets)}|{h.Flags}",
+                      rgba);
+
+    private static byte[] BuildChunkCore(TextureHeader h, byte[] rgba, Action<string> log)
     {
         string why = Unsupported(h);
         if (why != null) throw new NotSupportedException(why);

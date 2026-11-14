@@ -144,11 +144,10 @@ public static class PackageCheck
             Image(g.LeagueLogoFile() ?? Path.Combine(spec.Folder, "logos", "league", "logo.png"), $"league {g.League?.Id} logo", required: true, r);
         foreach (var t in spec.AllTeams)
         {
-            string dir = spec.TeamLogoFolder(t);
             if (spec.TeamLogoFile(t) == null) continue;                // no logo yet: the shared placeholder (PreviewLogoArt)
             Image(spec.TeamLogoFile(t), $"{t.Code} logo", required: true, r);
-            foreach (string opt in new[] { "logo_lightbg.png", "mono.png", "ice.png" })
-                Image(Path.Combine(dir, opt), $"{t.Code} {opt}", required: false, r);
+            foreach (string opt in new[] { "lightbg", "mono", "ice" })
+                Image(spec.TeamExtraFile(t, opt), $"{t.Code} {opt}", required: false, r);
         }
     }
 
@@ -235,6 +234,12 @@ public static class PackageCheck
         var spare = map.Menu.Where(kv => !used.Contains(kv.Key) && map.Ice.ContainsKey(kv.Key))
                             .OrderByDescending(kv => kv.Value.Count).ThenBy(kv => kv.Key).Select(kv => (kv.Key, kv.Value.Count)).ToList();
         r.Lines.Add($"Spare logo art ids (logo textures + centre ice, no team uses them): {spare.Count}; a full set has {full} menu styles.");
+        // more that could serve: unused ids without a centre-ice texture, and ids only inactive teams use
+        var noIce = map.Menu.Where(kv => !used.Contains(kv.Key) && !map.Ice.ContainsKey(kv.Key)).Select(kv => kv.Key).ToList();
+        var activeArt = Valid(db, teams).Where(i => Convert.ToInt32(db.Get(teams, i, F(teams, "active"))) != 0)
+                                        .Select(i => Convert.ToInt32(db.Get(teams, i, F(teams, "artid")))).ToHashSet();
+        var inactiveOnly = used.Where(a => !activeArt.Contains(a) && map.Menu.ContainsKey(a)).OrderBy(a => a).ToList();
+        r.Lines.Add($"Also: {noIce.Count} unused logo art ids without a centre-ice texture; {inactiveOnly.Count} ids only inactive teams use ({string.Join(", ", inactiveOnly.Take(40))})");
         // teams with a logo get their own id; teams without one share a single placeholder id (the league logo)
         // a team with a logo keeps its earlier id while it's spare and no other team kept it
         var kept = new Dictionary<string, (int, int)>();
@@ -246,16 +251,32 @@ public static class PackageCheck
                 kept[t.Code] = spare.First(x => x.Key == pa);
         var phPrior = spare.FirstOrDefault(x => x.Key == priorPh && !held.Contains(x.Key));    // (0, 0) when gone
         spare = spare.Where(x => !held.Contains(x.Key) && x.Key != priorPh).ToList();
-        int k = 0;
-        foreach (var t in spec.AllTeams.Where(t => spec.TeamLogoFile(t) != null))
+        // ids with menu logos but no centre-ice texture: for teams that aren't played (no rink to show), and for played
+        // teams once the ones with centre ice run out (their rink shows the game's default centre ice)
+        var plain = map.Menu.Where(kv => !used.Contains(kv.Key) && !map.Ice.ContainsKey(kv.Key) && kv.Value.Count * 2 >= full)
+                            .OrderByDescending(kv => kv.Value.Count).ThenBy(kv => kv.Key).Select(kv => (kv.Key, kv.Value.Count)).ToList();
+        foreach (var t in spec.AllTeams.Where(t => spec.TeamLogoFile(t) != null && !kept.ContainsKey(t.Code)))
+            if (prior?.LogoArt.GetValueOrDefault(t.Code, -1) is int pa && pa >= 0 && plain.FirstOrDefault(x => x.Key == pa) is { Key: > 0 } pp && held.Add(pa))
+                kept[t.Code] = pp;
+        plain = plain.Where(x => !held.Contains(x.Key)).ToList();
+        bool Played(TeamSpec t) => spec.Groups.FirstOrDefault(g => g.League?.Id == t.LeagueId)?.Playable != false;
+        // played teams first (those with a rink before the rest), then the others
+        var order = spec.AllTeams.Where(t => spec.TeamLogoFile(t) != null)
+                        .OrderBy(t => Played(t) ? 0 : 1).ThenBy(t => spec.RinkFile(t) != null ? 0 : 1).ToList();
+        int k = 0, kp2 = 0;
+        foreach (var t in order)
         {
             (int art, int styles) pick;
-            if (kept.TryGetValue(t.Code, out var kp)) pick = kp;
-            else if (k >= spare.Count) { r.Errors.Add($"{t.Code}: no spare logo art id left."); continue; }
-            else pick = spare[k++];
+            bool ice;
+            if (kept.TryGetValue(t.Code, out var kp)) { pick = kp; ice = map.Ice.ContainsKey(kp.Item1); }
+            else if (Played(t) && k < spare.Count) { pick = spare[k++]; ice = true; }
+            else if (kp2 < plain.Count) { pick = plain[kp2++]; ice = false; }
+            else if (k < spare.Count) { pick = spare[k++]; ice = true; }
+            else { r.Errors.Add($"{t.Code}: no spare logo art id left."); continue; }
             var (art, styles) = pick;
             r.LogoArt[t.Code] = art;
-            r.Lines.Add($"{t.Code}: logo art id {art} ({styles} menu styles + centre ice)");
+            r.Lines.Add($"{t.Code}: logo art id {art} ({styles} menu styles{(ice ? " + centre ice" : ", no centre-ice texture")})");
+            if (!ice && Played(t)) r.Warnings.Add($"{t.Code}: its logo art id has no centre-ice texture (all {spare.Count + held.Count} with one are taken): its rink shows the game's default centre ice");
         }
         var bare = spec.AllTeams.Where(t => spec.TeamLogoFile(t) == null).ToList();
         if (bare.Count == 0) return;

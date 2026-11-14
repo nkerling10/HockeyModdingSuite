@@ -44,6 +44,8 @@ public static class PackageInstaller
         public List<(string Name, int Team, int Offset)> NameCommits { get; } = new();
         /// <summary>Current-season roster-file players placed by the players step: (team code, name slug) → game id.</summary>
         public Dictionary<(string Code, string Slug), int> Placed { get; } = new();
+        /// <summary>How long each install step took.</summary>
+        public List<string> Timings { get; } = new();
     }
 
     public static string StateDir(ModStore store, string id) => Path.Combine(store.Dir, "packages", id);
@@ -61,6 +63,9 @@ public static class PackageInstaller
     {
         var r = new Result();
         log ??= _ => { };
+        // how long each step takes, in the report
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        void Took(string step) { r.Timings.Add($"{step}: {clock.Elapsed.TotalSeconds:0.0} s"); log($"[{step}: {clock.Elapsed.TotalSeconds:0.0} s]"); clock.Restart(); }
 
         // 1. back to the game without the package
         var existing = store.Find(Kind, spec.Id);
@@ -68,8 +73,10 @@ public static class PackageInstaller
         {
             log($"Taking down the installed {spec.Id} first");
             store.Restore(existing, game, log);
+            Took("taking down the installed package");
             index = reopen?.Invoke() ?? throw new InvalidOperationException(
                 $"{spec.Id} is installed: reinstalling needs a way to re-read the asset index after taking it down.");
+            Took("re-reading the asset index");
         }
         else if (existing != null && dry && store.State(existing, game) is ModState.Applied or ModState.Partial)
             throw new InvalidOperationException($"{spec.Id} is installed: a dry run needs it removed first (package-remove {spec.Id}).");
@@ -81,9 +88,14 @@ public static class PackageInstaller
         var legacy = new Legacy(index);
         var db = legacy.OpenDb(PackageCheck.GameDb);
         var loc = legacy.OpenDb(PackageCheck.LocDb);
+        // every database edit of the recipe in one batch: each table's checksum is fixed once at the end, not after every
+        // field (an unbatched Set re-hashes its whole table; thousands of player fields made installs take an hour)
+        var dbBatch = db.Batch();
+        var locBatch = loc.Batch();
         PackageCheck.Recycle(db, spec, r.Lines);
         Resolve(db, loc, spec, check, resolved, r);
 
+        Took("check and resolve");
         // 3. the recipe, in memory
         var nameSets = PackageCheck.NameSets(loc);
         foreach (var g in spec.Groups) ApplyLeague(db, loc, g, g == spec ? resolved.LeagueArt : resolved.LeagueArts.GetValueOrDefault(g.League.Id, -1), r);
@@ -92,11 +104,22 @@ public static class PackageInstaller
         var portraits = PackagePortraits.Assign(index, legacy, db, spec, r);
         PackagePlayers.EntryYears(db, r);
         foreach (var (id, text) in spec.Strings ?? new()) SetString(loc, id, text, r);
+        // the teams' own uniforms (Jersey Studio exports): their jersey menus now, their kit folders' bytes in step 4
+        var uniforms = spec.Groups.Any(g => PackageUniforms.Folder(g) != null)
+            ? PackageUniforms.ApplySlots(db, Kits.Find(index), spec, r) : new();
 
+        dbBatch.Dispose();
+        locBatch.Dispose();
+        Took("teams, players, uniforms (database)");
         // 4. bytes
         var tocs = new TocCache(index);
         var locations = LocationIndex.Build(index, tocs);
         var patches = new List<PatchData>();
+        // planning reads the same bundle records for thousands of textures: once each (nothing is written until step 6)
+        using var records = ChunkCopies.CacheRecords();
+        // encoded textures (logos, portraits, uniforms) kept between installs: only new or changed images are encoded
+        // (a dry run keeps what it encodes but deletes nothing)
+        using var encoded = PlanCache.Begin(Path.Combine(StateDir(store, spec.Id), "cache"), prune: !dry);
         foreach (var (name, d) in new[] { (PackageCheck.GameDb, db), (PackageCheck.LocDb, loc) })
         {
             var f = legacy.Find(name);
@@ -106,9 +129,14 @@ public static class PackageInstaller
             patches.AddRange(plan.Patches);
             r.Lines.Add($"{name}: {plan.Patches.Count} byte ranges");
         }
+        Took("database bytes");
         PlanLogos(index, spec, resolved, locations, tocs, patches, r, log);
+        Took("logos");
         PlanPortraits(index, portraits, locations, tocs, patches, r);
+        Took("portraits");
+        PlanUniforms(index, uniforms, locations, tocs, patches, r);
 
+        Took($"uniform textures (encoded textures: {PlanCache.Hits} reused, {PlanCache.Misses} encoded)");
         // 5. code mods (+ the standalone ones kept next to the patch file, which no package owns)
         var codeMods = BuildCodeMods(game, spec, r);
         var used = codeMods["mods"]!.AsArray().SelectMany(m => m!["memory"]!.AsArray()).Select(e => e!["offset"]!.ToString()).ToHashSet();
@@ -129,7 +157,9 @@ public static class PackageInstaller
         // 6. write: one entry, applied; code mods file; resolved choices; report
         string summary = $"{spec.Title} {spec.Version}: " + string.Join("; ", spec.Groups.Select(g => $"league {g.League?.Id}, {g.Teams.Count} teams ({string.Join(", ", g.Teams.Select(t => t.Code))})")) + ", logos, strings";
         r.Entry = store.Add(Kind, spec.Id, spec.Folder, summary, patches, r.Warnings);
+        Took("saving the mod entry");
         store.Apply(r.Entry, game, log);
+        Took("writing into the game");
         SaveResolved(store, spec.Id, resolved);
         string cm = CodeModsFile(store);
         Directory.CreateDirectory(Path.GetDirectoryName(cm));
@@ -145,9 +175,11 @@ public static class PackageInstaller
     {
         var lines = new List<string>();
         var e = store.Find(Kind, id) ?? throw new InvalidOperationException($"No package {id} in the mod list.");
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         if (store.State(e, game) is ModState.Applied or ModState.Partial) store.Restore(e, game, log);
+        double restored = clock.Elapsed.TotalSeconds;
         store.Remove(e);
-        lines.Add($"{id}: restored and removed from the mod list (its resolved choices are kept for a reinstall)");
+        lines.Add($"{id}: restored and removed from the mod list (its resolved choices are kept for a reinstall) in {restored:0.0} s + {clock.Elapsed.TotalSeconds - restored:0.0} s");
         string cm = CodeModsFile(store);
         if (File.Exists(cm))
         {
@@ -335,6 +367,12 @@ public static class PackageInstaller
                     db.Set(arenas, ar, af, value);
                 }
                 if (t.Arena?.Count > 0) r.Lines.Add($"{t.Code}: arena settings {string.Join(", ", t.Arena.Select(kv => $"{kv.Key}={kv.Value}"))}");
+                // crowd lights in the team's colour: the data file's crowd_light_color, else its primary colour (a league
+                // with "crowdLight": false keeps the template's)
+                var group = spec.Groups.FirstOrDefault(g => g.League?.Id == t.LeagueId) ?? spec;
+                int crowd = Color(s?.CrowdLightColor) is var cl && cl >= 0 ? cl : Color(t.Primary);
+                if (group.CrowdLight != false && group.Playable != false && crowd >= 0 && arenas.Fields.FirstOrDefault(x => x.Name == "crowdlightcolor") is { } clf)
+                    db.Set(arenas, ar, clf, crowd);
                 SortByIndex(db, arenas);
                 row = Valid(db, teams).First(i => Int(db, teams, i, "index") == t.Index);
                 db.Set(teams, row, F(teams, "arenaid"), arenaIndex);
@@ -376,6 +414,8 @@ public static class PackageInstaller
     {
         public Dictionary<string, long> Ends { get; } = new();
         public Dictionary<Guid, List<string>> ChunkOwners { get; } = new();
+        /// <summary>Seconds spent: in-place planning (encode + patch plan), finding copies + reframing, growing.</summary>
+        public double InPlace, Copies, Grow;
     }
 
     private static void PlanLogos(AssetIndex index, PackageSpec spec, Resolved res, LocationIndex locations, TocCache tocs, List<PatchData> patches, Result r, Action<string> log)
@@ -403,11 +443,27 @@ public static class PackageInstaller
             main ??= spec.LeagueLogoFile();                              // no logo yet: the shared placeholder, the league logo
             if (main == null || !res.LogoArt.TryGetValue(t.Code, out int art)) { r.Warnings.Add($"{t.Code}: no logo file or art id, logos left as they are"); continue; }
             if (!drawn.Add(art)) continue;                               // the placeholder id is drawn once
-            string dir = placeholder ? Path.GetDirectoryName(main) : spec.TeamLogoFolder(t);
+            string Extra(string kind) => placeholder ? null : spec.TeamExtraFile(t, kind);
             var img = Png.Load(main);
-            var light = File.Exists(Path.Combine(dir, "logo_lightbg.png")) ? Png.Load(Path.Combine(dir, "logo_lightbg.png")) : img;
-            var mono = File.Exists(Path.Combine(dir, "mono.png")) ? Png.Load(Path.Combine(dir, "mono.png")) : (Png.Silhouette(img.Rgba), img.W, img.H);
-            var ice = File.Exists(Path.Combine(dir, "ice.png")) ? Png.Load(Path.Combine(dir, "ice.png")) : img;
+            var light = Extra("lightbg") is { } lf ? Png.Load(lf) : img;
+            var mono = Extra("mono") is { } mf ? Png.Load(mf) : (Png.Silhouette(img.Rgba), img.W, img.H);
+            var ice = Extra("ice") is { } icf ? Png.Load(icf) : img;
+            // a rink layout: centre ice cut from it, on this team's own art id only (never the shared placeholder's)
+            string rink = spec.RinkFile(t);
+            if (rink == null && spec.RinkJpeg(t) is { } jpg) r.Warnings.Add($"{t.Code}: {Path.GetFileName(jpg)} is a JPEG; save it as {t.Code}.png for its centre ice");
+            if (rink != null && placeholder) r.Warnings.Add($"{t.Code}: has a rink but no logo of its own (its art id is the shared placeholder's); rink skipped");
+            else if (rink != null)
+            {
+                var pic = Png.Load(rink);
+                if (!CenterIce.IsRinkShape(pic.W, pic.H) || pic.W < CenterIce.LeastWidth)
+                    r.Warnings.Add($"{t.Code}: {Path.GetFileName(rink)} is {pic.W}x{pic.H}, not a top-down rink layout (5000x2236); rink skipped");
+                else
+                {
+                    var g = CenterIce.Measure(pic.Rgba, pic.W, pic.H);
+                    ice = (CenterIce.Logo(pic.Rgba, pic.W, pic.H, g, new CenterIceLook()), CenterIce.LogoSize, CenterIce.LogoSize);
+                    r.Lines.Add($"{t.Code}: centre ice from {Path.GetFileName(rink)} (blue lines {(g.Measured ? "measured" : "not found, template scale")})");
+                }
+            }
             int n = 0;
             foreach (var logo in map.Menu.GetValueOrDefault(art) ?? new List<TeamLogo>())
             {
@@ -417,6 +473,7 @@ public static class PackageInstaller
             if (map.Ice.TryGetValue(art, out var iceLogo) && PlanOne(index, iceLogo.Name, ice, locations, tocs, patches, r, st)) n++;
             r.Lines.Add(placeholder ? $"placeholder (league logo): {n} logo textures on art id {art}, shared by the teams without a logo"
                                     : $"{t.Code}: {n} logo textures on art id {art}");
+            log($"{t.Code}: logos planned (so far: in place {st.InPlace:0} s, copies {st.Copies:0} s, grow {st.Grow:0} s)");
         }
         foreach (var g in spec.Groups)
         {
@@ -458,6 +515,74 @@ public static class PackageInstaller
     /// textures too (spare art ids are often a shared placeholder), the new data goes to the end of the CAS file and only
     /// this texture's chunk is pointed at it (ChunkGrower), so the others keep the placeholder.
     /// </summary>
+    /// <summary>Read only (package-uniforms): the uniforms step on an in-memory database, and the bytes it would write.</summary>
+    public static Result CheckUniforms(AssetIndex index, PackageSpec spec, T3Db db)
+    {
+        var r = new Result();
+        var uniforms = PackageUniforms.ApplySlots(db, Kits.Find(index), spec, r);
+        var tocs = new TocCache(index);
+        var locations = LocationIndex.Build(index, tocs);
+        var patches = new List<PatchData>();
+        PlanUniforms(index, uniforms, locations, tocs, patches, r);
+        r.Lines.Add($"uniforms: {uniforms.Count} planned, {patches.Count} byte ranges, {patches.Where(p => p.Append).Sum(p => (long)p.New.Length) / 1048576.0:0.0} MB appended");
+        return r;
+    }
+
+    /// <summary>
+    /// The exported uniforms' bytes: each texture into its kit folder's texture (in place, at that texture's size), each
+    /// stamp EBX in place. A texture whose stored image other textures share is left alone (it would change them too).
+    /// </summary>
+    private static void PlanUniforms(AssetIndex index, List<(TeamSpec Team, PackageUniform Uniform, Kit Kit)> uniforms, LocationIndex locations, TocCache tocs, List<PatchData> patches, Result r)
+    {
+        if (uniforms.Count == 0) return;
+        // every kit texture's chunk id: a chunk two textures use can't take new data for one of them; stored bytes several
+        // chunks share (identical data stored once) get a copy of their own (PlanOne)
+        var st = new LogoState();
+        foreach (string name in index.Res.Keys.Where(k => k.StartsWith(Kits.Root, StringComparison.OrdinalIgnoreCase)).ToList())
+        {
+            try
+            {
+                var h = TextureHeader.Parse(index.Read(index.GetRes(name)), ps4: !index.Layout.IsPs5);
+                if (!st.ChunkOwners.TryGetValue(h.ChunkId, out var l)) st.ChunkOwners[h.ChunkId] = l = new List<string>();
+                l.Add(name);
+            }
+            catch { /* not a texture */ }
+        }
+        foreach (var (t, u, kit) in uniforms)
+        {
+            int textures = 0, stamps = 0;
+            var skipped = new List<string>();
+            foreach (var (slot, file) in u.Textures)
+            {
+                string path = Path.Combine(u.Dir, file);
+                if (kit.Slot(slot) is not { } kt) { skipped.Add($"{slot} (the folder has no such texture)"); continue; }
+                if (!File.Exists(path)) { skipped.Add($"{slot} ({file} missing)"); continue; }
+                int warned = r.Warnings.Count;
+                if (PlanOne(index, kt.Name, Png.Load(path), locations, tocs, patches, r, st)) textures++;
+                else
+                {
+                    // PlanOne's own warning, under this uniform's name
+                    skipped.Add($"{slot} ({(r.Warnings.Count > warned ? r.Warnings[^1] : "not planned")})");
+                    if (r.Warnings.Count > warned) r.Warnings.RemoveAt(r.Warnings.Count - 1);
+                }
+            }
+            foreach (var (garment, file) in u.Stamps)
+            {
+                string path = Path.Combine(u.Dir, file);
+                if (!kit.Stamps.TryGetValue(garment, out var stampName) || !File.Exists(path)) { skipped.Add($"{garment} stamp"); continue; }
+                try
+                {
+                    var plan = ResPatcher.PlanEbx(index, stampName, File.ReadAllBytes(path), locations, tocs);
+                    patches.AddRange(plan.Patches);
+                    stamps++;
+                }
+                catch (Exception ex) { skipped.Add($"{garment} stamp ({ex.Message})"); }
+            }
+            r.Lines.Add($"{t.Code} {u.Name}: {textures} textures, {stamps} stamps into {kit}");
+            if (skipped.Count > 0) r.Warnings.Add($"uniforms: {t.Code} {u.Name}: left out {string.Join("; ", skipped)}");
+        }
+    }
+
     private static bool PlanOne(AssetIndex index, string name, (byte[] Rgba, int W, int H) img, LocationIndex locations, TocCache tocs, List<PatchData> patches, Result r, LogoState st)
     {
         try
@@ -472,8 +597,10 @@ public static class PackageInstaller
             }
             var notes = new List<string>();
             TextureReplacementPlan plan = null;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             try { plan = Replacements.PlanTexture(index, name, rgba, locations, tocs, notes.Add); }
             catch (Exception ex) when (ex.Message.Contains("stored once") || ex.Message.Contains("can't be replaced in place")) { plan = null; }
+            st.InPlace += sw.Elapsed.TotalSeconds; sw.Restart();
             if (plan != null && plan.Chunk.Patches.Count > 0)
             {
                 patches.AddRange(plan.Chunk.Patches);
@@ -486,8 +613,10 @@ public static class PackageInstaller
             var copies = ChunkCopies.Find(index, h.ChunkId, tocs);
             var full = copies.Where(c => c.Live).OrderByDescending(c => c.Ref.Size).FirstOrDefault() ?? copies.OrderByDescending(c => c.Ref.Size).First();
             byte[] stored = Framing.Reframe(index.ReadStored(full.Ref), raw);
+            st.Copies += sw.Elapsed.TotalSeconds; sw.Restart();
             var grow = ChunkGrower.Plan(index, h.ChunkId, stored, locations, tocs, st.Ends);
             patches.AddRange(grow.Patches);
+            st.Grow += sw.Elapsed.TotalSeconds;
             return true;
         }
         catch (Exception ex)

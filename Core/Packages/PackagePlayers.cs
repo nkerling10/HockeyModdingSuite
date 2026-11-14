@@ -48,6 +48,16 @@ public static class PackagePlayers
     {
         /// <summary>Seasons he has been in college before the roster season (0 Fr .. 4 Gr), from "class"; or null.</summary>
         public int? Entry { get; set; }
+        /// <summary>His NHL draft, from "draft" { year, round, pick, team }; null when the file gives none.</summary>
+        public DraftInfo Draft { get; set; }
+    }
+
+    /// <summary>"draft": { "year": 2025, "round": 2, "pick": 63, "team": "NJ" } → DraftInfo; null when absent or incomplete.</summary>
+    private static DraftInfo DraftOf(JsonElement el)
+    {
+        if (el.ValueKind != JsonValueKind.Object || !el.TryGetProperty("draft", out var d) || d.ValueKind != JsonValueKind.Object) return null;
+        if (Num(d, "year") is not int y || y < 1900 || string.IsNullOrWhiteSpace(Str(d, "team"))) return null;
+        return new DraftInfo(y, Str(d, "team").Trim().ToUpperInvariant(), Num(d, "round") ?? 0, Num(d, "pick") ?? Num(d, "overall") ?? 0);
     }
 
     private static readonly string[] Classes = { "FR", "SO", "JR", "SR", "GR" };
@@ -131,6 +141,8 @@ public static class PackagePlayers
 
     public static void Apply(T3Db db, PackageSpec spec, PackageInstaller.Result r)
     {
+        // one checksum fix per table at the end, not one per field written (no-op inside the installer's own batch)
+        using var batch = db.Batch();
         var ps = spec.Players;
         if (ps == null || string.IsNullOrEmpty(ps.File)) return;
         string file = spec.PathOf(ps.File);
@@ -170,7 +182,7 @@ public static class PackagePlayers
                     { r.Warnings.Add($"players: {name} ({teamName}): birth date '{born}' isn't MM-DD-YYYY; skipped"); continue; }
                     var (first, last) = SplitPersonName(name);
                     if (info == null || string.IsNullOrWhiteSpace(info.Pos)) info = details.GetValueOrDefault(name) ?? info;
-                    var item = new Listed(team, season, name, first, last, b, info);
+                    var item = new Listed(team, season, name, first, last, b, info) { Draft = DraftOf(el) };
                     if (el.ValueKind == JsonValueKind.Object && Str(el, "class") is { } cls)
                     {
                         item.Entry = ClassOffset(cls);
@@ -274,8 +286,27 @@ public static class PackagePlayers
         var eqFace = eq.Fields.FirstOrDefault(f => f.Name == "faceprotectortype");
         var eqRow = Enumerable.Range(0, eq.WrittenRecords).Where(i => !db.IsInvalid(eq, i))
                               .GroupBy(i => Convert.ToInt32(db.Get(eq, i, eqId))).ToDictionary(g => g.Key, g => g.First());
-        int league = spec.League?.Id ?? 32, cages = 0, repositioned = 0;
+        int league = spec.League?.Id ?? 32, cages = 0, repositioned = 0, drafted = 0, uncontracted = 0;
         var moved = moves.Select(m => m.GameId).ToHashSet();
+        // the file's draft (year, round, pick, team) on his bio; the drafting team holds his rights (proteam) unless the
+        // game has them with another team (a traded pick). No "draft" in the file: his draft stays as the game has it
+        // (a created player is undrafted).
+        var nhlByCode = RosterSync.TeamIndex(db);
+        var badDraft = new List<string>();
+        bool SetDraft(int bioRow, Listed l)
+        {
+            if (l.Draft is not { } d) return false;
+            int team = PlayerCreator.DraftTeam(nhlByCode, d.Team);
+            if (team < 0) { badDraft.Add($"{l.Name} ({d.Team})"); return false; }
+            int oldDraft = Convert.ToInt32(db.Get(bioT, bioRow, bf["draftteam"]));
+            int pro = Convert.ToInt32(db.Get(bioT, bioRow, bf["proteam"]));
+            db.Set(bioT, bioRow, bf["draftyear"], d.Year - 1900);
+            db.Set(bioT, bioRow, bf["draftround"], d.Round);
+            db.Set(bioT, bioRow, bf["draftposition"], d.Overall);
+            db.Set(bioT, bioRow, bf["draftteam"], team);
+            if (pro < 0 || pro == oldDraft) db.Set(bioT, bioRow, bf["proteam"], team);
+            return true;
+        }
         foreach (var (l, id) in placed)
         {
             var p = roster.Find(id);
@@ -295,6 +326,19 @@ public static class PackagePlayers
             db.Set(bioT, p.BioRow, bf["team"], -1);
             db.Set(bioT, p.BioRow, bf["juniorteam"], l.Team.Index);
             db.Set(bioT, p.BioRow, bf["juniorleague"], league);
+            if (SetDraft(p.BioRow, l)) drafted++;
+            if (ps.NoContract)
+            {
+                // no NHL deal while in college, as the game's own NCAA prospects (e.g. L.J. Mooney): status 0, the rest 0
+                foreach (var (fname, v) in NoContractFields)
+                    if (bf.TryGetValue(fname, out var cf)) db.Set(bioT, p.BioRow, cf, v);
+                for (int k = 0; k < ContractSync.ClauseSlots; k++)
+                {
+                    if (bf.TryGetValue($"contractclause{k}", out var c1)) db.Set(bioT, p.BioRow, c1, 0);
+                    if (bf.TryGetValue($"contractclausemntcnumteams{k}", out var c2)) db.Set(bioT, p.BioRow, c2, 0);
+                }
+                uncontracted++;
+            }
             if (spec.Rules?.FaceProtector is int fp && eqFace != null && !p.IsGoalie && eqRow.TryGetValue(id, out int er))
             { db.Set(eq, er, eqFace, fp); cages++; }
         }
@@ -303,7 +347,8 @@ public static class PackagePlayers
         foreach (var t in spec.Teams) RosterLines.BuildTeam(db, t.Index);
 
         r.Lines.Add($"players: season {current}: {now.Count} listed, {placed.Count} placed ({moves.Count - already} moved, {already} already there, " +
-                    $"{placed.Count - moves.Count} created), {needDetails.Count} need details; {cages} face protectors; " +
+                    $"{placed.Count - moves.Count} created), {needDetails.Count} need details; {drafted} drafted (file's draft); " +
+                    (ps.NoContract ? $"{uncontracted} contracts cleared; " : "") + $"{cages} face protectors; " +
                     $"{repositioned} existing players' positions from the file; {forwardsPlaced} \"F\" given a spot; lines rebuilt");
         // which game player each roster-file entry is (the game may spell him differently: "Nic Sima" for Nicholas)
         foreach (var (l, gid) in placed) r.Placed[(l.Team.Code, PackagePortraits.Slug(l.Name))] = gid;
@@ -336,6 +381,7 @@ public static class PackagePlayers
                 artCount[a] = artCount.GetValueOrDefault(a) + 1;
             }
             var skipped = new List<string>();
+            int commitsDrafted = 0;
             foreach (var l in commits)
             {
                 var (p, nameOnly) = matcher.Find(l.First, l.Last, l.Born);
@@ -344,16 +390,18 @@ public static class PackagePlayers
                 if (p == null && int.TryParse(l.Season, out int ny) && int.TryParse(current, out int nc) && ny > nc && ny - nc <= 15)
                     r.NameCommits.Add((l.Name, l.Team.Index, ny - nc));
                 if (p == null || nameOnly || !int.TryParse(l.Season, out int year) || !int.TryParse(current, out int cur) || year <= cur || year - cur > 15) { skipped.Add($"{l.Name} ({l.Team.Code} {l.Season}){(nameOnly ? ": birth date differs" : "")}"); continue; }
+                if (roster.Find(p.GameId) is { } cp && SetDraft(cp.BioRow, l)) commitsDrafted++;
                 int art = Convert.ToInt32(db.Get(bioT0, p.BioRow, bf0["artid"]));
                 if (art <= 0 || art > 0xFFFF || artCount.GetValueOrDefault(art) != 1) { skipped.Add($"{l.Name}: art id {art} not his alone"); continue; }
                 r.Commits.Add((art, l.Team.Index, year - cur));        // seasons after the roster season: the game adds the franchise's year
             }
             r.Lines.Add($"players: commits ({commits.Count}): " +
                         string.Join("; ", commits.GroupBy(c => (c.Team.Code, c.Season)).Select(g => $"{g.Key.Code} {g.Key.Season}: {g.Count()}")) +
-                        $"; {r.Commits.Count} in the game join their school in their commit year");
+                        $"; {r.Commits.Count} in the game join their school in their commit year; {commitsDrafted} given the file's draft");
             if (skipped.Count > 0)
                 r.Lines.Add($"players: commits not in the game or not matched exactly ({skipped.Count}): {string.Join(", ", skipped)}");
         }
+        if (badDraft.Count > 0) r.Warnings.Add($"players: draft team not an NHL team, draft left as the game has it: {string.Join(", ", badDraft)}");
     }
 
     /// <summary>After the portraits step: the classed players' class offsets by art id (part 10's table). An art id
@@ -391,6 +439,14 @@ public static class PackagePlayers
 
     private static readonly string[] PosNames = { "C", "LW", "RW", "LD", "RD", "G" };
 
+    /// <summary>players.contract "none": the bio's contract as the game's NCAA prospects have it (L.J. Mooney, Michael
+    /// Hage): status 0, no length, salary, two-way, extension, retained salary or clauses (clauses set separately).</summary>
+    private static readonly (string Field, int Value)[] NoContractFields =
+    {
+        ("contractstatus", 0), ("contractlength", 0), ("contractdollars", 0), ("contractis2way", 0), ("contractismultiyear", 0),
+        ("contractneedsentrylevel", 0), ("extensionlength", 0), ("extensiondollars", 0), ("extensionis2way", 0), ("retainedsalarytrades", 0),
+    };
+
     private static PlayerBio BioOf(Listed l, Details d, int primary, int secondary)
     {
         string shoots = string.IsNullOrWhiteSpace(d.Shoots) ? "L" : d.Shoots.Trim().ToUpperInvariant()[..1];
@@ -409,4 +465,8 @@ public sealed class PlayersSpec
     public string Details { get; set; }
     /// <summary>false: players not in the game are listed, not created (e.g. the USHL: only existing prospects move).</summary>
     public bool Create { get; set; } = true;
+    /// <summary>"none": every placed player's NHL contract is cleared the way the game's own NCAA prospects have it
+    /// (status 0, length 0, salary 0, not two-way), whatever deal he had; null leaves contracts alone.</summary>
+    public string Contract { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore] public bool NoContract => string.Equals(Contract, "none", StringComparison.OrdinalIgnoreCase);
 }

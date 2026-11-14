@@ -15,7 +15,11 @@ public sealed class TeamRow
     public string League { get; init; }
     public string Team { get; init; }
     public List<Kit> Kits { get; init; }
-    public string Display => UniformNames.Pretty(Team);
+    /// <summary>An installed package's team: its database team (it has no kit folders of its own; <see cref="Kits"/>
+    /// are the ones its jersey menu shows) and its name.</summary>
+    public JerseySlots.KitTeam KitTeam { get; init; }
+    public string Name { get; init; }
+    public string Display => Name ?? UniformNames.Pretty(Team);
     public string Meta => $"{League.ToUpperInvariant()}  ·  {Kits.Count} kit{(Kits.Count == 1 ? "" : "s")}";
 }
 
@@ -161,6 +165,21 @@ public partial class UniformsPage : UserControl
         var kits = await Task.Run(() => Kits.Find(mods.Index));
         _teams = kits.GroupBy(k => (k.League, k.Team)).Select(g => new TeamRow { League = g.Key.League, Team = g.Key.Team, Kits = g.ToList() })
                      .OrderBy(t => t.League == "nhl" ? 0 : 1).ThenBy(t => t.League).ThenBy(t => t.Team).ToList();
+        // the installed packages' teams (league "mod"): the kits their jersey menus show
+        try
+        {
+            var db = await mods.OpenDbAsync(JerseySlots.Database);
+            var mod = await Task.Run(() =>
+            {
+                var kitTeams = JerseySlots.Teams(db, kits);
+                return ModPackages.Teams(mods, db).Values
+                    .Select(p => new TeamRow { League = "mod", Team = $"{p.Team.Code.ToLowerInvariant()} {p.KitTeam.Name.ToLowerInvariant()}", Name = $"{p.KitTeam.Name} ({p.Team.Code})",
+                                               KitTeam = p.KitTeam, Kits = ModPackages.MenuKits(db, p.Team.Index, kits, kitTeams) })
+                    .Where(t => t.Kits.Count > 0).OrderBy(t => t.Name).ToList();
+            });
+            _teams.InsertRange(_teams.FindLastIndex(t => t.League == "nhl") + 1, mod);
+        }
+        catch (Exception ex) { StatusChanged?.Invoke("Uniforms: the mods' teams aren't listed: " + ex.Message); }
         var leagues = new List<string> { "All leagues" };
         leagues.AddRange(_teams.Select(t => t.League).Distinct().OrderBy(l => l == "nhl" ? "" : l));
         _suppress = true;

@@ -723,6 +723,14 @@
                                                 <TextBlock Text="Write &amp; add to team" Margin="8,0,0,0" />
                                             </StackPanel>
                                         </Button>
+                                        <Button x:Name="SlotExport" DockPanel.Dock="Right" Style="{StaticResource Ghost}" Padding="12,6" Margin="0,0,8,0"
+                                                Click="OnExportToMod" IsEnabled="False" Visibility="Collapsed"
+                                                ToolTip="Save this uniform into the mod's source folder for the picked team (Home, Away or Third by Menu name). Installing the mod writes it into the game.">
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="&#xE74E;" Style="{StaticResource Icon}" FontSize="12" />
+                                                <TextBlock Text="Export to mod" Margin="8,0,0,0" />
+                                            </StackPanel>
+                                        </Button>
                                         <TextBlock x:Name="SlotStatus" Style="{StaticResource Caption}" FontSize="11" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,10,0" />
                                     </DockPanel>
                                 </StackPanel>

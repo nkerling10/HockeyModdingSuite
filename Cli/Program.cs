@@ -103,6 +103,7 @@ public static class Program
                 "package-status" => PackageStatusCmd(game, opts),
                 "package-codemods" => PackageCodeModsCmd(game, opts),
                 "package-players" => PackagePlayersCmd(game, opts),
+                "package-uniforms" => PackageUniformsCmd(game, opts),
                 "who" => WhoCmd(game, opts),
                 "string-room" => StringRoomCmd(game, opts),
                 "kyty-releases" => KytyReleasesCmd(opts),
@@ -1236,6 +1237,7 @@ public static class Program
             () => OpenIndex(game, false));
         foreach (var l in r.Lines) Console.WriteLine("  " + l);
         foreach (var w in r.Warnings) Console.WriteLine("  warning: " + w);
+        if (r.Timings.Count > 0) Console.WriteLine("  time: " + string.Join("; ", r.Timings));
         if (dry) { Console.WriteLine("dry run: nothing written"); return 0; }
         Console.WriteLine($"installed: {r.Entry.Summary}\nstate: {Mods().State(r.Entry, game)}");
         Console.WriteLine($"code mods: {r.CodeModsFile}");
@@ -1302,6 +1304,25 @@ public static class Program
             File.WriteAllText(eo, System.Text.Json.JsonSerializer.Serialize(r.Entries.OrderBy(e => e.ArtId).Select(e => new[] { e.ArtId, e.Offset })));
             Console.WriteLine($"class table ({r.Entries.Count}) written to {eo}");
         }
+        if (opts.Get("names-out") is { } no)                     // commits by name, as package-codemods --names reads them
+        {
+            File.WriteAllText(no, System.Text.Json.JsonSerializer.Serialize(r.NameCommits.Select(c => new object[] { c.Name, c.Team, c.Offset })));
+            Console.WriteLine($"commits by name ({r.NameCommits.Count}) written to {no}");
+        }
+        return 0;
+    }
+
+    /// <summary>package-uniforms FOLDER: read only. The package's exported uniforms: the jersey menus they make (in memory)
+    /// and the texture and stamp bytes an install would write.</summary>
+    private static int PackageUniformsCmd(string game, Options opts)
+    {
+        string folder = opts.Positional.FirstOrDefault() ?? throw new ArgumentException("package-uniforms needs the package folder");
+        var spec = NHL27Kit.Core.Packages.PackageSpec.Load(folder);
+        var index = OpenIndex(game, false);
+        var db = new Legacy(index).OpenDb(Roster.Database);
+        var r = NHL27Kit.Core.Packages.PackageInstaller.CheckUniforms(index, spec, db);
+        foreach (var l in r.Lines) Console.WriteLine("  " + l);
+        foreach (var w in r.Warnings) Console.WriteLine("  warning: " + w);
         return 0;
     }
 

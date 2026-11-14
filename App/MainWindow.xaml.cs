@@ -1075,6 +1075,7 @@ public partial class MainWindow : Window
             if (a.TryGetValue("jscroll", out var sscr) && double.TryParse(sscr, out double ssy)) { StudioPage.StudioScroll(ssy); await Task.Delay(400); }
             if (a.ContainsKey("jwrite")) { await StudioPage.WriteStudio(); await Task.Delay(3000); }
             if (a.ContainsKey("jaddteam")) { await StudioPage.AddToTeam(true); await Task.Delay(3000); }
+            if (a.ContainsKey("jexport")) { await Task.Delay(8000); await StudioPage.ExportToMod(); await Task.Delay(1500); }
         }
         if (a.TryGetValue("page", out var dbPage) && dbPage == "database")
         {

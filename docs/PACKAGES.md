@@ -17,6 +17,14 @@ top of those instead.
   package.json        the recipe (below)
   data/               inputs the recipe reads (teams.json, players.json)
   logos/league/logo.png, logos/teams/<CODE>/logo.png (+ logo_lightbg.png, mono.png, ice.png)
+  rinks/<CODE>.png    optional top-down rink layout (TheFaceoff.net 5000x2236): the team's centre ice is cut from it
+                      (CenterIce.Logo) onto the team's own logo art id only; a team on the shared placeholder is skipped.
+                      PNG only (a .jpg is reported); folder set by "rinks", default "rinks"
+  <league>/uniforms/<CODE>/<home|away|third>/uniform.json + PNGs + stamp_*.ebx: team uniforms exported by the Jersey
+                      Studio ("Export to mod"), recipe "uniforms" (per league). Each was rendered for one free kit
+                      folder of the game, recorded in uniform.json (folder, artId, label, light); the installer writes
+                      the textures and stamps into that folder and makes the team's jersey menu exactly its uniforms
+                      (home, away, third first). A team with none keeps the template's jerseys.
   build/              pack output and install reports
 ```
 `package-build` zips the folder into a format-2 `.nhl27mod` with one item of kind `package`.
@@ -43,7 +51,10 @@ package).
 **Status 2026-11-10:** built: `package-check`, `package-install` (+ `--dry`, `--emulator`), `package-remove`,
 `package-status`, `package-codemods`. Core/Packages: PackageSpec, PackageCheck, PackageInstaller, Png, NcaaCodeMods.
 Players step built (PackagePlayers; `package-players FOLDER` runs it read-only). The players file is
-{ team: { season: { "First Last": { birthdate, position, shoots, height, weight, hometown, jersey_number } } } }.
+{ team: { season: { "First Last": { birthdate, position, shoots, height, weight, hometown, jersey_number, class,
+draft: { year, round, pick, team } } } } }. `draft` (NHL team abbreviation) is written to the bio of a placed player
+(created or moved) and of an exactly matched commit: draftyear/round/position/team, and proteam = the drafting team
+unless the game has his rights with another team. No `draft`: the game's draft stays (a created player is undrafted).
 Current-season roster players are matched and moved (taking the file's number and size), or created from the file, then given the NCAA bio (team -1, juniorteam = school, juniorleague) and
 rules.faceProtector; later seasons (commits) are only listed for now.
 Not built yet: the DbEditor take-down/re-apply hook, pack build (format 2), App UI, standalone installer.

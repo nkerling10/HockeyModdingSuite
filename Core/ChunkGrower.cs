@@ -44,11 +44,11 @@ public static class ChunkGrower
 
         var plan = new ChunkPlan { Copies = copies.Count };
         // the new bytes, once per CAS file and per kind (whole chunk, or its end)
-        var added = new Dictionary<(string File, bool Tail), uint>();
+        var added = new Dictionary<(string File, bool Tail, int Length), uint>();
         uint AddedAt(string cas, bool isTail, byte[] stored)
         {
             string rel = Rel(cas);
-            if (added.TryGetValue((rel, isTail), out uint at)) return at;
+            if (added.TryGetValue((rel, isTail, stored.Length), out uint at)) return at;
             long length = ends.TryGetValue(rel, out long planned) ? planned : new FileInfo(cas).Length;
             long offset = (length + 15) & ~15L;
             if (offset + stored.Length > uint.MaxValue) throw new InvalidDataException($"{rel} would pass 4 GB, past what a TOC offset holds.");
@@ -57,7 +57,7 @@ public static class ChunkGrower
             plan.Patches.Add(new PatchData(rel, length, Array.Empty<byte>(), data, "appended chunk", Append: true));
             ends[rel] = length + data.Length;
             plan.Notes.Add($"{stored.Length:N0} stored bytes added to {rel} at 0x{offset:X} (was {length:N0} bytes long)");
-            return added[(rel, isTail)] = (uint)offset;
+            return added[(rel, isTail, stored.Length)] = (uint)offset;
         }
 
         // the TOC entries: offset and size, big-endian
@@ -78,12 +78,30 @@ public static class ChunkGrower
             if (!oldShas.TryGetValue(place, out var sha)) oldShas[place] = sha = SHA1.HashData(index.ReadStored(at));
             return sha;
         }
-        // a record's SHA1 is of the whole stored chunk, also when its bundle holds only the end
-        var whole = live.FirstOrDefault(c => c.LogicalOffset == 0);
+        // a record's SHA1 is of the whole stored chunk, also when its bundle holds only the end (a tail) or only the
+        // start (a head: the first blocks of the whole, e.g. a streamed texture's bundle copy)
+        var whole = live.Where(c => c.LogicalOffset == 0).OrderByDescending(c => c.Ref.Size).FirstOrDefault();
+        byte[] oldWhole = null;
+        var heads = new Dictionary<uint, byte[]>();
+        // a head's new bytes: as many of the new chunk's blocks as the old head held of the old chunk's
+        byte[] Head(ChunkCopy c)
+        {
+            if (heads.TryGetValue(c.Ref.Size, out var h)) return h;
+            oldWhole ??= index.ReadStored(whole.Ref);
+            var old = index.ReadStored(c.Ref);
+            if (old.Length > oldWhole.Length || !old.AsSpan().SequenceEqual(oldWhole.AsSpan(0, old.Length)))
+                throw new InvalidDataException($"{c.BundleName} holds part of the chunk that isn't its start; nothing was planned.");
+            long at = 0; int blocks = 0;
+            foreach (var b in FrostbiteBlocks.Parse(oldWhole)) { if (at >= old.Length) break; at += 8 + b.CompSize; blocks++; }
+            if (at != old.Length) throw new InvalidDataException($"{c.BundleName} holds part of a block of the chunk; nothing was planned.");
+            long len = FrostbiteBlocks.Parse(newStored).Take(blocks).Sum(b => 8L + b.CompSize);
+            return heads[c.Ref.Size] = newStored[..(int)len];
+        }
         foreach (var c in live)
         {
             bool isTail = c.LogicalOffset != 0;
-            byte[] stored = isTail ? tail.Value.Stored : newStored;
+            bool isHead = !isTail && whole != null && c.Ref.Size < whole.Ref.Size;
+            byte[] stored = isTail ? tail.Value.Stored : isHead ? Head(c) : newStored;
             uint offset = AddedAt(layout.CasPath(c.Ref.Catalog, c.Ref.Cas, c.Ref.Patch), isTail, stored);
             U32(c.Toc, c.Ref.OffsetPos, offset, true, $"toc {c.Kind} offset");
             U32(c.Toc, c.Ref.SizePos, (uint)stored.Length, true, $"toc {c.Kind} size");
@@ -94,10 +112,11 @@ public static class ChunkGrower
             var item = rec.Chunks.First(x => x.Id == chunkId);
             string recFile = layout.CasPath(r0.Catalog, r0.Cas, r0.Patch);
             if (isTail && whole == null) throw new InvalidDataException($"{c.BundleName} holds only the end of a chunk nothing holds whole.");
-            byte[] oldSha = OldSha(isTail ? whole.Ref : c.Ref);
+            byte[] oldSha = OldSha(isTail || isHead ? whole.Ref : c.Ref);
             if (!item.Sha1.AsSpan().SequenceEqual(oldSha))
                 throw new InvalidDataException($"The record of {c.BundleName} holds a SHA1 that isn't the stored chunk's; nothing was planned.");
-            U32(recFile, item.SizePos, RawSize(stored), false, "record logical size");
+            // a head keeps its logical size (the part of the chunk it lists is the same size as before)
+            if (!isHead) U32(recFile, item.SizePos, RawSize(stored), false, "record logical size");
             if (done.Add((Rel(recFile), item.Sha1Pos)))
                 plan.Patches.Add(new PatchData(Rel(recFile), item.Sha1Pos, item.Sha1, SHA1.HashData(newStored), "record SHA1"));
         }
