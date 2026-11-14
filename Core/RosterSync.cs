@@ -475,6 +475,9 @@ public static class RosterSync
         var bf = bio.Fields.ToDictionary(x => x.Name);
         var rf = rt.Fields.ToDictionary(x => x.Name);
         var tables = RosterTables(db);
+        // each roster table's keys and rows by team, read once and kept up to date below (scanning the table for every
+        // player took seconds for a package's thousand-odd players)
+        var rowsOf = tables.ToDictionary(x => x.Table, x => new RosterRows(db, x.Table));
         var nhlTeams = TeamIndex(db).Values.ToHashSet();
         var arrivals = new HashSet<int>();
         var touched = new HashSet<int>();
@@ -518,7 +521,7 @@ public static class RosterSync
                 continue;
             }
             // a team with 40 players takes no more: he stays where he is, the other changes still go in
-            if (tables.Any(x => ArrivesIn(x.Table, x.RowOf, pi, c) && !HasFreeSlot(db, x.Table, c.ToTeam)))
+            if (tables.Any(x => ArrivesIn(x.Table, x.RowOf, pi, c) && !rowsOf[x.Table].HasFreeSlot(c.ToTeam)))
             {
                 full.Add(c.Name);
                 continue;
@@ -531,7 +534,7 @@ public static class RosterSync
                 {
                     // a player who has a roster row elsewhere stays out of the copies he isn't in
                     if (c.RosterRow >= 0) continue;
-                    row = CreateRosterRow(db, t, pi, c);
+                    row = CreateRosterRow(db, t, pi, c, rowsOf[t]);
                     rowOf[pi] = row;
                     createdRow = true;
                     createdPis.Add(pi);
@@ -548,8 +551,10 @@ public static class RosterSync
                 }
                 else if (oldTeam != c.ToTeam)
                 {
+                    var was = rowsOf[t].Before(row);
                     SetIn(t, row, f["team"], c.ToTeam);
-                    SetIn(t, row, f["key"], FreeKey(db, t, c.ToTeam));
+                    SetIn(t, row, f["key"], rowsOf[t].FreeKey(c.ToTeam));
+                    rowsOf[t].After(row, was);
                     arrivals.Add(pi);
                     touched.Add(oldTeam);
                     touched.Add(c.ToTeam);
@@ -600,7 +605,7 @@ public static class RosterSync
         // every team that gained or lost a player gets its lines built again from its players
         foreach (var (t, _) in tables)
         {
-            foreach (int team in touched) RosterLines.Build(db, t, team);
+            RosterLines.Build(db, t, touched);
             SortByKey(db, t);
         }
         string left = full.Count == 0 ? "" : $"; {full.Count} not moved, their team has 40 players ({string.Join(", ", full.Take(5))}{(full.Count > 5 ? ", ..." : "")})";
@@ -660,7 +665,7 @@ public static class RosterSync
     /// first; only when there is none is the table grown with SetWritten, as JerseySlots does. Returns the row.
     /// Throws when the table has no free row, no valid row to copy, or no free key on the team (40 players).
     /// </summary>
-    private static int CreateRosterRow(T3Db db, T3Table t, int pi, SyncChange c)
+    private static int CreateRosterRow(T3Db db, T3Table t, int pi, SyncChange c, RosterRows rows = null)
     {
         var f = t.Fields.ToDictionary(x => x.Name);
         if (!f.ContainsKey("playerindex") || !f.ContainsKey("team") || !f.ContainsKey("key") || !f.ContainsKey("jersey"))
@@ -671,10 +676,11 @@ public static class RosterSync
             if (v >= field.RangeLow && v <= max) db.Set(t, row, field, v);
         }
         // FreeKey must be taken before the new row is written: once written, the row itself would count as used.
-        int key = FreeKey(db, t, c.ToTeam);
-        int template = -1;
-        for (int r = 0; r < t.WrittenRecords; r++)
-            if (!db.IsInvalid(t, r) && (int)db.Get(t, r, f["team"]) == c.ToTeam) { template = r; break; }
+        int key = rows?.FreeKey(c.ToTeam) ?? FreeKey(db, t, c.ToTeam);
+        int template = rows?.FirstOf(c.ToTeam) ?? -1;
+        if (rows == null)
+            for (int r = 0; r < t.WrittenRecords; r++)
+                if (!db.IsInvalid(t, r) && (int)db.Get(t, r, f["team"]) == c.ToTeam) { template = r; break; }
         if (template < 0)
             for (int r = 0; r < t.WrittenRecords; r++)
                 if (!db.IsInvalid(t, r)) { template = r; break; }
@@ -696,6 +702,7 @@ public static class RosterSync
         foreach (var s in t.Fields.Where(IsLineSlot)) db.Set(t, row, s, 0);
         if (f.TryGetValue("captain", out var cap)) SetIn(row, cap, 0);
         if (f.TryGetValue("rosterstatus", out var st)) SetIn(row, st, 1);
+        rows?.After(row, null);
         return row;
     }
 
@@ -715,6 +722,74 @@ public static class RosterSync
         for (int s = 0; s < 40; s++)
             if (!used.Contains(s)) return team * 40 + s;
         throw new InvalidOperationException($"Team {team} already has 40 players.");
+    }
+
+    /// <summary>How many rows of a roster table each team's keys (team × 40 + slot) hold, as <see cref="HasFreeSlot"/> counts them.</summary>
+    internal static Dictionary<int, int> KeyCounts(T3Db db, T3Table t)
+    {
+        var kf = t.Fields.First(f => f.Name == "key");
+        var n = new Dictionary<int, int>();
+        for (int r = 0; r < t.WrittenRecords; r++)
+            if (!db.IsInvalid(t, r)) { int team = (int)db.Get(t, r, kf) / 40; n[team] = n.GetValueOrDefault(team) + 1; }
+        return n;
+    }
+
+    /// <summary>
+    /// A roster table's keys (team × 40 + slot) and valid rows by team, read once and kept up to date by the caller
+    /// (<see cref="Before"/> / <see cref="After"/> around a change of a row's team or key, <see cref="After"/> alone for a
+    /// new row). Answers as <see cref="HasFreeSlot"/>, <see cref="FreeKey"/> and the first row of a team on the table as
+    /// it is now, without a scan of the table each time.
+    /// </summary>
+    private sealed class RosterRows
+    {
+        private readonly T3Db _db;
+        private readonly T3Table _t;
+        private readonly T3Field _key, _team;
+        private readonly Dictionary<int, Dictionary<int, int>> _slots = new();   // key / 40 -> key % 40 -> rows
+        private readonly Dictionary<int, int> _count = new();                    // key / 40 -> rows
+        private readonly Dictionary<int, SortedSet<int>> _rows = new();          // team field -> rows
+
+        public RosterRows(T3Db db, T3Table t)
+        {
+            _db = db; _t = t;
+            _key = t.Fields.First(f => f.Name == "key");
+            _team = t.Fields.First(f => f.Name == "team");
+            for (int r = 0; r < t.WrittenRecords; r++)
+                if (!db.IsInvalid(t, r)) After(r, null);
+        }
+
+        private void Count(int key, int d)
+        {
+            int team = key / 40, slot = key % 40;
+            if (!_slots.TryGetValue(team, out var m)) _slots[team] = m = new();
+            int n = m.GetValueOrDefault(slot) + d;
+            if (n == 0) m.Remove(slot); else m[slot] = n;
+            _count[team] = _count.GetValueOrDefault(team) + d;
+        }
+
+        private SortedSet<int> RowsOf(int team) => _rows.TryGetValue(team, out var s) ? s : _rows[team] = new SortedSet<int>();
+
+        public bool HasFreeSlot(int team) => _count.GetValueOrDefault(team) < 40;
+
+        public int FreeKey(int team)
+        {
+            var used = _slots.GetValueOrDefault(team);
+            for (int s = 0; s < 40; s++)
+                if (used == null || !used.ContainsKey(s)) return team * 40 + s;
+            throw new InvalidOperationException($"Team {team} already has 40 players.");
+        }
+
+        /// <summary>The team's first row, or -1.</summary>
+        public int FirstOf(int team) => _rows.TryGetValue(team, out var s) && s.Count > 0 ? s.Min : -1;
+
+        public (int Key, int Team) Before(int row) => ((int)_db.Get(_t, row, _key), (int)_db.Get(_t, row, _team));
+
+        public void After(int row, (int Key, int Team)? before)
+        {
+            if (before is { } b) { Count(b.Key, -1); RowsOf(b.Team).Remove(row); }
+            Count((int)_db.Get(_t, row, _key), 1);
+            RowsOf((int)_db.Get(_t, row, _team)).Add(row);
+        }
     }
 
     internal static bool HasFreeSlot(T3Db db, T3Table t, int team)

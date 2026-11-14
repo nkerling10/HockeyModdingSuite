@@ -41,15 +41,34 @@ public static class RosterLines
     private static readonly string[] CategoryOrder = { "g", "l", "pp", "pp4", "pk4", "pk3", "ev4", "ev3", "three", "s" };
 
     /// <summary>Rebuilds every slot of one team in one roster table. Returns the number of players dressed.</summary>
-    public static int Build(T3Db db, T3Table t, int team)
+    public static int Build(T3Db db, T3Table t, int team) => Build(db, t, team, PlayerInfo(db), null);
+
+    /// <summary>
+    /// <see cref="Build(T3Db, T3Table, int)"/> for several teams of one table. Building lines changes only the table's
+    /// slots and rosterstatus, so the players' positions and overalls and the table's rows by team are read once for all
+    /// of them, not once per team (a package's 160-odd teams read the whole bio table hundreds of times).
+    /// </summary>
+    public static void Build(T3Db db, T3Table t, IEnumerable<int> teams)
+    {
+        var want = teams.ToHashSet();
+        if (want.Count == 0) return;
+        var tf = t.Fields.First(x => x.Name == "team");
+        var rowsOf = want.ToDictionary(x => x, _ => new List<int>());
+        for (int r = 0; r < t.WrittenRecords; r++)
+            if (!db.IsInvalid(t, r) && rowsOf.TryGetValue((int)db.Get(t, r, tf), out var rows)) rows.Add(r);
+        var info = PlayerInfo(db);
+        foreach (int team in want) Build(db, t, team, info, rowsOf[team]);
+    }
+
+    /// <param name="rows">The team's valid rows in the table, in order (null: found by a scan).</param>
+    private static int Build(T3Db db, T3Table t, int team, Dictionary<int, (int Position, int Overall, bool Left)> info, List<int> rows)
     {
         var f = t.Fields.ToDictionary(x => x.Name);
         var slots = t.Fields.Where(x => x.Type == T3FieldType.Integer && x.Depth == 1 && Category(x.Name) != null).ToList();
-        var info = PlayerInfo(db);
+        rows ??= Enumerable.Range(0, t.WrittenRecords).Where(r => !db.IsInvalid(t, r) && (int)db.Get(t, r, f["team"]) == team).ToList();
         var players = new List<Player>();
-        for (int r = 0; r < t.WrittenRecords; r++)
+        foreach (int r in rows)
         {
-            if (db.IsInvalid(t, r) || (int)db.Get(t, r, f["team"]) != team) continue;
             var (pos, ovr, left) = info.GetValueOrDefault((int)db.Get(t, r, f["playerindex"]), (-1, 0, true));
             if (pos >= 0) players.Add(new Player(r, pos, ovr, left));
         }
@@ -271,11 +290,15 @@ public static class RosterLines
     }
 
     /// <summary>Builds a team's lines automatically (as Build does) in both roster tables.</summary>
-    public static void BuildTeam(T3Db db, int team)
+    public static void BuildTeam(T3Db db, int team) => BuildTeams(db, new[] { team });
+
+    /// <summary><see cref="BuildTeam"/> for several teams (the players' info read once per table, not once per team).</summary>
+    public static void BuildTeams(T3Db db, IEnumerable<int> teams)
     {
         using var batch = db.Batch();
+        var list = teams.ToList();
         foreach (var name in new[] { Roster.RosterTable, RosterSync.OnlineRosterTable })
-            if (db.Table(name) is { } t) Build(db, t, team);
+            if (db.Table(name) is { } t) Build(db, t, list);
     }
 
     private static Dictionary<int, string> NamesByPlayerIndex(T3Db db)

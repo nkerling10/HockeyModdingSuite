@@ -83,26 +83,26 @@ public static class PackageCheck
         if (picks.Count < shortBy) lines.Add($"recycle: only {picks.Count} of the {shortBy} teams needed are retirable (league {rc.League}, \"{rc.NamePattern}\"" +
                                               (rc.Indexes != null ? ", the listed indexes" : "") + ", no players of their own)");
         var arenaUsers = Valid(db, teams).GroupBy(i => Int(teams, i, "arenaid")).ToDictionary(g => g.Key, g => g.Count());
-        foreach (var p in picks)
-        {
-            foreach (var (table, key) in new[] { ("exhibitionteams", "index"), ("exhibitionteamstrategies", "index"), ("customonlineteamstrategies", "index"),
-                                                 ("stockteamjerseys", "teamid"), ("stockteamequipmenttable", "team"), ("stockgoalieequipment", "team"),
-                                                 ("exhibitionrostertable", "team"), ("customonlinerostertable", "team") })
-                RemoveWhere(db, table, key, p.Index);
-            if (arenaUsers.GetValueOrDefault(p.Arena) == 1) RemoveWhere(db, "exhibitionarena", "index", p.Arena);
-            done.Add(p.Index);
-        }
+        // every retired team's rows in one pass per table (the kept rows keep their order and the rest is zeroed, as
+        // when they were removed team by team, which rewrote each table once per team)
+        var retired = picks.Select(p => p.Index).ToHashSet();
+        foreach (var (table, key) in new[] { ("exhibitionteams", "index"), ("exhibitionteamstrategies", "index"), ("customonlineteamstrategies", "index"),
+                                             ("stockteamjerseys", "teamid"), ("stockteamequipmenttable", "team"), ("stockgoalieequipment", "team"),
+                                             ("exhibitionrostertable", "team"), ("customonlinerostertable", "team") })
+            RemoveWhere(db, table, key, retired);
+        RemoveWhere(db, "exhibitionarena", "index", picks.Where(p => arenaUsers.GetValueOrDefault(p.Arena) == 1).Select(p => p.Arena).ToHashSet());
+        done.AddRange(picks.Select(p => p.Index));
         lines.Add($"Retired {done.Count} online event teams for room: {string.Join(", ", picks.Select(p => $"{p.Index} {p.Name}"))}");
         return done;
     }
 
-    private static void RemoveWhere(T3Db db, string table, string key, int value)
+    private static void RemoveWhere(T3Db db, string table, string key, IReadOnlySet<int> values)
     {
         var t = db.Table(table);
         var f = t?.Fields.FirstOrDefault(x => x.Name.Equals(key, StringComparison.OrdinalIgnoreCase));
-        if (f == null) return;
+        if (f == null || values.Count == 0) return;
         var rows = Enumerable.Range(0, t.WrittenRecords).ToList();
-        var gone = rows.Where(i => !db.IsInvalid(t, i) && Convert.ToInt32(db.Get(t, i, f)) == value).ToHashSet();
+        var gone = rows.Where(i => !db.IsInvalid(t, i) && values.Contains(Convert.ToInt32(db.Get(t, i, f)))).ToHashSet();
         if (gone.Count == 0) return;
         db.Reorder(t, rows.Where(i => !gone.Contains(i)).Concat(rows.Where(gone.Contains)).ToList());
         db.SetWritten(t, t.WrittenRecords - gone.Count);

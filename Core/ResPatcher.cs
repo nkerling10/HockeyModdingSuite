@@ -43,7 +43,7 @@ public static class ResPatcher
             var info = index.BundleList[b];
             var tb = tocs.Get(info.Toc).Bundles[info.BundleIndex];
             var head = tb.Entries[0];
-            var rec = BundleRecord.Read(index.ReadStored(head.Catalog, head.Cas, head.Patch, head.Offset, head.Size), head.Offset);
+            var rec = ChunkCopies.Record(index, head);
             int at = Items(rec).FindIndex(r => r.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
             if (at < 0) continue;
             var e = tb.Entries[Entry(rec, at)];
@@ -55,7 +55,7 @@ public static class ResPatcher
             var info = index.BundleList[b];
             var tb = tocs.Get(info.Toc).Bundles[info.BundleIndex];
             var head = tb.Entries[0];
-            var rec = BundleRecord.Read(index.ReadStored(head.Catalog, head.Cas, head.Patch, head.Offset, head.Size), head.Offset);
+            var rec = ChunkCopies.Record(index, head);
             int at = Items(rec).FindIndex(r => r.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
             if (at < 0) continue;
             var item = Items(rec)[at];
@@ -99,7 +99,7 @@ public static class ResPatcher
                 void U32(int pos, uint value, string note)
                 {
                     var old = new byte[4];
-                    using (var fs = new FileStream(toc, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) { fs.Position = pos; fs.ReadExactly(old); }
+                    HeldFiles.Read(toc, pos, old);
                     var neu = new byte[4];
                     System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(neu, value);
                     plan.Patches.Add(new PatchData(tocRel, pos, old, neu, note));

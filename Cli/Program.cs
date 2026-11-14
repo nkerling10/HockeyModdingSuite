@@ -1325,7 +1325,8 @@ public static class Program
         var spec = NHL27Kit.Core.Packages.PackageSpec.Load(folder);
         var db = new Legacy(OpenIndex(game, false)).OpenDb(Roster.Database);
         var r = new NHL27Kit.Core.Packages.PackageInstaller.Result();
-        NHL27Kit.Core.Packages.PackagePlayers.Apply(db, spec, r);
+        foreach (var g in spec.Groups) NHL27Kit.Core.Packages.PackagePlayers.Apply(db, g, r);
+        NHL27Kit.Core.Packages.PackagePlayers.ApplyCommits(db, r);
         NHL27Kit.Core.Packages.PackagePlayers.EntryYears(db, r, spec.Teams.Select(t => t.Index).ToHashSet());   // (no portraits step here)
         foreach (var l in r.Lines) Console.WriteLine("  " + l);
         foreach (var w in r.Warnings) Console.WriteLine("  warning: " + w);

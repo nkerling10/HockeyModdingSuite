@@ -42,6 +42,10 @@ public static class PackageInstaller
         /// <summary>Commits not in the game (name, school team index, seasons after the roster season): matched by name
         /// if the game generates them later (code mod part 11).</summary>
         public List<(string Name, int Team, int Offset)> NameCommits { get; } = new();
+        /// <summary>Each players file's commits, from its group's players step until PackagePlayers.ApplyCommits.</summary>
+        internal List<PackagePlayers.CommitBatch> PendingCommits { get; } = new();
+        /// <summary>Game players already placed for a current-season roster-file entry (one game player per entry).</summary>
+        internal HashSet<int> TakenPlayers { get; } = new();
         /// <summary>Current-season roster-file players placed by the players step: (team code, name slug) → game id.</summary>
         public Dictionary<(string Code, string Slug), int> Placed { get; } = new();
         /// <summary>How long each install step took.</summary>
@@ -99,23 +103,31 @@ public static class PackageInstaller
         var nameSets = PackageCheck.NameSets(loc);
         foreach (var g in spec.Groups) ApplyLeague(db, loc, g, g == spec ? resolved.LeagueArt : resolved.LeagueArts.GetValueOrDefault(g.League.Id, -1), r);
         ApplyTeams(db, loc, spec, resolved, nameSets, r);
+        Took("leagues and teams (database)");
         foreach (var g in spec.Groups) PackagePlayers.Apply(db, g, r);
+        PackagePlayers.ApplyCommits(db, r);
+        Took("players (database)");
         var portraits = PackagePortraits.Assign(index, legacy, db, spec, r);
+        Took("portrait slots (database)");
         PackagePlayers.EntryYears(db, r, spec.Teams.Select(t => t.Index).ToHashSet());
         foreach (var (id, text) in spec.Strings ?? new()) SetString(loc, id, text, r);
+        Took("classes and strings (database)");
         // the teams' own uniforms (Jersey Studio exports): their jersey menus now, their kit folders' bytes in step 4
         var uniforms = spec.Groups.Any(g => PackageUniforms.Folder(g) != null)
             ? PackageUniforms.ApplySlots(db, Kits.Find(index), spec, r) : new();
+        Took("uniform slots (database)");
 
         dbBatch.Dispose();
         locBatch.Dispose();
-        Took("teams, players, uniforms (database)");
+        Took("database checksums");
         // 4. bytes
         var tocs = new TocCache(index);
         var locations = LocationIndex.Build(index, tocs);
         var patches = new List<PatchData>();
         // planning reads the same bundle records for thousands of textures: once each (nothing is written until step 6)
         using var records = ChunkCopies.CacheRecords();
+        // planning reads the same TOC and CAS files thousands of times: one read handle each (closed before step 6 writes)
+        using var held = HeldFiles.Keep();
         // encoded textures (logos, portraits, uniforms) kept between installs: only new or changed images are encoded
         // (a dry run keeps what it encodes but deletes nothing)
         using var encoded = PlanCache.Begin(Path.Combine(StateDir(store, spec.Id), "cache"), prune: !dry);
@@ -146,6 +158,7 @@ public static class PackageInstaller
             codeMods["mods"]!.AsArray().Add(m);
         }
 
+        held.Dispose();
         r.Report = Report(spec, resolved, r);
         if (dry)
         {
@@ -413,27 +426,21 @@ public static class PackageInstaller
     {
         public Dictionary<string, long> Ends { get; } = new();
         public Dictionary<Guid, List<string>> ChunkOwners { get; } = new();
-        /// <summary>Seconds spent: in-place planning (encode + patch plan), finding copies + reframing, growing.</summary>
-        public double InPlace, Copies, Grow;
+        /// <summary>Seconds spent: in-place planning (encode + patch plan), finding copies + reframing, growing; reading
+        /// the logo files (and the rink cut) and fitting them to each texture's size.</summary>
+        public double InPlace, Copies, Grow, Load, Fit;
     }
 
     private static void PlanLogos(AssetIndex index, PackageSpec spec, Resolved res, LocationIndex locations, TocCache tocs, List<PatchData> patches, Result r, Action<string> log)
     {
+        var scan = System.Diagnostics.Stopwatch.StartNew();
         var map = TeamLogos.All(index);
         var st = new LogoState();
         // every menu/league logo texture's chunk id: a chunk shared by two textures can't be given new data for one of them
-        foreach (string name in index.Res.Keys.Where(k => k.StartsWith("ui/textures/common/teamlogos/", StringComparison.OrdinalIgnoreCase)
-                                                        || k.StartsWith("ui/textures/common/leaguelogos/", StringComparison.OrdinalIgnoreCase)
-                                                        || k.StartsWith("content/worlds/rink/textures/centerlogo/", StringComparison.OrdinalIgnoreCase)).ToList())
-        {
-            try
-            {
-                var h = TextureHeader.Parse(index.Read(index.GetRes(name)), ps4: !index.Layout.IsPs5);
-                if (!st.ChunkOwners.TryGetValue(h.ChunkId, out var l)) st.ChunkOwners[h.ChunkId] = l = new List<string>();
-                l.Add(name);
-            }
-            catch { /* not a texture header we read */ }
-        }
+        ScanOwners(index, index.Res.Keys.Where(k => k.StartsWith("ui/textures/common/teamlogos/", StringComparison.OrdinalIgnoreCase)
+                                                || k.StartsWith("ui/textures/common/leaguelogos/", StringComparison.OrdinalIgnoreCase)
+                                                || k.StartsWith("content/worlds/rink/textures/centerlogo/", StringComparison.OrdinalIgnoreCase)), st);
+        log($"logo textures and their chunks found in {scan.Elapsed.TotalSeconds:0.0} s ({st.ChunkOwners.Count} chunks)");
         var drawn = new HashSet<int>();
         foreach (var t in spec.AllTeams)
         {
@@ -442,11 +449,13 @@ public static class PackageInstaller
             main ??= spec.LeagueLogoFile();                              // no logo yet: the shared placeholder, the league logo
             if (main == null || !res.LogoArt.TryGetValue(t.Code, out int art)) { r.Warnings.Add($"{t.Code}: no logo file or art id, logos left as they are"); continue; }
             if (!drawn.Add(art)) continue;                               // the placeholder id is drawn once
+            var loading = System.Diagnostics.Stopwatch.StartNew();
             string Extra(string kind) => placeholder ? null : spec.TeamExtraFile(t, kind);
-            var img = Png.Load(main);
-            var light = Extra("lightbg") is { } lf ? Png.Load(lf) : img;
-            var mono = Extra("mono") is { } mf ? Png.Load(mf) : (Png.Silhouette(img.Rgba), img.W, img.H);
-            var ice = Extra("ice") is { } icf ? Png.Load(icf) : img;
+            // decoded only if a texture isn't in the plan cache (Source)
+            var img = Source.File(main);
+            var light = Extra("lightbg") is { } lf ? Source.File(lf) : img;
+            var mono = Extra("mono") is { } mf ? Source.File(mf) : Source.Derived("silhouette", img, i => (Png.Silhouette(i.Rgba), i.W, i.H));
+            var ice = Extra("ice") is { } icf ? Source.File(icf) : img;
             // a rink layout: centre ice cut from it, on this team's own art id only (never the shared placeholder's)
             string rink = spec.RinkFile(t);
             if (rink == null && spec.RinkJpeg(t) is { } jpg) r.Warnings.Add($"{t.Code}: {Path.GetFileName(jpg)} is a JPEG; save it as {t.Code}.png for its centre ice");
@@ -460,30 +469,29 @@ public static class PackageInstaller
                 else
                 {
                     var (logo, measured) = CenterIceCut(file, rink);
-                    ice = (logo, CenterIce.LogoSize, CenterIce.LogoSize);
+                    ice = Source.Of((logo, CenterIce.LogoSize, CenterIce.LogoSize));
                     r.Lines.Add($"{t.Code}: centre ice from {Path.GetFileName(rink)} (blue lines {(measured ? "measured" : "not found, template scale")})");
                 }
             }
-            int n = 0;
+            st.Load += loading.Elapsed.TotalSeconds;
+            var items = new List<(string, Source)>();
             foreach (var logo in map.Menu.GetValueOrDefault(art) ?? new List<TeamLogo>())
-            {
-                var src = MonoStyles.Contains(logo.Style) ? mono : logo.Style.Contains("lightbg") ? light : img;
-                if (PlanOne(index, logo.Name, src, locations, tocs, patches, r, st)) n++;
-            }
-            if (map.Ice.TryGetValue(art, out var iceLogo) && PlanOne(index, iceLogo.Name, ice, locations, tocs, patches, r, st)) n++;
+                items.Add((logo.Name, MonoStyles.Contains(logo.Style) ? mono : logo.Style.Contains("lightbg") ? light : img));
+            if (map.Ice.TryGetValue(art, out var iceLogo)) items.Add((iceLogo.Name, ice));
+            int n = PlanMany(index, items, locations, tocs, patches, r, st);
             r.Lines.Add(placeholder ? $"placeholder (league logo): {n} logo textures on art id {art}, shared by the teams without a logo"
                                     : $"{t.Code}: {n} logo textures on art id {art}");
-            log($"{t.Code}: logos planned (so far: in place {st.InPlace:0} s, copies {st.Copies:0} s, grow {st.Grow:0} s)");
+            log($"{t.Code}: logos planned (so far: files {st.Load:0} s, fit {st.Fit:0} s, in place {st.InPlace:0} s, copies {st.Copies:0} s, grow {st.Grow:0} s)");
         }
         foreach (var g in spec.Groups)
         {
             string league = g.LeagueLogoFile();
             int la = g == spec ? res.LeagueArt : res.LeagueArts.GetValueOrDefault(g.League.Id, -1);
             if (league == null || la < 0) continue;
-            var img = Png.Load(league);
-            int n = 0;
-            foreach (string name in index.Res.Keys.Where(k => LeagueLogo.Match(k) is { Success: true } m && int.Parse(m.Groups[2].Value) == la).ToList())
-                if (PlanOne(index, name, img, locations, tocs, patches, r, st)) n++;
+            var img = Source.File(league);
+            int n = PlanMany(index, index.Res.Keys.Where(k => LeagueLogo.Match(k) is { Success: true } m && int.Parse(m.Groups[2].Value) == la)
+                                                 .Select(k => (k, img)).ToList(),
+                             locations, tocs, patches, r, st);
             r.Lines.Add($"league {g.League.Id}: {n} logo textures on art id {la}");
         }
     }
@@ -517,19 +525,8 @@ public static class PackageInstaller
     {
         if (plan.Count == 0) return;
         var st = new LogoState();
-        foreach (string name in index.Res.Keys.Where(k => k.StartsWith(PortraitSync.Prefix, StringComparison.Ordinal)).ToList())
-        {
-            try
-            {
-                var h = TextureHeader.Parse(index.Read(index.GetRes(name)), ps4: !index.Layout.IsPs5);
-                if (!st.ChunkOwners.TryGetValue(h.ChunkId, out var l)) st.ChunkOwners[h.ChunkId] = l = new List<string>();
-                l.Add(name);
-            }
-            catch { /* not a texture header we read */ }
-        }
-        int n = 0;
-        foreach (var p in plan)
-            if (PlanOne(index, PortraitSync.TextureName(p.Slot), Png.Load(p.File), locations, tocs, patches, r, st)) n++;
+        ScanOwners(index, index.Res.Keys.Where(k => k.StartsWith(PortraitSync.Prefix, StringComparison.Ordinal)), st);
+        int n = PlanMany(index, plan.Select(p => (PortraitSync.TextureName(p.Slot), Source.File(p.File))).ToList(), locations, tocs, patches, r, st);
         r.Lines.Add($"portraits: {n} of {plan.Count} textures written");
     }
 
@@ -561,27 +558,36 @@ public static class PackageInstaller
         // every kit texture's chunk id: a chunk two textures use can't take new data for one of them; stored bytes several
         // chunks share (identical data stored once) get a copy of their own (PlanOne)
         var st = new LogoState();
-        foreach (string name in index.Res.Keys.Where(k => k.StartsWith(Kits.Root, StringComparison.OrdinalIgnoreCase)).ToList())
+        ScanOwners(index, index.Res.Keys.Where(k => k.StartsWith(Kits.Root, StringComparison.OrdinalIgnoreCase)), st);
+        // every uniform's textures encoded together (in parallel, cached: Prepare), then planned in order as before
+        var items = new List<(string Name, Source Src)>();
+        var itemOf = new Dictionary<(int Uniform, int Texture), int>();
+        for (int ui = 0; ui < uniforms.Count; ui++)
         {
-            try
+            var (_, u, kit) = uniforms[ui];
+            int ti = 0;
+            foreach (var (slot, file) in u.Textures)
             {
-                var h = TextureHeader.Parse(index.Read(index.GetRes(name)), ps4: !index.Layout.IsPs5);
-                if (!st.ChunkOwners.TryGetValue(h.ChunkId, out var l)) st.ChunkOwners[h.ChunkId] = l = new List<string>();
-                l.Add(name);
+                string path = Path.Combine(u.Dir, file);
+                if (kit.Slot(slot) is { } kt && File.Exists(path)) { itemOf[(ui, ti)] = items.Count; items.Add((kt.Name, Source.File(path))); }
+                ti++;
             }
-            catch { /* not a texture */ }
         }
-        foreach (var (t, u, kit) in uniforms)
+        var prepared = Prepare(index, items, st);
+        for (int ui = 0; ui < uniforms.Count; ui++)
         {
-            int textures = 0, stamps = 0;
+            var (t, u, kit) = uniforms[ui];
+            int textures = 0, stamps = 0, ti = -1;
             var skipped = new List<string>();
             foreach (var (slot, file) in u.Textures)
             {
+                ti++;
                 string path = Path.Combine(u.Dir, file);
                 if (kit.Slot(slot) is not { } kt) { skipped.Add($"{slot} (the folder has no such texture)"); continue; }
                 if (!File.Exists(path)) { skipped.Add($"{slot} ({file} missing)"); continue; }
                 int warned = r.Warnings.Count;
-                if (PlanOne(index, kt.Name, Png.Load(path), locations, tocs, patches, r, st)) textures++;
+                int k = itemOf[(ui, ti)];
+                if (PlanOne(index, kt.Name, prepared[k] == null ? items[k].Src.Image : default, locations, tocs, patches, r, st, prepared[k])) textures++;
                 else
                 {
                     // PlanOne's own warning, under this uniform's name
@@ -606,13 +612,125 @@ public static class PackageInstaller
         }
     }
 
-    private static bool PlanOne(AssetIndex index, string name, (byte[] Rgba, int W, int H) img, LocationIndex locations, TocCache tocs, List<PatchData> patches, Result r, LogoState st)
+    /// <summary>
+    /// An image textures are drawn from: a digest of what decides its pixels (a file's bytes, or how it was made from
+    /// another source), and the pixels, decoded only when needed. A texture is kept in the plan cache by its source's
+    /// digest and its layout (PlanMany), so a reinstall whose logos haven't changed reads and hashes each file but decodes
+    /// and resizes nothing.
+    /// </summary>
+    private sealed class Source
+    {
+        private readonly Lazy<(byte[] Rgba, int W, int H)> _image;
+        public byte[] Key { get; }
+        public (byte[] Rgba, int W, int H) Image => _image.Value;
+
+        private Source(byte[] key, Func<(byte[] Rgba, int W, int H)> make)
+        {
+            Key = key;
+            _image = new Lazy<(byte[] Rgba, int W, int H)>(make, LazyThreadSafetyMode.ExecutionAndPublication);
+        }
+
+        public static Source File(string path)
+        {
+            var bytes = System.IO.File.ReadAllBytes(path);
+            return new Source(Digest("png", bytes), () => Png.Decode(bytes, path));
+        }
+
+        public static Source Of((byte[] Rgba, int W, int H) img) => new(Digest($"rgba {img.W}x{img.H}", img.Rgba), () => img);
+
+        public static Source Derived(string how, Source from, Func<(byte[] Rgba, int W, int H), (byte[] Rgba, int W, int H)> make) =>
+            new(Digest(how, from.Key), () => make(from.Image));
+
+        private static byte[] Digest(string kind, byte[] data)
+        {
+            using var h = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+            h.AppendData(System.Text.Encoding.UTF8.GetBytes(kind + "|"));
+            h.AppendData(data);
+            return h.GetHashAndReset();
+        }
+    }
+
+    /// <summary>
+    /// Which textures use each chunk id, from every named texture's header (a chunk two textures use can't take new data
+    /// for one of them: PlanOne). The headers are read in parallel (each read opens its own files) and recorded in the
+    /// names' order; a name that isn't a texture we read is left out.
+    /// </summary>
+    private static void ScanOwners(AssetIndex index, IEnumerable<string> names, LogoState st)
+    {
+        var list = names.ToList();
+        var ids = new Guid?[list.Count];
+        Parallel.For(0, list.Count, new ParallelOptions { MaxDegreeOfParallelism = 8 }, i =>
+        {
+            try { ids[i] = TextureHeader.Parse(index.Read(index.GetRes(list[i])), ps4: !index.Layout.IsPs5).ChunkId; }
+            catch { /* not a texture header we read */ }
+        });
+        for (int i = 0; i < list.Count; i++)
+        {
+            if (ids[i] is not { } id) continue;
+            if (!st.ChunkOwners.TryGetValue(id, out var l)) st.ChunkOwners[id] = l = new List<string>();
+            l.Add(list[i]);
+        }
+    }
+
+    /// <summary>A texture's header and its encoded chunk, made ahead of PlanOne.</summary>
+    private sealed record Prepared(TextureHeader Header, byte[] Raw);
+
+    /// <summary>
+    /// PlanOne for many textures, in order. What doesn't depend on the plan so far (decoding the image, fitting it to the
+    /// texture's size, encoding it) is done for all of them in parallel first, and kept in the plan cache by the image's
+    /// source and the texture's layout ("texfit"; bump the version in its key when Png.Fit changes); the planning itself
+    /// (in place, copies, growing the CAS files) then runs one by one as before, so the patches and warnings come out the
+    /// same. A texture whose preparation failed is planned the old way and fails with the same warning.
+    /// </summary>
+    private static int PlanMany(AssetIndex index, IReadOnlyList<(string Name, Source Src)> items,
+                                LocationIndex locations, TocCache tocs, List<PatchData> patches, Result r, LogoState st)
+    {
+        var prepared = Prepare(index, items, st);
+        int n = 0;
+        for (int i = 0; i < items.Count; i++)
+            if (PlanOne(index, items[i].Name, prepared[i] == null ? items[i].Src.Image : default, locations, tocs, patches, r, st, prepared[i])) n++;
+        return n;
+    }
+
+    /// <summary>PlanMany's first half: each texture's header (in order) and encoded chunk (in parallel; null where that
+    /// failed).</summary>
+    private static Prepared[] Prepare(AssetIndex index, IReadOnlyList<(string Name, Source Src)> items, LogoState st)
+    {
+        var fitting = System.Diagnostics.Stopwatch.StartNew();
+        var headers = new TextureHeader[items.Count];
+        for (int i = 0; i < items.Count; i++)
+            try { headers[i] = TextureHeader.Parse(index.Read(index.GetRes(items[i].Name)), ps4: !index.Layout.IsPs5); }
+            catch { /* PlanOne reports it */ }
+        var prepared = new Prepared[items.Count];
+        Parallel.For(0, items.Count, i =>
+        {
+            if (headers[i] is not { } h) return;
+            var src = items[i].Src;
+            try
+            {
+                var raw = PlanCache.Get("texfit", () =>
+                {
+                    var img = src.Image;
+                    return TextureBuilder.BuildChunk(h, Png.Fit(img.Rgba, img.W, img.H, h.Width, h.Height, TextureBuilder.IsSrgb(h)));
+                }, "fit1|" + TextureBuilder.LayoutKey(h), src.Key);
+                prepared[i] = new Prepared(h, raw);
+            }
+            catch { /* PlanOne reports it */ }
+        });
+        st.Fit += fitting.Elapsed.TotalSeconds;
+        return prepared;
+    }
+
+    private static bool PlanOne(AssetIndex index, string name, (byte[] Rgba, int W, int H) img, LocationIndex locations, TocCache tocs, List<PatchData> patches, Result r, LogoState st,
+                                Prepared prepared = null)
     {
         try
         {
-            var res = index.GetRes(name);
-            var h = TextureHeader.Parse(index.Read(res), ps4: !index.Layout.IsPs5);
-            var rgba = Png.Fit(img.Rgba, img.W, img.H, h.Width, h.Height, TextureBuilder.IsSrgb(h));
+            var fitting = System.Diagnostics.Stopwatch.StartNew();
+            var h = prepared?.Header ?? TextureHeader.Parse(index.Read(index.GetRes(name)), ps4: !index.Layout.IsPs5);
+            // prepared: already encoded, the image isn't needed
+            var rgba = prepared != null ? null : Png.Fit(img.Rgba, img.W, img.H, h.Width, h.Height, TextureBuilder.IsSrgb(h));
+            st.Fit += fitting.Elapsed.TotalSeconds;
             if (st.ChunkOwners.TryGetValue(h.ChunkId, out var owners) && owners.Count > 1)
             {
                 r.Warnings.Add($"{name}: skipped, its chunk is also the texture of {string.Join(", ", owners.Where(o => o != name).Take(3))}");
@@ -621,7 +739,7 @@ public static class PackageInstaller
             var notes = new List<string>();
             TextureReplacementPlan plan = null;
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            try { plan = Replacements.PlanTexture(index, name, rgba, locations, tocs, notes.Add); }
+            try { plan = Replacements.PlanTexture(index, name, rgba, locations, tocs, notes.Add, built: prepared?.Raw, preview: false); }
             catch (Exception ex) when (ex.Message.Contains("stored once") || ex.Message.Contains("can't be replaced in place")) { plan = null; }
             st.InPlace += sw.Elapsed.TotalSeconds; sw.Restart();
             if (plan != null && plan.Chunk.Patches.Count > 0)
@@ -632,7 +750,7 @@ public static class PackageInstaller
             }
             // shared bytes: give this chunk its own copy at the end of its CAS file, framed like the original (the
             // header's mip offsets point into that framing)
-            byte[] raw = TextureBuilder.BuildChunk(h, rgba);
+            byte[] raw = prepared?.Raw ?? TextureBuilder.BuildChunk(h, rgba);
             var copies = ChunkCopies.Find(index, h.ChunkId, tocs);
             var full = copies.Where(c => c.Live).OrderByDescending(c => c.Ref.Size).FirstOrDefault() ?? copies.OrderByDescending(c => c.Ref.Size).First();
             byte[] stored = Framing.Reframe(index.ReadStored(full.Ref), raw);

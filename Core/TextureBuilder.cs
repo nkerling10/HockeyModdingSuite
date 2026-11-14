@@ -31,9 +31,11 @@ public static class TextureBuilder
     /// </summary>
     public static byte[] BuildChunk(TextureHeader h, byte[] rgba, Action<string> log = null) =>
         // the encoded chunk depends only on the image and the texture's layout: a package reinstall reuses it (PlanCache)
-        PlanCache.Get("tex", () => BuildChunkCore(h, rgba, log),
-                      $"{h.Ps4}|{h.Type}|{h.PixelFormatId}|{h.Width}x{h.Height}x{h.Depth}|{h.SliceCount}|{h.MipCount}|{h.FirstMip}|{h.ChunkSize}|{string.Join(",", h.MipSizes)}|{string.Join(",", h.MipOffsets)}|{h.Flags}",
-                      rgba);
+        PlanCache.Get("tex", () => BuildChunkCore(h, rgba, log), LayoutKey(h), rgba);
+
+    /// <summary>Everything of a texture's header its encoded chunk depends on (a plan-cache key part).</summary>
+    public static string LayoutKey(TextureHeader h) =>
+        $"{h.Ps4}|{h.Type}|{h.PixelFormatId}|{h.Width}x{h.Height}x{h.Depth}|{h.SliceCount}|{h.MipCount}|{h.FirstMip}|{h.ChunkSize}|{string.Join(",", h.MipSizes)}|{string.Join(",", h.MipOffsets)}|{h.Flags}";
 
     private static byte[] BuildChunkCore(TextureHeader h, byte[] rgba, Action<string> log)
     {

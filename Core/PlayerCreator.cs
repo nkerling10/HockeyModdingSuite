@@ -143,6 +143,8 @@ public static class PlayerCreator
                 if (!db.IsInvalid(t, r)) eqRowOf.TryAdd((t, (int)db.Get(t, r, g)), r);
         }
         var rosterTables = RosterSync.RosterTables(db);
+        // the roster tables don't change in the loop below (rows come in RosterSync.Apply after it): counted once
+        var keyCounts = rosterTables.Select(x => RosterSync.KeyCounts(db, x.Table)).ToList();
         var seen = new HashSet<string>();
         var proteamOf = new Dictionary<int, int>();
         var joins = new List<(SyncChange Join, CreatedPlayer Made)>();
@@ -157,8 +159,9 @@ public static class PlayerCreator
             var born = b.Born.Value;
             if (!seen.Add(Key(b.First, b.Last, born))) { result.Skipped.Add((name, "listed twice")); continue; }
             var (already, nameOnly) = matcher.Find(b.First, b.Last, born);
-            if (already != null && !nameOnly) { result.Skipped.Add((name, $"already in the game (game id {already.GameId})")); continue; }
-            if (rosterTables.Any(x => !RosterSync.HasFreeSlot(db, x.Table, c.ToTeam))) { result.Skipped.Add((name, $"{TeamName(c.ToTeam)} already has 40 players")); continue; }
+            // the same name and birth date is him, unless one is a goalie and the other a skater (two people)
+            if (already != null && !nameOnly && (already.PositionPrimary == 5) == (b.Primary == 5)) { result.Skipped.Add((name, $"already in the game (game id {already.GameId})")); continue; }
+            if (keyCounts.Any(n => n.GetValueOrDefault(c.ToTeam) >= 40)) { result.Skipped.Add((name, $"{TeamName(c.ToTeam)} already has 40 players")); continue; }
             bool goalie = b.Primary == 5;
             var ai = goalie ? goalieAi : skaterAi;
             var eq = goalie ? goalieEq : skaterEq;

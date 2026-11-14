@@ -87,7 +87,7 @@ public static class ChunkPatcher
                 }
             }
             // bundle copies of these bytes the index doesn't list (another superbundle's bundle with the same chunk)
-            copies.AddRange(ChunkCopies.FindAt(index, tocs, copies.Select(c => LocationIndex.Key(c.Ref)).ToHashSet(), copies));
+            copies.AddRange(ChunkCopies.FindAt(index, tocs, copies.Select(c => LocationIndex.Key(c.Ref)).ToHashSet(), copies, shared: locations));
         }
 
         // the full chunk: the biggest live copy
@@ -181,13 +181,5 @@ public static class ChunkPatcher
 
     private static TocRef TocRefOfRecord(AssetIndex index, TocCache tocs, ChunkCopy c) => c.Record;
 
-    private static byte[] ReadRange(string file, long offset, int length)
-    {
-        using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-        if (offset + length > fs.Length) return null;
-        fs.Position = offset;
-        var b = new byte[length];
-        fs.ReadExactly(b);
-        return b;
-    }
+    private static byte[] ReadRange(string file, long offset, int length) => HeldFiles.ReadRange(file, offset, length);
 }

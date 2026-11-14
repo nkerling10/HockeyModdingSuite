@@ -318,10 +318,8 @@ public sealed class AssetIndex
 
     public byte[] ReadStored(int catalog, int cas, bool patch, uint offset, uint size)
     {
-        using var fs = new FileStream(Layout.CasPath(catalog, cas, patch), FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         var b = new byte[size];
-        fs.Position = offset;
-        fs.ReadExactly(b);
+        HeldFiles.Read(Layout.CasPath(catalog, cas, patch), offset, b);
         return b;
     }
 
@@ -339,13 +337,10 @@ public sealed class AssetIndex
         if (e.Toc == null || r.OffsetPos <= 0 || r.SizePos <= 0) return r;
         try
         {
-            using var fs = new FileStream(e.Toc, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             Span<byte> b = stackalloc byte[4];
-            fs.Position = r.OffsetPos;
-            fs.ReadExactly(b);
+            HeldFiles.Read(e.Toc, r.OffsetPos, b);
             uint offset = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(b);
-            fs.Position = r.SizePos;
-            fs.ReadExactly(b);
+            HeldFiles.Read(e.Toc, r.SizePos, b);
             uint size = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(b);
             return offset == r.Offset && size == r.Size ? r : r with { Offset = offset, Size = size };
         }

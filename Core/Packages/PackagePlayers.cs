@@ -44,7 +44,7 @@ public static class PackagePlayers
         public string Country { get; set; }
     }
 
-    private sealed record Listed(TeamSpec Team, string Season, string Name, string First, string Last, DateTime Born, Details Info)
+    internal sealed record Listed(TeamSpec Team, string Season, string Name, string First, string Last, DateTime Born, Details Info)
     {
         /// <summary>Seasons he has been in college before the roster season (0 Fr .. 4 Gr), from "class"; or null.</summary>
         public int? Entry { get; set; }
@@ -238,6 +238,26 @@ public static class PackagePlayers
         foreach (var l in now)
         {
             var (p, nameOnly) = matcher.Find(l.First, l.Last, l.Born);
+            // a name-only match whose birth date isn't a typo of the file's is someone else (the game's Connor Brown, born
+            // 1994, for a 2005-born college player): the file's player is then not in the game
+            if (p != null && nameOnly && !SamePerson(matcher.Born(p), l.Born))
+            {
+                r.Warnings.Add($"players: {l.Name} ({l.Team.Code}, born {l.Born:yyyy-MM-dd}) is not the game's {p.Name} (born {matcher.Born(p):yyyy-MM-dd}): treated as not in the game");
+                p = null;
+            }
+            // a goalie is never a skater: the same name and birth date on a skater is another person (USHL goalie Adam
+            // Novotny and the game's winger Adam Novotny, both born Nov 1 2007)
+            if (p != null && GoalieClash(posOf[l].P, p.PositionPrimary))
+            {
+                r.Warnings.Add($"players: {l.Name} ({l.Team.Code}) is a {(posOf[l].P == 5 ? "goalie" : "skater")} in the file, the game's {p.Name} a {(p.PositionPrimary == 5 ? "goalie" : "skater")}: another person, treated as not in the game");
+                p = null;
+            }
+            // one game player for one roster-file entry (two files' Jackson Smiths both matched the same one)
+            if (p != null && !r.TakenPlayers.Add(p.GameId))
+            {
+                r.Warnings.Add($"players: {l.Name} ({l.Team.Code}): the game's {p.Name} is already placed for another roster-file entry; treated as not in the game");
+                p = null;
+            }
             if (p != null)
             {
                 if (nameOnly) r.Warnings.Add($"players: {l.Name} matched {p.Name} by name only (birth dates differ)");
@@ -311,20 +331,7 @@ public static class PackagePlayers
         // (a created player is undrafted).
         var nhlByCode = RosterSync.TeamIndex(db);
         var badDraft = new List<string>();
-        bool SetDraft(int bioRow, Listed l)
-        {
-            if (l.Draft is not { } d) return false;
-            int team = PlayerCreator.DraftTeam(nhlByCode, d.Team);
-            if (team < 0) { badDraft.Add($"{l.Name} ({d.Team})"); return false; }
-            int oldDraft = Convert.ToInt32(db.Get(bioT, bioRow, bf["draftteam"]));
-            int pro = Convert.ToInt32(db.Get(bioT, bioRow, bf["proteam"]));
-            db.Set(bioT, bioRow, bf["draftyear"], d.Year - 1900);
-            db.Set(bioT, bioRow, bf["draftround"], d.Round);
-            db.Set(bioT, bioRow, bf["draftposition"], d.Overall);
-            db.Set(bioT, bioRow, bf["draftteam"], team);
-            if (pro < 0 || pro == oldDraft) db.Set(bioT, bioRow, bf["proteam"], team);
-            return true;
-        }
+        bool SetDraft(int bioRow, Listed l) => SetFileDraft(db, bioT, bf, nhlByCode, badDraft, bioRow, l);
         foreach (var (l, id) in placed)
         {
             var p = roster.Find(id);
@@ -362,7 +369,7 @@ public static class PackagePlayers
         }
 
         // lines from the final positions
-        foreach (var t in spec.Teams) RosterLines.BuildTeam(db, t.Index);
+        RosterLines.BuildTeams(db, spec.Teams.Select(t => t.Index));
 
         r.Lines.Add($"players: season {current}: {now.Count} listed, {placed.Count} placed ({moves.Count - already} moved, {already} already there, " +
                     $"{placed.Count - moves.Count} created), {needDetails.Count} need details; {drafted} drafted (file's draft); " +
@@ -395,39 +402,127 @@ public static class PackagePlayers
         int noClass = now.Count(l => l.Entry == null);
         r.Lines.Add($"players: classes: {r.EntryGames.Count}" + (noClass > 0 ? $", {noClass} without one (birth year + entry age)" : ""));
 
-        if (commits.Count > 0)
+        // commits: matched after every group's players are in (ApplyCommits), so a commit the package creates itself (an
+        // empty USHL team's file players) is found too
+        if (commits.Count > 0) r.PendingCommits.Add(new CommitBatch(spec, commits, current));
+        if (badDraft.Count > 0) r.Warnings.Add($"players: draft team not an NHL team, draft left as the game has it: {string.Join(", ", badDraft)}");
+    }
+
+    /// <summary>A players file's commits (its later seasons) and its roster season, waiting for <see cref="ApplyCommits"/>.</summary>
+    internal sealed record CommitBatch(PackageSpec Spec, List<Listed> Commits, string Current);
+
+    /// <summary>
+    /// The players files' commits (their later seasons), after every group's players are in: a commit the package
+    /// creates itself (the file players of a USHL team none of whose players were in the game) is in the game by then,
+    /// so he gets an art-id commit (part 8 sends any player to his school) instead of a name commit, which only catches
+    /// a player already at a school (part 11 runs for league-32 players). Before 2026-11-14 the commits were matched
+    /// inside each group's step, before the USHL group created its players: ~50 USHL commits would never have joined.
+    /// A commit already in the game is matched by full name + birth date (PlayerMatcher), by his unique full name when
+    /// the birth dates are a typo or days apart (SamePerson; Rogowski Jun 24 / Jun 28), or by first name +
+    /// birth date with a last name one letter off (Dinneen / Dineen, the only such player); his art id must be his
+    /// alone. Commits not in the game go to the name table for the game's generated prospects.
+    /// </summary>
+    public static void ApplyCommits(T3Db db, PackageInstaller.Result r)
+    {
+        if (r.PendingCommits.Count == 0) return;
+        using var batch = db.Batch();
+        var roster = new Roster(db);
+        var matcher = new PlayerMatcher(db, roster);
+        var bioT = db.Table(Roster.BioTable);
+        var bf = bioT.Fields.ToDictionary(f => f.Name);
+        var nhlByCode = RosterSync.TeamIndex(db);
+        var artCount = new Dictionary<int, int>();
+        foreach (var p in roster.Players) artCount[p.ArtId] = artCount.GetValueOrDefault(p.ArtId) + 1;
+        var byBorn = new Dictionary<DateTime, List<RosterPlayer>>();
+        foreach (var p in roster.Players)
+            if (matcher.Born(p) is { } b) (byBorn.TryGetValue(b, out var l) ? l : byBorn[b] = new List<RosterPlayer>()).Add(p);
+        foreach (var (spec, commits, current) in r.PendingCommits)
         {
-            // commits already in the game join their school in the summer of their commit year (code mod part 8, keyed
-            // by the player's art id, which the franchise keeps). Exact name + birth date only; the art id must be his alone.
-            var artCount = new Dictionary<int, int>();
-            foreach (int row in Enumerable.Range(0, bioT0.WrittenRecords))
-            {
-                if (db.IsInvalid(bioT0, row)) continue;
-                int a = Convert.ToInt32(db.Get(bioT0, row, bf0["artid"]));
-                artCount[a] = artCount.GetValueOrDefault(a) + 1;
-            }
             var skipped = new List<string>();
-            int commitsDrafted = 0;
+            var badDraft = new List<string>();
+            int drafted = 0, close = 0, spelled = 0, before = r.Commits.Count;
             foreach (var l in commits)
             {
                 var (p, nameOnly) = matcher.Find(l.First, l.Last, l.Born);
+                // a goalie is never a skater (and back): another person with the same name
+                if (p != null && GoalieClash(Code(l.Info?.Pos, l.Info?.Shoots), p.PositionPrimary))
+                {
+                    r.Lines.Add($"players: commit {l.Name} ({l.Team.Code} {l.Season}) is not the game's {p.Name}: one is a goalie, the other a skater");
+                    p = null; nameOnly = false;
+                }
+                // the same unique full name with a birth date a typo or a few days off the file's: the same player
+                if (p != null && nameOnly && SamePerson(matcher.Born(p), l.Born)) { nameOnly = false; close++; }
+                // the same first name and birth date, a last name one letter off: the only such player
+                if (p == null && byBorn.TryGetValue(l.Born, out var sameDay)
+                    && sameDay.Where(c => RosterSync.Norm(c.FirstName) == RosterSync.Norm(l.First) && OneEdit(RosterSync.Norm(c.LastName), RosterSync.Norm(l.Last))).Take(2).ToList() is { Count: 1 } one)
+                { p = one[0]; spelled++; r.Lines.Add($"players: commit {l.Name} ({l.Team.Code} {l.Season}) is the game's {p.Name} (same birth date)"); }
                 // not in the game yet: the game may generate him later (a draft-class prospect with his real name);
                 // part 11 then sends him to this school by name
                 if (p == null && int.TryParse(l.Season, out int ny) && int.TryParse(current, out int nc) && ny > nc && ny - nc <= 15)
                     r.NameCommits.Add((l.Name, l.Team.Index, ny - nc));
-                if (p == null || nameOnly || !int.TryParse(l.Season, out int year) || !int.TryParse(current, out int cur) || year <= cur || year - cur > 15) { skipped.Add($"{l.Name} ({l.Team.Code} {l.Season}){(nameOnly ? ": birth date differs" : "")}"); continue; }
-                if (roster.Find(p.GameId) is { } cp && SetDraft(cp.BioRow, l)) commitsDrafted++;
-                int art = Convert.ToInt32(db.Get(bioT0, p.BioRow, bf0["artid"]));
+                if (p == null || nameOnly || !int.TryParse(l.Season, out int year) || !int.TryParse(current, out int cur) || year <= cur || year - cur > 15)
+                { skipped.Add($"{l.Name} ({l.Team.Code} {l.Season}){(nameOnly ? ": birth date differs" : "")}"); continue; }
+                if (SetFileDraft(db, bioT, bf, nhlByCode, badDraft, p.BioRow, l)) drafted++;
+                int art = p.ArtId;
                 if (art <= 0 || art > 0xFFFF || artCount.GetValueOrDefault(art) != 1) { skipped.Add($"{l.Name}: art id {art} not his alone"); continue; }
                 r.Commits.Add((art, l.Team.Index, year - cur));        // seasons after the roster season: the game adds the franchise's year
             }
             r.Lines.Add($"players: commits ({commits.Count}): " +
                         string.Join("; ", commits.GroupBy(c => (c.Team.Code, c.Season)).Select(g => $"{g.Key.Code} {g.Key.Season}: {g.Count()}")) +
-                        $"; {r.Commits.Count} in the game join their school in their commit year; {commitsDrafted} given the file's draft");
+                        $"; {r.Commits.Count - before} in the game join their school in their commit year ({close} with a birth date a typo or a few days off, " +
+                        $"{spelled} with a last name one letter off); {drafted} given the file's draft");
             if (skipped.Count > 0)
                 r.Lines.Add($"players: commits not in the game or not matched exactly ({skipped.Count}): {string.Join(", ", skipped)}");
+            if (badDraft.Count > 0) r.Warnings.Add($"players: commits' draft team not an NHL team, draft left as the game has it: {string.Join(", ", badDraft)}");
         }
-        if (badDraft.Count > 0) r.Warnings.Add($"players: draft team not an NHL team, draft left as the game has it: {string.Join(", ", badDraft)}");
+        r.PendingCommits.Clear();
+    }
+
+    /// <summary>
+    /// Whether a game player found by his unique full name, born <paramref name="game"/>, is the file's player born
+    /// <paramref name="file"/>: the dates are within a month (sources differ by days), differ in one of year (by one),
+    /// month or day (a typo), or have day and month swapped. Anything else is another person with the same name.
+    /// </summary>
+    internal static bool SamePerson(DateTime? game, DateTime file)
+    {
+        if (game is not { } g) return false;
+        if (Math.Abs((g - file).TotalDays) <= 31) return true;
+        int fields = (g.Year != file.Year ? 1 : 0) + (g.Month != file.Month ? 1 : 0) + (g.Day != file.Day ? 1 : 0);
+        if (fields == 1 && Math.Abs(g.Year - file.Year) <= 1) return true;
+        return g.Year == file.Year && g.Month == file.Day && g.Day == file.Month;
+    }
+
+    /// <summary>Whether one of two known positions is a goalie and the other a skater (then they are two people).</summary>
+    private static bool GoalieClash(int file, int game) => file != -1 && game >= 0 && (file == 5) != (game == 5);
+
+    /// <summary>Whether two names differ by at most one letter (added, dropped or changed).</summary>
+    private static bool OneEdit(string a, string b)
+    {
+        if (a == b) return true;
+        if (Math.Abs(a.Length - b.Length) > 1 || a.Length < 3 || b.Length < 3) return false;
+        int i = 0;
+        while (i < a.Length && i < b.Length && a[i] == b[i]) i++;
+        return a.Length == b.Length ? a[(i + 1)..] == b[(i + 1)..]
+             : a.Length > b.Length ? a[(i + 1)..] == b[i..] : a[i..] == b[(i + 1)..];
+    }
+
+    /// <summary>
+    /// The file's draft (year, round, pick, team) on his bio; the drafting team holds his rights (proteam) unless the game
+    /// has them with another team (a traded pick). No "draft" in the file: his draft stays as the game has it.
+    /// </summary>
+    private static bool SetFileDraft(T3Db db, T3Table bioT, Dictionary<string, T3Field> bf, Dictionary<string, int> nhlByCode, List<string> badDraft, int bioRow, Listed l)
+    {
+        if (l.Draft is not { } d) return false;
+        int team = PlayerCreator.DraftTeam(nhlByCode, d.Team);
+        if (team < 0) { badDraft.Add($"{l.Name} ({d.Team})"); return false; }
+        int oldDraft = Convert.ToInt32(db.Get(bioT, bioRow, bf["draftteam"]));
+        int pro = Convert.ToInt32(db.Get(bioT, bioRow, bf["proteam"]));
+        db.Set(bioT, bioRow, bf["draftyear"], d.Year - 1900);
+        db.Set(bioT, bioRow, bf["draftround"], d.Round);
+        db.Set(bioT, bioRow, bf["draftposition"], d.Overall);
+        db.Set(bioT, bioRow, bf["draftteam"], team);
+        if (pro < 0 || pro == oldDraft) db.Set(bioT, bioRow, bf["proteam"], team);
+        return true;
     }
 
     /// <summary>

@@ -38,6 +38,8 @@ public static class ChunkCopies
     // planning pass the first time FindAt runs: FindAt used to walk every bundle of every TOC (~372k) on each call, which
     // a package's logo pass did once per grown texture.
     [ThreadStatic] private static Dictionary<long, List<(string Path, int PathAt, TocBundle Bundle, int BundleAt, int Entry)>> _places;
+    // whether _places holds only places two or more TOC entries share (FindAt's shared)
+    [ThreadStatic] private static bool _placesShared;
 
     private sealed class RecordCache : IDisposable { public void Dispose() { _records = null; _places = null; } }
     private sealed class NoOp : IDisposable { public void Dispose() { } }
@@ -51,7 +53,9 @@ public static class ChunkCopies
         return new RecordCache();
     }
 
-    private static BundleRecord Record(AssetIndex index, TocRef r)
+    /// <summary>The bundle record at <paramref name="r"/> (from the planning pass's cache inside <see cref="CacheRecords"/>;
+    /// callers only read it).</summary>
+    internal static BundleRecord Record(AssetIndex index, TocRef r)
     {
         var key = (r.Catalog, r.Cas, r.Patch, r.Offset, r.Size);
         if (_records != null && _records.TryGetValue(key, out var hit)) return hit;
@@ -112,7 +116,12 @@ public static class ChunkCopies
     /// in <paramref name="known"/> are skipped; the ones found count as live (they are checked like any live copy).
     /// </summary>
     /// <param name="only">Only copies of this chunk.</param>
-    public static List<ChunkCopy> FindAt(AssetIndex index, TocCache tocs, IReadOnlySet<long> places, IEnumerable<ChunkCopy> known, Guid? only = null)
+    /// <param name="shared">Every TOC entry's place (LocationIndex.Build on the same TOCs). With it, a planning pass's
+    /// place map keeps only places two or more entries share: every place asked about must then be a <paramref
+    /// name="known"/> copy's (as both callers ask), so a place with one entry holds only that known copy, which is
+    /// skipped anyway. The map is then a fraction of the game's millions of bundle entries.</param>
+    public static List<ChunkCopy> FindAt(AssetIndex index, TocCache tocs, IReadOnlySet<long> places, IEnumerable<ChunkCopy> known, Guid? only = null,
+                                         LocationIndex shared = null)
     {
         var have = known.Where(c => c.InBundle).Select(c => (c.Toc, c.BundleName, LocationIndex.Key(c.Ref))).ToHashSet();
         var found = new List<ChunkCopy>();
@@ -132,9 +141,12 @@ public static class ChunkCopies
         if (_records != null)
         {
             // a planning pass: look the places up (the same walk as below, done once and kept, in the same order)
+            // built without the filter for a caller that gives no LocationIndex
+            if (_places != null && _placesShared && shared == null) _places = null;
             if (_places == null)
             {
                 _places = new();
+                _placesShared = shared != null;
                 int pathAt = 0;
                 foreach (string path in index.Layout.AllTocPaths())
                 {
@@ -143,6 +155,7 @@ public static class ChunkCopies
                         for (int i = 1; i < bundles[b].Entries.Count; i++)
                         {
                             long key = LocationIndex.Key(bundles[b].Entries[i]);
+                            if (shared != null && shared.Count(bundles[b].Entries[i]) < 2) continue;
                             if (!_places.TryGetValue(key, out var list)) _places[key] = list = new();
                             list.Add((path, pathAt, bundles[b], b, i));
                         }

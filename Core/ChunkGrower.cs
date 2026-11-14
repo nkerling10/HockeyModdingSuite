@@ -30,7 +30,7 @@ public static class ChunkGrower
         // move with it. Other chunks that happen to store the same bytes keep them: the old bytes aren't touched.
         var places = live.Select(c => LocationIndex.Key(c.Ref)).ToHashSet();
         if (live.Any(c => locations.Count(c.Ref) > copies.Count(o => LocationIndex.Key(o.Ref) == LocationIndex.Key(c.Ref))))
-            live.AddRange(ChunkCopies.FindAt(index, tocs, places, copies, chunkId));
+            live.AddRange(ChunkCopies.FindAt(index, tocs, places, copies, chunkId, locations));
         foreach (var c in live.Where(c => c.LogicalOffset != 0))
         {
             if (tail == null)
@@ -66,7 +66,7 @@ public static class ChunkGrower
         {
             if (!done.Add((Rel(file), pos))) return;
             var old = new byte[4];
-            using (var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) { fs.Position = pos; fs.ReadExactly(old); }
+            HeldFiles.Read(file, pos, old);
             var neu = new byte[4];
             if (bigEndian) BinaryPrimitives.WriteUInt32BigEndian(neu, value); else BinaryPrimitives.WriteUInt32LittleEndian(neu, value);
             plan.Patches.Add(new PatchData(Rel(file), pos, old, neu, note));
@@ -108,7 +108,7 @@ public static class ChunkGrower
             if (!c.InBundle) continue;
             // the record: the chunk's logical size and the SHA1 of its stored bytes
             var r0 = c.Record;
-            var rec = BundleRecord.Read(index.ReadStored(r0), r0.Offset);
+            var rec = ChunkCopies.Record(index, r0);
             var item = rec.Chunks.First(x => x.Id == chunkId);
             string recFile = layout.CasPath(r0.Catalog, r0.Cas, r0.Patch);
             if (isTail && whole == null) throw new InvalidDataException($"{c.BundleName} holds only the end of a chunk nothing holds whole.");

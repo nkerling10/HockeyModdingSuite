@@ -18,14 +18,19 @@ public static partial class Replacements
     /// Plans replacing the texture <paramref name="name"/> with <paramref name="rgba"/>, an image already at the texture's
     /// size. Reads the game; writes nothing.
     /// </summary>
-    public static TextureReplacementPlan PlanTexture(AssetIndex index, string name, byte[] rgba, LocationIndex locations, TocCache tocs, Action<string> log = null, int layer = 0, byte[] arrayData = null, bool takeShared = false)
+    /// <param name="built">The texture's chunk already encoded from <paramref name="rgba"/> (TextureBuilder.BuildChunk with
+    /// this texture's header), so it isn't encoded again.</param>
+    /// <param name="preview">Whether to decode the result's first mip for a preview (an installer that only wants the
+    /// patches skips it).</param>
+    public static TextureReplacementPlan PlanTexture(AssetIndex index, string name, byte[] rgba, LocationIndex locations, TocCache tocs, Action<string> log = null, int layer = 0, byte[] arrayData = null, bool takeShared = false,
+                                                     byte[] built = null, bool preview = true)
     {
         var res = index.GetRes(name) ?? throw new InvalidDataException($"No texture named {name}.");
         var header = TextureHeader.Parse(index.Read(res), ps4: !index.Layout.IsPs5);
         string why = TextureBuilder.Unsupported(header);
         if (why != null) throw new NotSupportedException(why);
-        if (header.Ps4) return PlanTexturePs4(index, name, header, rgba, locations, tocs, log);
-        byte[] raw = TextureBuilder.BuildChunk(header, rgba, log);
+        if (header.Ps4) return PlanTexturePs4(index, name, header, rgba, locations, tocs, log, built, preview);
+        byte[] raw = built ?? TextureBuilder.BuildChunk(header, rgba, log);
         if (header.Layers > 1)
         {
             // an array: the new layer goes in place of layer N, the others are kept as the game has them
@@ -40,7 +45,7 @@ public static partial class Replacements
         }
         var chunk = ChunkPatcher.Plan(index, header.ChunkId, raw, locations, tocs, log, takeShared);
         var result = new Texture { Name = name, Header = header, Chunk = null, Data = raw, Layer = layer };
-        result.DecodeMip(0);
+        if (preview) result.DecodeMip(0);
         return new TextureReplacementPlan { Name = name, Header = header, Chunk = chunk, Result = result };
     }
 
@@ -51,9 +56,10 @@ public static partial class Replacements
     /// signature no longer matches. The header patches follow the chunk's in <see cref="TextureReplacementPlan.Chunk"/>,
     /// so callers apply one list.
     /// </summary>
-    private static TextureReplacementPlan PlanTexturePs4(AssetIndex index, string name, TextureHeader header, byte[] rgba, LocationIndex locations, TocCache tocs, Action<string> log)
+    private static TextureReplacementPlan PlanTexturePs4(AssetIndex index, string name, TextureHeader header, byte[] rgba, LocationIndex locations, TocCache tocs, Action<string> log,
+                                                         byte[] built = null, bool preview = true)
     {
-        byte[] raw = TextureBuilder.BuildChunk(header, rgba, log);
+        byte[] raw = built ?? TextureBuilder.BuildChunk(header, rgba, log);
         int n = TextureBuilder.StoredMips(header);
         // the parts that start a block: mip 0, mip 1, then the rest together
         var cuts = new List<int> { 0 };
@@ -93,7 +99,7 @@ public static partial class Replacements
         }
         var nh = TextureHeader.Parse(newRes, ps4: true);
         var result = new Texture { Name = name, Header = nh, Chunk = null, Data = raw };
-        result.DecodeMip(0);
+        if (preview) result.DecodeMip(0);
         return new TextureReplacementPlan { Name = name, Header = nh, Chunk = chunk, Result = result };
     }
 
