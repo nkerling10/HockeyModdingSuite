@@ -47,8 +47,19 @@ public static class PackagePortraits
         string root = Folder(spec);
         if (root == null) return plan;
         var others = PortraitSync.OtherRosters.Select(n => { try { return legacy.OpenDb(n); } catch { return null; } }).Where(d => d != null).ToList();
-        var free = new Queue<int>(PortraitSync.FreeArtIds(index, db, others));
+        var freeList = PortraitSync.FreeArtIds(index, db, others);
+        var free = freeList.ToHashSet();
+        var mem = r.PortraitArt;
+        int at = 0;
+        // the next free slot no player had on the last install (those stay his); once they run out, any free one
+        int NextSlot()
+        {
+            for (; at < freeList.Count; at++)
+                if (free.Contains(freeList[at]) && !mem.IsReserved(freeList[at])) return freeList[at++];
+            return free.Count > 0 ? free.Min() : -1;
+        }
         var roster = new Roster(db);
+        var matcher = new PlayerMatcher(db, roster);
         var bio = db.Table(Roster.BioTable);
         var f = bio.Fields.ToDictionary(x => x.Name);
         // a school player's bio team is -1 (the players step); his school is his roster row's team
@@ -56,6 +67,7 @@ public static class PackagePortraits
         var rtTeam = rt.Fields.First(x => x.Name == "team");
         int TeamOf(RosterPlayer p) => p.RosterRow >= 0 ? Convert.ToInt32(db.Get(rt, p.RosterRow, rtTeam)) : p.Team;
         var unmatched = new List<string>();
+        var planned = new Dictionary<int, string>();
         foreach (var t in spec.Teams)
         {
             string dir = Path.Combine(root, t.Code);
@@ -68,9 +80,23 @@ public static class PackagePortraits
                 // the players step's match first (the file is named as the roster file names him), then his game name
                 var p = r.Placed.TryGetValue((t.Code, key), out int gid) ? roster.Find(gid) : null;
                 if (p == null && !players.TryGetValue(key, out p)) { unmatched.Add($"{t.Code}/{Path.GetFileName(file)}"); continue; }
-                if (free.Count == 0) { r.Warnings.Add("portraits: no free portrait slots left"); break; }
-                int slot = free.Dequeue();
+                // one photo per player: a second photo that finds the same game player (two players of one name) is left
+                // out, or both would be written to his one slot
+                if (planned.TryGetValue(p.BioRow, out var first))
+                {
+                    r.Warnings.Add($"portraits: {t.Code}/{Path.GetFileName(file)} left out: it finds {p.Name}, who already has {first}");
+                    continue;
+                }
+                planned[p.BioRow] = $"{t.Code}/{Path.GetFileName(file)}";
                 int oldArt = Convert.ToInt32(db.Get(bio, p.BioRow, f["artid"]));
+                // the slot he had on the last install (a save keeps his art id), when it's still his or free
+                string artKey = matcher.Born(p) is { } pb ? ArtIdMemory.Key(p.FirstName, p.LastName, pb) : null;
+                int? was = artKey == null ? null : mem.Remembered(artKey);
+                bool kept = was is int w && (w == oldArt || free.Contains(w));
+                int slot = kept ? was.Value : NextSlot();
+                if (slot < 0) { r.Warnings.Add("portraits: no free portrait slots left"); break; }
+                free.Remove(slot);
+                if (artKey != null) mem.Record(artKey, slot, kept);
                 db.Set(bio, p.BioRow, f["artid"], slot);
                 if (f.TryGetValue("hasportrait", out var hp)) db.Set(bio, p.BioRow, hp, 1);
                 for (int i = 0; i < r.Commits.Count; i++)

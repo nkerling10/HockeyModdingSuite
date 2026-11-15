@@ -98,7 +98,8 @@ public static class PlayerCreator
     /// duplicates in the list are skipped (the AHL row wins). <paramref name="cap"/>, when given, decides an AHL player's NHL club (proteam):
     /// the club CapWages lists him under, else none (an AHL-only deal); without it, the AHL team's NHL parent.
     /// </summary>
-    public static CreateResult Create(T3Db db, IEnumerable<SyncChange> missing, IReadOnlyList<CapTeam> cap = null, TemplateRule rule = null)
+    public static CreateResult Create(T3Db db, IEnumerable<SyncChange> missing, IReadOnlyList<CapTeam> cap = null, TemplateRule rule = null,
+                                      ArtIdMemory artMemory = null)
     {
         var result = new CreateResult();
         using var batch = db.Batch();
@@ -163,7 +164,14 @@ public static class PlayerCreator
         // ---- new ids
         int nextId = MaxBelow(db, bio, "game_id") + 1;
         int nextIndex = MaxBelow(db, players, "index") + 1;
-        int nextArt = 1 + Math.Max(MaxOf(db, bio, "artid"), MaxOf(db, bio, "audioid"));
+        int nextArt = 1 + Math.Max(Math.Max(MaxOf(db, bio, "artid"), MaxOf(db, bio, "audioid")), artMemory?.Max ?? 0);
+        // art ids in use, so a remembered one is only taken back when nobody has it
+        var usedArt = new HashSet<int>();
+        {
+            var artF = bio.Fields.First(f => f.Name == "artid");
+            for (int r = 0; r < bio.WrittenRecords; r++)
+                if (!db.IsInvalid(bio, r)) usedArt.Add((int)db.Get(bio, r, artF));
+        }
         int idCap = Math.Min(SpecialIdStart, 1 << 16);
 
         var eqRowOf = new Dictionary<(T3Table, int), int>();
@@ -207,7 +215,13 @@ public static class PlayerCreator
             var t0 = template.Player;
             if (!eqRowOf.TryGetValue((eq, t0.GameId), out int eqRow)) { result.Skipped.Add((name, $"{t0.Name} (template) has no gear row")); continue; }
 
-            int gameId = nextId++, index = nextIndex++, art = nextArt++;
+            int gameId = nextId++, index = nextIndex++;
+            // the art id he had on the last install (a save keeps it; portraits and the NCAA tables find him by it), else a new one
+            string artKey = ArtIdMemory.Key(b.First, b.Last, born);
+            bool keptArt = artMemory?.Remembered(artKey) is int was && !usedArt.Contains(was);
+            int art = keptArt ? artMemory.Remembered(artKey).Value : nextArt++;
+            usedArt.Add(art);
+            artMemory?.Record(artKey, art, keptArt);
             // ratings and gear: the template's rows, under the new id
             SetInt(db, ai, Append(db, ai, db.RecordBytes(ai, t0.RatingsRow)), "game_id", gameId);
             SetInt(db, eq, Append(db, eq, db.RecordBytes(eq, eqRow)), "game_id", gameId);

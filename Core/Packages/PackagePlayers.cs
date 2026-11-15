@@ -329,9 +329,13 @@ public static class PackagePlayers
                         if (ps.Ratings.Teams.TryGetValue(l.Team.Code, out int m)) teamMedians[l.Team.Index] = m;
                 rule = new TemplateRule(from, ps.Ratings.MaxOverall, ps.Ratings.Median, teamMedians, ps.Ratings.Spread > 0 ? ps.Ratings.Spread : 6);
             }
-            var made = PlayerCreator.Create(db, creates, null, rule);
+            var made = PlayerCreator.Create(db, creates, null, rule, r.OwnArt);
+            // each created player back to his own roster-file entry: the same name on his team, with his birth date
+            // (two players of one name, e.g. Jack O'Brien at ASU and at SHU, must not swap: his photo follows the entry)
             foreach (var cp in made.Created)
-                if (now.FirstOrDefault(l => l.Name.Equals(cp.Bio.Name, StringComparison.OrdinalIgnoreCase)) is { } l) placed.Add((l, cp.GameId));
+                if ((now.FirstOrDefault(l => l.Team.Index == cp.Team && l.Born == cp.Bio.Born && l.Name.Equals(cp.Bio.Name, StringComparison.OrdinalIgnoreCase))
+                    ?? now.FirstOrDefault(l => l.Team.Index == cp.Team && l.Name.Equals(cp.Bio.Name, StringComparison.OrdinalIgnoreCase))) is { } l)
+                    placed.Add((l, cp.GameId));
             foreach (var (n, why) in made.Skipped) r.Warnings.Add($"players: {n} not created: {why}");
             var ovr = made.Created.Select(x => x.TemplateOverall).OrderBy(x => x).ToList();
             string source = rule == null ? "typical NHL/AHL players"
@@ -467,7 +471,7 @@ public static class PackagePlayers
         // a commit on a shared art id (the generic 12586/12587 of 300-odd players without a portrait) gets an art id of
         // his own, as a created player does: after the highest art or audio id, so none clashes
         var audio = bf.GetValueOrDefault("audioid");
-        int nextArt = 1 + roster.Players.Max(p => Math.Max(p.ArtId, audio == null ? 0 : Convert.ToInt32(db.Get(bioT, p.BioRow, audio))));
+        int nextArt = 1 + Math.Max(r.OwnArt.Max, roster.Players.Max(p => Math.Max(p.ArtId, audio == null ? 0 : Convert.ToInt32(db.Get(bioT, p.BioRow, audio)))));
         var byBorn = new Dictionary<DateTime, List<RosterPlayer>>();
         foreach (var p in roster.Players)
             if (matcher.Born(p) is { } b) (byBorn.TryGetValue(b, out var l) ? l : byBorn[b] = new List<RosterPlayer>()).Add(p);
@@ -503,7 +507,11 @@ public static class PackagePlayers
                 {
                     // his own art id (no portrait uses the shared one, so nothing he shows changes)
                     artCount[art]--;
-                    art = nextArt++;
+                    // the one he had on the last install, when nobody has it now
+                    string artKey = matcher.Born(p) is { } pb ? ArtIdMemory.Key(p.FirstName, p.LastName, pb) : null;
+                    bool keptArt = artKey != null && r.OwnArt.Remembered(artKey) is int was && artCount.GetValueOrDefault(was) == 0;
+                    art = keptArt ? r.OwnArt.Remembered(artKey).Value : nextArt++;
+                    if (artKey != null) r.OwnArt.Record(artKey, art, keptArt);
                     db.Set(bioT, p.BioRow, bf["artid"], art);
                     artCount[art] = 1;
                     own++;

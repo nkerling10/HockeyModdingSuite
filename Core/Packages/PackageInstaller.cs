@@ -24,6 +24,10 @@ public static class PackageInstaller
         /// <summary>The extra leagues' logo art ids and team group ids, by league id.</summary>
         public Dictionary<int, int> LeagueArts { get; set; } = new();
         public Dictionary<int, int> Groups { get; set; } = new();
+        /// <summary>The art ids given to the package's players (ArtIdMemory): a created or committed player's own id, and
+        /// a photo's portrait slot, by "first last yyyy-mm-dd". A reinstall gives each the same id again.</summary>
+        public Dictionary<string, int> OwnArtIds { get; set; } = new();
+        public Dictionary<string, int> PortraitArtIds { get; set; } = new();
     }
 
     public sealed class Result
@@ -48,6 +52,9 @@ public static class PackageInstaller
         internal HashSet<int> TakenPlayers { get; } = new();
         /// <summary>Current-season roster-file players placed by the players step: (team code, name slug) → game id.</summary>
         public Dictionary<(string Code, string Slug), int> Placed { get; } = new();
+        /// <summary>Art ids remembered from the last install (see <see cref="Resolved.OwnArtIds"/>).</summary>
+        internal ArtIdMemory OwnArt { get; set; } = new();
+        internal ArtIdMemory PortraitArt { get; set; } = new();
         /// <summary>How long each install step took.</summary>
         public List<string> Timings { get; } = new();
     }
@@ -86,6 +93,8 @@ public static class PackageInstaller
 
         // 2. check and resolve
         var resolved = LoadResolved(store, spec.Id);
+        r.OwnArt = new ArtIdMemory(resolved.OwnArtIds);
+        r.PortraitArt = new ArtIdMemory(resolved.PortraitArtIds);
         var check = PackageCheck.Run(index, spec, resolved);       // keeps earlier choices where it can, all unique
         if (!check.Ok) throw new InvalidOperationException("The package doesn't pass package-check:\n  " + string.Join("\n  ", check.Errors));
         var legacy = new Legacy(index);
@@ -109,6 +118,7 @@ public static class PackageInstaller
         Took("players (database)");
         var portraits = PackagePortraits.Assign(index, legacy, db, spec, r);
         Took("portrait slots (database)");
+        r.Lines.Add($"art ids: {r.OwnArt.Kept + r.PortraitArt.Kept} players kept the id of the last install, {r.OwnArt.Fresh + r.PortraitArt.Fresh} got a new one (own ids {r.OwnArt.Kept}/{r.OwnArt.Fresh}, portrait slots {r.PortraitArt.Kept}/{r.PortraitArt.Fresh})");
         PackagePlayers.EntryYears(db, r, spec.Teams.Select(t => t.Index).ToHashSet());
         foreach (var (id, text) in spec.Strings ?? new()) SetString(loc, id, text, r);
         Took("classes and strings (database)");
@@ -159,6 +169,21 @@ public static class PackageInstaller
         }
 
         held.Dispose();
+        // two ranges over the same bytes must write the same bytes there: otherwise the later one silently replaces the
+        // earlier (a texture planned twice), and the take-down can't put the original back. Nothing is written yet.
+        foreach (var file in patches.Where(p => !p.Append).GroupBy(p => p.File, StringComparer.OrdinalIgnoreCase))
+        {
+            var sorted = file.OrderBy(p => p.Offset).ToList();
+            for (int i = 1; i < sorted.Count; i++)
+            {
+                var (a0, b0) = (sorted[i - 1], sorted[i]);
+                long end = a0.Offset + a0.New.Length;
+                if (b0.Offset >= end) continue;
+                int at = (int)(b0.Offset - a0.Offset), n = (int)Math.Min(end - b0.Offset, b0.New.Length);
+                if (!a0.New.AsSpan(at, n).SequenceEqual(b0.New.AsSpan(0, n)))
+                    throw new InvalidOperationException($"Two changes write different bytes at {file.Key} 0x{b0.Offset:X} ({a0.Note}, {b0.Note}); nothing was written.");
+            }
+        }
         r.Report = Report(spec, resolved, r);
         if (dry)
         {
@@ -172,6 +197,8 @@ public static class PackageInstaller
         Took("saving the mod entry");
         store.Apply(r.Entry, game, log);
         Took("writing into the game");
+        resolved.OwnArtIds = r.OwnArt.Merged();
+        resolved.PortraitArtIds = r.PortraitArt.Merged();
         SaveResolved(store, spec.Id, resolved);
         string cm = CodeModsFile(store);
         Directory.CreateDirectory(Path.GetDirectoryName(cm));

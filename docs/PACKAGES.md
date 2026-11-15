@@ -64,6 +64,12 @@ in a players block takes templates from those leagues' teams instead (exhibition
 at most that overall, and any one of the matching candidates, so the new players spread over that league's range.
 Add `"median": 65` and/or `"teams": { "MICH": 70, ... }` (a team's own median by code) and the players aim at that
 overall +/- `"spread"` (default 6, most near the middle, never above `maxOverall`), copying the candidate nearest it.
+Art ids are stable across reinstalls (ArtIdMemory, kept in the package's resolved.json as OwnArtIds/PortraitArtIds by
+"first last yyyy-mm-dd"): a created or committed player gets his own id back, a player with a photo his portrait slot,
+and new players get ids nobody held. A franchise save keeps each player's art id while portraits and the NCAA code mods'
+tables find players by it, so a reinstall (more photos, roster-file fixes) must not move them. One photo per game player:
+a second photo that finds the same player is left out with a warning; and before anything is written, two ranges over
+the same bytes must write the same bytes (else the install stops).
 Built 2026-11-14: the take-down/re-apply hook (a database save blocked by a package offers to take it off, save,
 and reinstall it: ModService.SaveDbAsync), the App UI (Mods page: Install package… / Reinstall / Remove package; a
 package row is installed and removed as a whole, and left out of Apply all / Restore all / Export pack), and a plain
