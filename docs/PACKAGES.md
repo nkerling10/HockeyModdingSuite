@@ -64,6 +64,10 @@ in a players block takes templates from those leagues' teams instead (exhibition
 at most that overall, and any one of the matching candidates, so the new players spread over that league's range.
 Add `"median": 65` and/or `"teams": { "MICH": 70, ... }` (a team's own median by code) and the players aim at that
 overall +/- `"spread"` (default 6, most near the middle, never above `maxOverall`), copying the candidate nearest it.
+`package-export` ships no rink layouts: each team's centre ice is cut at export exactly as the installer cuts it and
+goes in as the team's ice logo (`<CODE>_ice.png`, or `ice.png` in its logo folder), which an install takes as it is.
+`"game": { "titleId": "PPSA34063", "version": "01.003.001" }` (sce_sys/param.json titleId and contentVersion): an
+install into another game or version is refused before anything changes (PackageInstaller.CheckGame).
 `"ids": [40000, 41999]` in a players block puts that file's created players at those game ids (in order, after any
 already there). Ids 40000-49999 are for packages' blocks (PlayerCreator.PackageIdStart); anything created without a block
 (NHL Sync, a roster file) stays below 40000, and 50000+ is the game's (game modes 56500+, archetypes, Create-a-Player).

@@ -12,6 +12,10 @@ public sealed class PackageSpec
     public string Id { get; set; }
     public string Title { get; set; }
     public string Version { get; set; }
+    /// <summary>The game the package is made for: { "titleId": "PPSA34063", "version": "01.003.001" } (sce_sys/param.json's
+    /// titleId and contentVersion). Installing into another game or version is refused before anything changes: the code
+    /// mods and the asset layout are made for that one build.</summary>
+    public GameSpec Game { get; set; }
     public LeagueSpec League { get; set; }
     public TeamBlockSpec TeamBlock { get; set; }
     /// <summary>Optional: teams to retire when the team tables are full (see RecycleSpec).</summary>
@@ -337,4 +341,11 @@ public sealed class CodeModsSpec
 {
     /// <summary>A Kyty/GoldHEN patch file (relative to the package folder) whose mods the package installs.</summary>
     public string File { get; set; }
+}
+
+/// <summary>Recipe "game": see <see cref="PackageSpec.Game"/>.</summary>
+public sealed class GameSpec
+{
+    public string TitleId { get; set; }
+    public string Version { get; set; }
 }

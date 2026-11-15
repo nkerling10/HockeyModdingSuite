@@ -59,6 +59,21 @@ public static class PackageInstaller
         public List<string> Timings { get; } = new();
     }
 
+    /// <summary>Refuses a game folder other than the one the package is made for (its "game": title id and version),
+    /// before anything is read or changed.</summary>
+    public static void CheckGame(PackageSpec spec, string game)
+    {
+        if (spec.Game == null) return;
+        var g = GameProfile.Detect(game);
+        bool idOk = string.IsNullOrEmpty(spec.Game.TitleId) || string.Equals(spec.Game.TitleId, g.TitleId, StringComparison.OrdinalIgnoreCase);
+        bool verOk = string.IsNullOrEmpty(spec.Game.Version) || string.Equals(spec.Game.Version, g.Version, StringComparison.OrdinalIgnoreCase);
+        if (idOk && verOk) return;
+        string want = $"{spec.Game.TitleId} v{spec.Game.Version}".Trim();
+        string have = g == GameProfile.None ? "no game (no sce_sys/param.json)" : $"{g.TitleId} v{g.Version}";
+        throw new InvalidOperationException($"{spec.Title ?? spec.Id} {spec.Version} is made for {want}, but this game folder is {have}. " +
+            "Its code mods and file changes only fit that build, so nothing was installed.");
+    }
+
     public static string StateDir(ModStore store, string id) => Path.Combine(store.Dir, "packages", id);
     public static string CodeModsFile(ModStore store) => Path.Combine(store.Dir, "codemods", "nhl27_code_mods.json");
 
@@ -72,6 +87,7 @@ public static class PackageInstaller
     public static Result Install(AssetIndex index, ModStore store, string game, PackageSpec spec, bool dry, Action<string> log,
                                  Func<AssetIndex> reopen = null)
     {
+        CheckGame(spec, game);
         var r = new Result();
         log ??= _ => { };
         // how long each step takes, in the report
@@ -528,7 +544,7 @@ public static class PackageInstaller
     /// cutting it takes about half a second, so the cut is kept in the plan cache by the layout's bytes (deflated: it is
     /// mostly clear ice) and only a new or changed layout is cut again.
     /// </summary>
-    private static (byte[] Logo, bool Measured) CenterIceCut(byte[] file, string what)
+    internal static (byte[] Logo, bool Measured) CenterIceCut(byte[] file, string what)
     {
         var kept = PlanCache.Get("centerice", () =>
         {

@@ -47,7 +47,7 @@ public static class PackagePortraits
         string root = Folder(spec);
         if (root == null) return plan;
         var others = PortraitSync.OtherRosters.Select(n => { try { return legacy.OpenDb(n); } catch { return null; } }).Where(d => d != null).ToList();
-        var freeList = PortraitSync.FreeArtIds(index, db, others);
+        var freeList = PortraitSync.FreeArtIds(index, db, others, spec.Id);
         var free = freeList.ToHashSet();
         var mem = r.PortraitArt;
         int at = 0;

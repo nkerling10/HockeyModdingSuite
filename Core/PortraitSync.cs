@@ -91,10 +91,14 @@ public static class PortraitSync
     /// Portrait slots nobody uses, lowest first: every p{n} texture whose n is no player's artid in
     /// <paramref name="main"/> (nhl_game.db) or in <paramref name="others"/> (the game modes' rosters, read by the same
     /// field position, since their table and field names are scrambled but the bio layout is the same).
+    /// Art ids a package remembers (its players' portrait slots and own ids, kept for its next install: see
+    /// <see cref="PackageArtIds"/>) count as used too, also while the package is taken off (a roster sync between
+    /// a package's removal and its reinstall would otherwise hand them out); <paramref name="exceptPackage"/> is the
+    /// package installing now, which takes its own back.
     /// </summary>
-    public static List<int> FreeArtIds(AssetIndex index, T3Db main, IEnumerable<T3Db> others)
+    public static List<int> FreeArtIds(AssetIndex index, T3Db main, IEnumerable<T3Db> others, string exceptPackage = null)
     {
-        var used = new HashSet<int>();
+        var used = PackageArtIds(exceptPackage);
         var bio = main.Table(Roster.BioTable);
         var art = bio.Fields.First(f => f.Name == "artid");
         for (int r = 0; r < bio.WrittenRecords; r++)
@@ -113,6 +117,31 @@ public static class PortraitSync
                 free.Add(n);
         free.Sort();
         return free;
+    }
+
+    /// <summary>The art ids every installed or taken-off package remembers for its players (resolved.json OwnArtIds and
+    /// PortraitArtIds under the kit's mods\packages), but <paramref name="exceptPackage"/>'s.</summary>
+    public static HashSet<int> PackageArtIds(string exceptPackage = null)
+    {
+        var ids = new HashSet<int>();
+        string dir = Path.Combine(KitPaths.ModsFor(null), "packages");
+        if (!Directory.Exists(dir)) return ids;
+        foreach (var pkg in Directory.GetDirectories(dir))
+        {
+            if (exceptPackage != null && string.Equals(Path.GetFileName(pkg), exceptPackage, StringComparison.OrdinalIgnoreCase)) continue;
+            string f = Path.Combine(pkg, "resolved.json");
+            if (!File.Exists(f)) continue;
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(f));
+                foreach (var key in new[] { "OwnArtIds", "PortraitArtIds" })
+                    if (doc.RootElement.TryGetProperty(key, out var map) && map.ValueKind == System.Text.Json.JsonValueKind.Object)
+                        foreach (var e in map.EnumerateObject())
+                            if (e.Value.TryGetInt32(out int a)) ids.Add(a);
+            }
+            catch (Exception) { /* a damaged state file reserves nothing */ }
+        }
+        return ids;
     }
 
     /// <summary>
