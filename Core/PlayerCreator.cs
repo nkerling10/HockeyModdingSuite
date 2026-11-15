@@ -104,7 +104,7 @@ public static class PlayerCreator
     /// the club CapWages lists him under, else none (an AHL-only deal); without it, the AHL team's NHL parent.
     /// </summary>
     public static CreateResult Create(T3Db db, IEnumerable<SyncChange> missing, IReadOnlyList<CapTeam> cap = null, TemplateRule rule = null,
-                                      ArtIdMemory artMemory = null, (int From, int To)? idBlock = null)
+                                      ArtIdMemory artMemory = null, (int From, int To)? idBlock = null, bool teamless = false)
     {
         var result = new CreateResult();
         using var batch = db.Batch();
@@ -218,7 +218,7 @@ public static class PlayerCreator
             var (already, nameOnly) = matcher.Find(b.First, b.Last, born);
             // the same name and birth date is him, unless one is a goalie and the other a skater (two people)
             if (already != null && !nameOnly && (already.PositionPrimary == 5) == (b.Primary == 5)) { result.Skipped.Add((name, $"already in the game (game id {already.GameId})")); continue; }
-            if (keyCounts.Any(n => n.GetValueOrDefault(c.ToTeam) >= 40)) { result.Skipped.Add((name, $"{TeamName(c.ToTeam)} already has 40 players")); continue; }
+            if (!teamless && keyCounts.Any(n => n.GetValueOrDefault(c.ToTeam) >= 40)) { result.Skipped.Add((name, $"{TeamName(c.ToTeam)} already has 40 players")); continue; }
             bool goalie = b.Primary == 5;
             var ai = goalie ? goalieAi : skaterAi;
             var eq = goalie ? goalieEq : skaterEq;
@@ -267,8 +267,10 @@ public static class PlayerCreator
             I("positionsecondary", b.Secondary);
             int number = b.Number is >= 0 and <= 99 ? b.Number : c.Api?.Number ?? c.Ahl?.Number ?? -1;
             if (number is >= 0 and <= 99) I("jersey", number);
-            I("team", c.ToTeam);
-            int proteam = Level(c.ToTeam) == 0 ? c.ToTeam
+            // teamless: an unsigned prospect with no team, no roster row and not on the free-agent list, as the game
+            // keeps its own (35 such in the base roster, born 2006+); c.ToTeam is then only for his ratings (TemplateRule)
+            I("team", teamless ? -1 : c.ToTeam);
+            int proteam = teamless ? -1 : Level(c.ToTeam) == 0 ? c.ToTeam
                 : cap == null ? parentOf.GetValueOrDefault(c.ToTeam, -1)
                 : capOwner.GetValueOrDefault(Key(b.First, b.Last, born), -1);
             I("proteam", proteam);
@@ -329,7 +331,7 @@ public static class PlayerCreator
             I("surnameid", surname);
 
             var made = new CreatedPlayer(b.Name, gameId, index, c.ToTeam, TeamName(c.ToTeam), t0.Name, t0.GameId, t0.Overall, art, surname, country, state, b);
-            joins.Add((new SyncChange
+            if (!teamless) joins.Add((new SyncChange
             {
                 Kind = SyncKind.Join, Api = c.Api, Ahl = c.Ahl, GameId = gameId, Name = b.Name, Position = c.Position,
                 PlayerIndex = index, FromTeam = -1, FromTeamName = "Created", ToTeam = c.ToTeam, ToTeamName = TeamName(c.ToTeam),

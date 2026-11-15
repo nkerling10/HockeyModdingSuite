@@ -68,6 +68,10 @@ overall +/- `"spread"` (default 6, most near the middle, never above `maxOverall
 goes in as the team's ice logo (`<CODE>_ice.png`, or `ice.png` in its logo folder), which an install takes as it is.
 `"game": { "titleId": "PPSA34063", "version": "01.003.001" }` (sce_sys/param.json titleId and contentVersion): an
 install into another game or version is refused before anything changes (PackageInstaller.CheckGame).
+`"createCommits": true` in a players block: commits (later seasons) not in the game are created as unsigned
+prospects with no team (team -1, no roster row, not on the free-agent list: how the game keeps its own young prospects),
+rated by the block's `ratings` for their school and in its `ids`, given the file's draft, and join their school by art
+id like any commit; ones without a usable position stay name commits.
 `"ids": [40000, 41999]` in a players block puts that file's created players at those game ids (in order, after any
 already there). Ids 40000-49999 are for packages' blocks (PlayerCreator.PackageIdStart); anything created without a block
 (NHL Sync, a roster file) stays below 40000, and 50000+ is the game's (game modes 56500+, archetypes, Create-a-Player).

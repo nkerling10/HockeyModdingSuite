@@ -320,16 +320,8 @@ public static class PackagePlayers
         if (moves.Count > 0) r.Lines.Add("players: " + RosterSync.Apply(db, moves));
         if (creates.Count > 0)
         {
-            TemplateRule rule = null;
-            if (ps.Ratings?.From is { Count: > 0 } from)
-            {
-                var teamMedians = new Dictionary<int, int>();
-                if (ps.Ratings.Teams != null)
-                    foreach (var l in now)
-                        if (ps.Ratings.Teams.TryGetValue(l.Team.Code, out int m)) teamMedians[l.Team.Index] = m;
-                rule = new TemplateRule(from, ps.Ratings.MaxOverall, ps.Ratings.Median, teamMedians, ps.Ratings.Spread > 0 ? ps.Ratings.Spread : 6);
-            }
-            (int, int)? idBlock = ps.Ids is { Count: 2 } ids ? (ids[0], ids[1]) : null;
+            var rule = RuleOf(ps, now);
+            var idBlock = IdBlockOf(ps);
             var made = PlayerCreator.Create(db, creates, null, rule, r.OwnArt, idBlock);
             // each created player back to his own roster-file entry: the same name on his team, with his birth date
             // (two players of one name, e.g. Jack O'Brien at ASU and at SHU, must not swap: his photo follows the entry)
@@ -448,6 +440,68 @@ public static class PackagePlayers
     /// <summary>A players file's commits (its later seasons) and its roster season, waiting for <see cref="ApplyCommits"/>.</summary>
     internal sealed record CommitBatch(PackageSpec Spec, List<Listed> Commits, string Current);
 
+    /// <summary>The players file's ratings rule (players.ratings), with each listed team's own median.</summary>
+    private static TemplateRule RuleOf(PlayersSpec ps, IEnumerable<Listed> listed)
+    {
+        if (ps?.Ratings?.From is not { Count: > 0 } from) return null;
+        var teamMedians = new Dictionary<int, int>();
+        if (ps.Ratings.Teams != null)
+            foreach (var l in listed)
+                if (ps.Ratings.Teams.TryGetValue(l.Team.Code, out int m)) teamMedians[l.Team.Index] = m;
+        return new TemplateRule(from, ps.Ratings.MaxOverall, ps.Ratings.Median, teamMedians, ps.Ratings.Spread > 0 ? ps.Ratings.Spread : 6);
+    }
+
+    private static (int, int)? IdBlockOf(PlayersSpec ps) => ps?.Ids is { Count: 2 } ids ? (ids[0], ids[1]) : null;
+
+    /// <summary>
+    /// Creates the commits not in the game (players.createCommits): each as an unsigned prospect with no team (the way
+    /// the game keeps its own young prospects), rated by the file's rule for his school and in its id block, then given
+    /// the file's draft and an art-id commit to his school. Returns the commits created; the rest stay name commits.
+    /// </summary>
+    private static HashSet<Listed> CreateCommits(T3Db db, PackageInstaller.Result r, PackageSpec spec, List<(Listed L, int Offset)> missing, List<string> badDraft)
+    {
+        var done = new HashSet<Listed>();
+        if (missing.Count == 0) return done;
+        var changes = new List<SyncChange>();
+        var of = new Dictionary<SyncChange, (Listed L, int Offset)>();
+        foreach (var (l, off) in missing)
+        {
+            var d = l.Info;
+            int p = Code(d?.Pos, d?.Shoots);
+            if (d == null || p == -1) continue;
+            bool right = (d.Shoots ?? "L").Trim().StartsWith("R", StringComparison.OrdinalIgnoreCase);
+            if (p == Forward) p = right ? 2 : 1;                          // "F": his shooting side's wing
+            int s = Code(d.Pos2, d.Shoots, p);
+            if (s == p || s == Forward || Group(s) != Group(p)) s = -1;
+            var bio = BioOf(l, d, p, s);
+            var c = new SyncChange { Kind = SyncKind.Missing, Name = l.Name, Position = bio.Position, ToTeam = l.Team.Index, ToTeamName = l.Team.Name, Bio = bio, Selected = true };
+            if (PlayerCreator.Problem(c) != null) continue;
+            changes.Add(c); of[c] = (l, off);
+        }
+        if (changes.Count == 0) return done;
+        var made = PlayerCreator.Create(db, changes, null, RuleOf(spec.Players, missing.Select(m => m.L)), r.OwnArt, IdBlockOf(spec.Players), teamless: true);
+        foreach (var (n, why) in made.Skipped) r.Warnings.Add($"players: commit {n} not created: {why}");
+        var roster = new Roster(db);
+        var bioT = db.Table(Roster.BioTable);
+        var bf = bioT.Fields.ToDictionary(f => f.Name);
+        var nhlByCode = RosterSync.TeamIndex(db);
+        foreach (var cp in made.Created)
+        {
+            var c = changes.FirstOrDefault(x => x.Bio.Name == cp.Bio.Name && x.Bio.Born == cp.Bio.Born && x.ToTeam == cp.Team);
+            if (c == null || roster.Find(cp.GameId) is not { } p) continue;
+            var (l, off) = of[c];
+            SetFileDraft(db, bioT, bf, nhlByCode, badDraft, p.BioRow, l);
+            r.Commits.Add((cp.ArtId, l.Team.Index, off));
+            done.Add(l);
+        }
+        var ovr = made.Created.Select(x => x.TemplateOverall).OrderBy(x => x).ToList();
+        var gids = made.Created.Select(x => x.GameId).ToList();
+        if (made.Created.Count > 0)
+            r.Lines.Add($"players: commits created ({made.Created.Count}, unsigned prospects with no team until they join their school): " +
+                        $"overall {ovr[0]}-{ovr[^1]}, median {ovr[ovr.Count / 2]}; game ids {gids.Min()}-{gids.Max()}");
+        return done;
+    }
+
     /// <summary>
     /// The players files' commits (their later seasons), after every group's players are in: a commit the package
     /// creates itself (the file players of a USHL team none of whose players were in the game) is in the game by then,
@@ -483,6 +537,7 @@ public static class PackagePlayers
             var skipped = new List<string>();
             var badDraft = new List<string>();
             int drafted = 0, close = 0, spelled = 0, own = 0, before = r.Commits.Count;
+            var toCreate = new List<(Listed L, int Offset)>();
             foreach (var l in commits)
             {
                 var (p, nameOnly) = matcher.Find(l.First, l.Last, l.Born);
@@ -500,8 +555,12 @@ public static class PackagePlayers
                 { p = one[0]; spelled++; r.Lines.Add($"players: commit {l.Name} ({l.Team.Code} {l.Season}) is the game's {p.Name} (same birth date)"); }
                 // not in the game yet: the game may generate him later (a draft-class prospect with his real name);
                 // part 11 then sends him to this school by name
-                if (p == null && int.TryParse(l.Season, out int ny) && int.TryParse(current, out int nc) && ny > nc && ny - nc <= 15)
-                    r.NameCommits.Add((l.Name, l.Team.Index, ny - nc));
+                // (players.createCommits: he is created instead, below; one whose birth date says he's another person too)
+                if ((p == null || nameOnly) && int.TryParse(l.Season, out int ny) && int.TryParse(current, out int nc) && ny > nc && ny - nc <= 15)
+                {
+                    if (spec.Players?.CreateCommits == true && l.Info != null) { toCreate.Add((l, ny - nc)); continue; }
+                    if (p == null) r.NameCommits.Add((l.Name, l.Team.Index, ny - nc));
+                }
                 if (p == null || nameOnly || !int.TryParse(l.Season, out int year) || !int.TryParse(current, out int cur) || year <= cur || year - cur > 15)
                 { skipped.Add($"{l.Name} ({l.Team.Code} {l.Season}){(nameOnly ? ": birth date differs" : "")}"); continue; }
                 if (SetFileDraft(db, bioT, bf, nhlByCode, badDraft, p.BioRow, l)) drafted++;
@@ -522,6 +581,11 @@ public static class PackagePlayers
                 if (art <= 0 || art > 0xFFFF || artCount.GetValueOrDefault(art) != 1) { skipped.Add($"{l.Name}: art id {art} not his alone"); continue; }
                 r.Commits.Add((art, l.Team.Index, year - cur));        // seasons after the roster season: the game adds the franchise's year
             }
+            var createdCommits = CreateCommits(db, r, spec, toCreate, badDraft);
+            foreach (var c in r.Commits) nextArt = Math.Max(nextArt, c.ArtId + 1);       // past the created ones' ids
+            // those not created after all (no usable position, no room): name commits, as before
+            foreach (var (l, off) in toCreate)
+                if (!createdCommits.Contains(l)) r.NameCommits.Add((l.Name, l.Team.Index, off));
             r.Lines.Add($"players: commits ({commits.Count}): " +
                         string.Join("; ", commits.GroupBy(c => (c.Team.Code, c.Season)).Select(g => $"{g.Key.Code} {g.Key.Season}: {g.Count()}")) +
                         $"; {r.Commits.Count - before} in the game join their school in their commit year ({close} with a birth date a typo or a few days off, " +
@@ -668,6 +732,10 @@ public sealed class PlayersSpec
     /// <summary>Where created players' ratings come from: { "from": [league ids], "maxOverall": n } (e.g. the CHL, 11-13,
     /// up to 67 for the USHL). Missing: a typical NHL/AHL player of his profile (PlayerCreator's default).</summary>
     public RatingsSpec Ratings { get; set; }
+    /// <summary>true: commits (later seasons) not in the game are created as unsigned prospects with no team, rated by
+    /// <see cref="Ratings"/> for their school and in <see cref="Ids"/>, and join their school by art id like any commit.
+    /// false (default): they are only listed by name, for a prospect the game may generate with that name.</summary>
+    public bool CreateCommits { get; set; }
     /// <summary>The game ids this file's created players use: [from, to], within PlayerCreator.PackageIdStart..SpecialIdStart-1
     /// (e.g. [40000, 41999]), so the package can say which ids it takes. Missing: after the highest id below the blocks.</summary>
     public List<int> Ids { get; set; }
