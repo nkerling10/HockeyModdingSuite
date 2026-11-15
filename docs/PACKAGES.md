@@ -64,6 +64,11 @@ in a players block takes templates from those leagues' teams instead (exhibition
 at most that overall, and any one of the matching candidates, so the new players spread over that league's range.
 Add `"median": 65` and/or `"teams": { "MICH": 70, ... }` (a team's own median by code) and the players aim at that
 overall +/- `"spread"` (default 6, most near the middle, never above `maxOverall`), copying the candidate nearest it.
+Name strings are packed (PackageInstaller.PackNameStrings): a reused set's strings only have the room the old club's
+texts took, so a team's strings with the same text share one stored copy (T3Db.PointString), and a text too long for
+its own place goes to a place freed that way (any team's), counting a freed neighbour's room. Then shorter texts, a
+blank, the old text, as before; a layout that would overlap anything falls back to writing in place. NCAA: 586
+strings, 0 blanked (was 40 blanked).
 `package-export` ships no rink layouts: each team's centre ice is cut at export exactly as the installer cuts it and
 goes in as the team's ice logo (`<CODE>_ice.png`, or `ice.png` in its logo folder), which an install takes as it is.
 `"game": { "titleId": "PPSA34063", "version": "01.003.001" }` (sce_sys/param.json titleId and contentVersion): an

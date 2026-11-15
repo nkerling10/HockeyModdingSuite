@@ -222,6 +222,48 @@ public sealed class T3Db
 
     private readonly Dictionary<T3Table, (int[] Offsets, Dictionary<int, int> Users)> _strings = new();
 
+    /// <summary>Where a record's compressed string is stored (offset into the table's strings), -1 for none.</summary>
+    public int StringOffset(T3Table t, int record, T3Field f) => I32(RecordPos(t, record) + f.BitOffset / 8);
+
+    /// <summary>Every offset a written record's compressed string uses in the table, sorted.</summary>
+    public int[] StringOffsets(T3Table t) => Strings(t).Offsets;
+
+    /// <summary>The bytes of a compressed string's length header (1 short, 2 long).</summary>
+    public static int StringHead(T3Field f) => f.Type == T3FieldType.ShortCompressedString ? 1 : 2;
+
+    /// <summary>The compressed bytes <paramref name="text"/> takes in the table (-1: a character it can't encode).</summary>
+    public int EncodedSize(T3Table t, string text) => t.Huffman?.Encode(Encoding.UTF8.GetBytes(text ?? ""))?.Length ?? -1;
+
+    /// <summary>Points a record's compressed string at <paramref name="offset"/> (another string's place: two records can
+    /// share one stored text, as the game's own files do).</summary>
+    public void PointString(T3Table t, int record, T3Field f, int offset)
+    {
+        if (!f.IsCompressed) throw new ArgumentException($"{f.Name} isn't a compressed string.");
+        BinaryPrimitives.WriteInt32LittleEndian(Data.AsSpan(RecordPos(t, record) + f.BitOffset / 8), offset);
+        _strings.Remove(t);
+        if (_batch != null) _batch.Add(t);
+        else FixCrc(t);
+    }
+
+    /// <summary>Writes <paramref name="text"/> as the compressed string at <paramref name="offset"/>, whoever points at it.
+    /// The caller has made sure it fits there (up to the next string any record still uses).</summary>
+    public void WriteStringAt(T3Table t, T3Field f, int offset, string text)
+    {
+        int p = t.StringsStart + offset;
+        bool shortLen = f.Type == T3FieldType.ShortCompressedString;
+        int head = shortLen ? 1 : 2;
+        int oldN = shortLen ? Data[p] : BinaryPrimitives.ReadUInt16BigEndian(Data.AsSpan(p));
+        int oldBytes = t.Huffman.EncodedLength(Data, p + head, oldN);
+        var bytes = Encoding.UTF8.GetBytes(text ?? "");
+        var enc = t.Huffman.Encode(bytes) ?? throw new ArgumentException("The text uses characters this table's strings never use.");
+        if (shortLen) { if (bytes.Length > 255) throw new ArgumentException("Too long."); Data[p] = (byte)bytes.Length; }
+        else BinaryPrimitives.WriteUInt16BigEndian(Data.AsSpan(p), (ushort)bytes.Length);
+        Array.Clear(Data, p + head, Math.Min(oldBytes, Math.Max(0, t.StringsLength - offset - head)));
+        enc.CopyTo(Data, p + head);
+        if (_batch != null) _batch.Add(t);
+        else FixCrc(t);
+    }
+
     /// <summary>The compressed-string offsets every written record of a table uses (sorted), and how many fields point at each.</summary>
     private (int[] Offsets, Dictionary<int, int> Users) Strings(T3Table t)
     {

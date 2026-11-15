@@ -374,6 +374,7 @@ public static class PackageInstaller
         var teams = db.Table("exhibitionteams");
         var arenas = db.Table("exhibitionarena");
         var byName = spec.AllTeams.Where(t => t.Name != null).ToDictionary(t => t.Name, t => t.Index, StringComparer.OrdinalIgnoreCase);
+        var named = new List<(TeamSpec T, string Abbr, Dictionary<string, PackageCheck.NameString> Set)>();
         foreach (var t in spec.AllTeams.OrderBy(t => t.Index))
         {
             string artAbbr = res.NameSets.GetValueOrDefault(t.Code) ?? t.Abbr;
@@ -434,21 +435,158 @@ public static class PackageInstaller
                 r.Lines.Add($"{t.Code}: arena {arenaIndex} \"{s?.ArenaName}\"");
             }
 
-            // name strings
+            // name strings: written for all teams at once below (PackNameStrings)
             if (sets.TryGetValue(artAbbr.ToUpperInvariant(), out var set))
             {
-                var choice = PackageCheck.Fit(loc, artAbbr.ToUpperInvariant(), set, t, spec.NameSets?.SchoolOnly == true);
-                if (choice == null) r.Warnings.Add($"{t.Code}: name set {artAbbr} no longer fits");
-                else
-                    foreach (var (ns, text, exact, kept) in choice.Strings)
-                    {
-                        if (kept && !string.IsNullOrWhiteSpace(text)) { r.Warnings.Add($"{t.Code}: {ns.Prefix}{artAbbr} keeps \"{text}\" (no room)"); continue; }
-                        if (kept) r.Lines.Add($"{t.Code}: {ns.Prefix}{artAbbr} blanked (no room for the team's text)");
-                        if (loc.Get(ns.Table, ns.Row, ns.Text)?.ToString() != text) loc.Set(ns.Table, ns.Row, ns.Text, text);
-                    }
+                if (PackageCheck.Fit(loc, artAbbr.ToUpperInvariant(), set, t, spec.NameSets?.SchoolOnly == true) == null)
+                    r.Warnings.Add($"{t.Code}: name set {artAbbr} no longer fits");
+                else named.Add((t, artAbbr.ToUpperInvariant(), set));
             }
             else r.Warnings.Add($"{t.Code}: no name set {artAbbr} in the language file: its names won't show");
         }
+        PackNameStrings(loc, named, spec.NameSets?.SchoolOnly == true, r);
+    }
+
+    /// <summary>
+    /// Writes every team's name strings, packed. A reused set's strings only have the room their old club's texts took
+    /// (each ends where the next stored string starts), so long school names didn't fit and were blanked. Here the texts
+    /// are laid out together: strings of one team with the same text (the nickname is TEAMLINE2, NICKLINE2, TXT_NICKNAME
+    /// and TXT_NICKNAME_ALT) share one stored copy, as the game's own files share texts, which frees the others' places;
+    /// a text that fits none of its own strings' places goes to a freed place (of any team in the package) where it fits,
+    /// counting a freed neighbour's room as its own. A string still without room takes its next, shorter text, then a
+    /// blank, then keeps the old text (reported), as before.
+    /// </summary>
+    private static void PackNameStrings(T3Db loc, List<(TeamSpec T, string Abbr, Dictionary<string, PackageCheck.NameString> Set)> named, bool schoolOnly, Result r)
+    {
+        var items = new List<(TeamSpec T, string Abbr, PackageCheck.NameString S, string[] Cands, bool Abbr3)>();
+        foreach (var (t, abbr, set) in named)
+        {
+            var want = PackageCheck.Wanted(set, t, schoolOnly);
+            foreach (var (p, s) in set)
+            {
+                var cands = (want.GetValueOrDefault(p) ?? Array.Empty<string>()).Where(c => !string.IsNullOrEmpty(c)).Distinct().ToArray();
+                if (cands.Length == 0) continue;
+                items.Add((t, abbr, s, cands, p == "NHLTEAMNAME_ABBR3_"));
+            }
+        }
+        int shared = 0, moved = 0, shorter = 0, blanked = 0, kept = 0;
+        foreach (var byTable in items.GroupBy(i => i.S.Table))
+        {
+            var tbl = byTable.Key;
+            var users = new Dictionary<int, int>();
+            foreach (var o in loc.StringOffsets(tbl)) users[o] = 0;
+            // how many records point at each offset (ours included)
+            foreach (var f in tbl.Fields.Where(f => f.IsCompressed))
+                for (int row = 0; row < tbl.WrittenRecords; row++)
+                    if (!loc.IsInvalid(tbl, row) && loc.StringOffset(tbl, row, f) is var o2 && o2 != -1) users[o2] = users.GetValueOrDefault(o2) + 1;
+            var list = byTable.Select(i => (i, Off: loc.StringOffset(tbl, i.S.Row, i.S.Text))).ToList();
+            // only strings that are ours alone can be moved or rewritten; one the game shares stays as Fit leaves it
+            var mine = list.Where(x => x.Off != -1 && users.GetValueOrDefault(x.Off) == 1).ToList();
+            var ownSlots = mine.Select(x => x.Off).ToHashSet();
+            var others = new SortedSet<int>(users.Keys.Where(o => !ownSlots.Contains(o)));   // offsets that stay used whatever we do
+            int head = PackageCheck.Head(byTable.First().S.Text);
+            var taken = new SortedSet<int>();                                              // our slots holding a text
+            int RoomAt(int off)
+            {
+                int next = tbl.StringsLength;
+                var a = others.GetViewBetween(off + 1, int.MaxValue); if (a.Count > 0) next = Math.Min(next, a.Min);
+                var b = taken.GetViewBetween(off + 1, int.MaxValue); if (b.Count > 0) next = Math.Min(next, b.Min);
+                return next - off - head;
+            }
+            var plan = new Dictionary<string, (int Slot, List<(TeamSpec T, string Abbr, PackageCheck.NameString S, string[] Cands, bool Abbr3)> Members, string Text)>();
+            // one group per team and wanted text (the team's first choice); its members share one stored copy
+            var groups = mine.GroupBy(x => (x.i.T.Code, x.i.Cands[0]))
+                             .Select(g => (Key: g.Key, Members: g.Select(x => x.i).ToList(), Slots: g.Select(x => x.Off).Distinct().ToList(), Need: loc.EncodedSize(tbl, g.Key.Item2)))
+                             .OrderByDescending(g => g.Need).ToList();
+            var freed = new SortedSet<int>(ownSlots);
+            var keptAt = new List<(int Off, (TeamSpec T, string Abbr, PackageCheck.NameString S, string[] Cands, bool Abbr3) M)>();
+            var unplaced = new List<(string Team, List<(TeamSpec T, string Abbr, PackageCheck.NameString S, string[] Cands, bool Abbr3)> Members)>();
+            // pass 1: a group's own places (all freed first, so neighbours' room counts)
+            foreach (var g in groups)
+            {
+                if (g.Need < 0) { unplaced.Add((g.Key.Code, g.Members)); continue; }
+                int best = -1;
+                foreach (var s in g.Slots.OrderBy(x => x))
+                    if (!taken.Contains(s) && RoomAt(s) >= g.Need) { best = s; break; }
+                if (best < 0) { unplaced.Add((g.Key.Code, g.Members)); continue; }
+                taken.Add(best); freed.Remove(best);
+                plan[$"{g.Key.Code}|{g.Key.Item2}"] = (best, g.Members, g.Key.Item2);
+                if (g.Members.Count > 1) shared += g.Members.Count - 1;
+            }
+            // pass 2: the rest go to freed places of any team, best fit, then shorter texts, then a blank
+            foreach (var (team, members) in unplaced.ToList())
+            {
+                // each member may want a different shorter text: place per member, sharing when the text is the same
+                foreach (var m in members)
+                {
+                    bool done = false;
+                    for (int k = 0; k < m.Cands.Length && !done; k++)
+                    {
+                        string text = m.Cands[k];
+                        string key = $"{team}|{text}";
+                        if (plan.TryGetValue(key, out var have)) { have.Members.Add(m); done = true; if (k > 0) shorter++; else shared++; break; }
+                        int need = loc.EncodedSize(tbl, text);
+                        if (need < 0) continue;
+                        int slot = freed.Where(f => RoomAt(f) >= need).OrderBy(f => RoomAt(f)).DefaultIfEmpty(-1).First();
+                        if (slot < 0) continue;
+                        taken.Add(slot); freed.Remove(slot);
+                        plan[key] = (slot, new() { m }, text);
+                        done = true; moved++; if (k > 0) shorter++;
+                    }
+                    if (done) continue;
+                    if (m.Abbr3) { keptAt.Add((loc.StringOffset(tbl, m.S.Row, m.S.Text), m)); r.Warnings.Add($"{m.T.Code}: {m.S.Prefix}{m.Abbr} keeps \"{m.S.Current}\" (no room)"); kept++; continue; }
+                    // a blank in a freed place (or its own), else the old text stays
+                    int blankNeed = loc.EncodedSize(tbl, " ");
+                    int own = loc.StringOffset(tbl, m.S.Row, m.S.Text);
+                    int bslot = freed.Contains(own) && RoomAt(own) >= blankNeed ? own : freed.Where(f => RoomAt(f) >= blankNeed).DefaultIfEmpty(-1).First();
+                    if (bslot >= 0 && m.S.Prefix != "NHLTEAMNAME_")
+                    {
+                        taken.Add(bslot); freed.Remove(bslot);
+                        plan[$"{team}|{m.S.Prefix}| "] = (bslot, new() { m }, " ");
+                        blanked++;
+                        r.Lines.Add($"{m.T.Code}: {m.S.Prefix}{m.Abbr} blanked (no room for the team's text)");
+                    }
+                    else
+                    {
+                        // nothing moves: it keeps its own place and old text (checked below against what was placed)
+                        keptAt.Add((own, m)); kept++;
+                        r.Warnings.Add($"{m.T.Code}: {m.S.Prefix}{m.Abbr} keeps \"{m.S.Current}\" (no room)");
+                    }
+                }
+            }
+            // check: no stored text runs into another one (a kept old text sits where it was)
+            var spans = plan.Values.Select(v => (Start: v.Slot, End: v.Slot + head + loc.EncodedSize(tbl, v.Text)))
+                .Concat(keptAt.Select(k => (Start: k.Off, End: k.Off + head + loc.EncodedSize(tbl, k.M.S.Current))))
+                .Concat(others.Select(o => (Start: o, End: o + 1)))
+                .OrderBy(x => x.Start).ToList();
+            bool clash = spans.Zip(spans.Skip(1)).Any(z => z.First.End > z.Second.Start) || spans.Any(x => x.End > tbl.StringsLength);
+            if (clash)
+            {
+                r.Warnings.Add($"name strings: packing {tbl.Name} would overlap stored texts; written in place instead");
+                foreach (var x in list)
+                {
+                    string text = x.i.Cands.FirstOrDefault(c => loc.Budget(tbl, x.i.S.Row, x.i.S.Text, c) is var (n, h) && n >= 0 && h > 0 && n <= h);
+                    if (text != null && loc.Get(tbl, x.i.S.Row, x.i.S.Text)?.ToString() != text) loc.Set(tbl, x.i.S.Row, x.i.S.Text, text);
+                }
+                continue;
+            }
+            // write: each text once at its place, every member pointed at it
+            foreach (var (slot, members, text) in plan.Values)
+            {
+                loc.WriteStringAt(tbl, members[0].S.Text, slot, text);
+                foreach (var m in members)
+                    if (loc.StringOffset(tbl, m.S.Row, m.S.Text) != slot) loc.PointString(tbl, m.S.Row, m.S.Text, slot);
+            }
+            // strings the game shares (not ours alone): as before, in place when they fit
+            foreach (var x in list.Where(x => !mine.Contains(x)))
+            {
+                string text = x.i.Cands.FirstOrDefault(c => loc.Budget(tbl, x.i.S.Row, x.i.S.Text, c) is var (n, h) && n >= 0 && h > 0 && n <= h);
+                if (text != null && loc.Get(tbl, x.i.S.Row, x.i.S.Text)?.ToString() != text) loc.Set(tbl, x.i.S.Row, x.i.S.Text, text);
+                else if (text == null) { kept++; r.Warnings.Add($"{x.i.T.Code}: {x.i.S.Prefix}{x.i.Abbr} keeps \"{x.i.S.Current}\" (stored once with other texts)"); }
+            }
+        }
+        r.Lines.Add($"name strings: {items.Count} for {named.Count} teams; {shared} share another string's text, {moved} moved to a freed place, " +
+                    $"{shorter} took a shorter text, {blanked} blanked, {kept} kept the old text");
     }
 
     private static void SortByIndex(T3Db db, T3Table t)

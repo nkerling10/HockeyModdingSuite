@@ -441,6 +441,24 @@ public static class PackageCheck
         return new NameSetChoice(key, set.TryGetValue("NHLTEAMNAME_", out var nm) ? nm.Current : key, list) { SchoolOnly = schoolOnly };
     }
 
+    public static int Head(T3Field f) => T3Db.StringHead(f);
+
+    /// <summary>The texts each string of a set would take for team <paramref name="t"/>, most wanted first (as Fit).</summary>
+    public static Dictionary<string, string[]> Wanted(Dictionary<string, NameString> set, TeamSpec t, bool schoolOnly)
+    {
+        bool xlaIsAbbr = !set.TryGetValue("X_XLA_TEAM_", out var xla) || xla.Current.Length <= 5;
+        return new Dictionary<string, string[]>
+        {
+            ["NHLTEAMNAME_"] = schoolOnly ? new[] { t.School, t.NameShort } : new[] { t.Name, t.NameShort, t.School },
+            ["TEAMLINE1_"] = new[] { t.School },
+            ["TEAMLINE2_"] = new[] { t.Nickname, t.NicknameShort }, ["NICKLINE2_"] = new[] { t.Nickname, t.NicknameShort },
+            ["TXT_NICKNAME_"] = new[] { t.Nickname, t.NicknameShort }, ["TXT_NICKNAME_ALT_"] = new[] { t.Nickname, t.NicknameShort },
+            ["NHLCITYNAME_"] = new[] { t.City ?? t.School, t.School, t.Nickname },
+            ["NHLTEAMNAME_ABBR3_"] = new[] { t.Abbr },
+            ["X_XLA_TEAM_"] = xlaIsAbbr ? new[] { t.Abbr } : schoolOnly ? new[] { t.School, t.NameShort } : new[] { t.Name, t.NameShort, t.School },
+        };
+    }
+
     private static bool Fits(T3Db loc, NameString s, string text)
     {
         var (need, have) = loc.Budget(s.Table, s.Row, s.Text, text);
