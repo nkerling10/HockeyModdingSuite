@@ -420,7 +420,8 @@ public static class RosterBaseline
         var rt = db.Table(Roster.RosterTable);
         var rf = rt.Fields.ToDictionary(x => x.Name);
 
-        int nextId = 1 + MaxBelow(db, bio, "game_id", PlayerCreator.SpecialIdStart);
+        // below the packages' id blocks (PlayerCreator.PackageIdStart), so a package's players keep their documented ids
+        int nextId = 1 + MaxBelow(db, bio, "game_id", PlayerCreator.PackageIdStart);
         int nextIndex = 1 + MaxBelow(db, pl, "index", PlayerCreator.SpecialIdStart);
         int created = 0, moved = 0;
         var capRowsToRemove = new Dictionary<string, HashSet<int>>();

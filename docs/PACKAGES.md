@@ -64,6 +64,9 @@ in a players block takes templates from those leagues' teams instead (exhibition
 at most that overall, and any one of the matching candidates, so the new players spread over that league's range.
 Add `"median": 65` and/or `"teams": { "MICH": 70, ... }` (a team's own median by code) and the players aim at that
 overall +/- `"spread"` (default 6, most near the middle, never above `maxOverall`), copying the candidate nearest it.
+`"ids": [40000, 41999]` in a players block puts that file's created players at those game ids (in order, after any
+already there). Ids 40000-49999 are for packages' blocks (PlayerCreator.PackageIdStart); anything created without a block
+(NHL Sync, a roster file) stays below 40000, and 50000+ is the game's (game modes 56500+, archetypes, Create-a-Player).
 Art ids are stable across reinstalls (ArtIdMemory, kept in the package's resolved.json as OwnArtIds/PortraitArtIds by
 "first last yyyy-mm-dd"): a created or committed player gets his own id back, a player with a photo his portrait slot,
 and new players get ids nobody held. A franchise save keeps each player's art id while portraits and the NCAA code mods'

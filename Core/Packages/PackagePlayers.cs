@@ -329,7 +329,8 @@ public static class PackagePlayers
                         if (ps.Ratings.Teams.TryGetValue(l.Team.Code, out int m)) teamMedians[l.Team.Index] = m;
                 rule = new TemplateRule(from, ps.Ratings.MaxOverall, ps.Ratings.Median, teamMedians, ps.Ratings.Spread > 0 ? ps.Ratings.Spread : 6);
             }
-            var made = PlayerCreator.Create(db, creates, null, rule, r.OwnArt);
+            (int, int)? idBlock = ps.Ids is { Count: 2 } ids ? (ids[0], ids[1]) : null;
+            var made = PlayerCreator.Create(db, creates, null, rule, r.OwnArt, idBlock);
             // each created player back to his own roster-file entry: the same name on his team, with his birth date
             // (two players of one name, e.g. Jack O'Brien at ASU and at SHU, must not swap: his photo follows the entry)
             foreach (var cp in made.Created)
@@ -341,6 +342,8 @@ public static class PackagePlayers
             string source = rule == null ? "typical NHL/AHL players"
                 : "leagues " + string.Join("/", rule.Leagues) + (rule.MaxOverall > 0 ? $" up to {rule.MaxOverall}" : "")
                   + (rule.Median > 0 || rule.TeamMedians?.Count > 0 ? $", aiming at {(rule.TeamMedians?.Count > 0 ? "each team's median" : $"median {rule.Median}")} +/-{rule.Spread}" : "");
+            var gids = made.Created.Select(x => x.GameId).ToList();
+            if (gids.Count > 0) r.Lines.Add($"players: game ids {gids.Min()}-{gids.Max()}" + (idBlock is { } b ? $" (block {b.Item1}-{b.Item2})" : ""));
             r.Lines.Add($"players: created {made.Created.Count}"
                         + (ovr.Count == 0 ? "" : $" (ratings copied from {source}: overall {ovr[0]}-{ovr[^1]}, median {ovr[ovr.Count / 2]})"));
         }
@@ -665,6 +668,9 @@ public sealed class PlayersSpec
     /// <summary>Where created players' ratings come from: { "from": [league ids], "maxOverall": n } (e.g. the CHL, 11-13,
     /// up to 67 for the USHL). Missing: a typical NHL/AHL player of his profile (PlayerCreator's default).</summary>
     public RatingsSpec Ratings { get; set; }
+    /// <summary>The game ids this file's created players use: [from, to], within PlayerCreator.PackageIdStart..SpecialIdStart-1
+    /// (e.g. [40000, 41999]), so the package can say which ids it takes. Missing: after the highest id below the blocks.</summary>
+    public List<int> Ids { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] public bool NoContract => string.Equals(Contract, "none", StringComparison.OrdinalIgnoreCase);
 }
 

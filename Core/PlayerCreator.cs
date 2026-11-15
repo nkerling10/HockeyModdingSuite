@@ -62,13 +62,18 @@ public sealed class CreateResult
 ///   no-scan players (chosen by a hash of the name, so the same player always gets the same face), hasportrait 0.
 ///   artid/audioid get a fresh value (a later portrait would be p{artid}); surnameid (the commentator's name call) is
 ///   the game's recording of his last name (NameCalls), else the one players with his last name use, else 0 (no name call).
-/// - New game ids follow the highest real one (below <see cref="SpecialIdStart"/>, where the game's game-mode players,
+/// - New game ids follow the highest real one below <see cref="PackageIdStart"/> (packages: their own block, players.ids),
+///   all below <see cref="SpecialIdStart"/>, where the game's game-mode players,
 ///   archetypes and Create-a-Player slots live); new player indexes follow the highest real index.
 /// </summary>
 public static class PlayerCreator
 {
     /// <summary>Game ids and player indexes from here up are the game's own special players (56500+ game modes, 56800+ archetypes, 57000+ Create-a-Player).</summary>
     public const int SpecialIdStart = 50000;
+    /// <summary>Game ids from here up to <see cref="SpecialIdStart"/> are left to packages, each in its own fixed block
+    /// (recipe players.ids, e.g. NCAA 40000-41999): a player created without a block (NHL Sync, a roster file) stays below,
+    /// so a package's players keep the ids it documents however much the base roster grows.</summary>
+    public const int PackageIdStart = 40000;
     public const string SkaterEquipmentTable = "exhibitionskaterequipment";
     public const string GoalieEquipmentTable = "exhibitiongoalieequipment";
     /// <summary>The longest first/last name the bio's 25-byte fields hold (UTF-8 bytes, one byte for the terminator).</summary>
@@ -99,7 +104,7 @@ public static class PlayerCreator
     /// the club CapWages lists him under, else none (an AHL-only deal); without it, the AHL team's NHL parent.
     /// </summary>
     public static CreateResult Create(T3Db db, IEnumerable<SyncChange> missing, IReadOnlyList<CapTeam> cap = null, TemplateRule rule = null,
-                                      ArtIdMemory artMemory = null)
+                                      ArtIdMemory artMemory = null, (int From, int To)? idBlock = null)
     {
         var result = new CreateResult();
         using var batch = db.Batch();
@@ -162,7 +167,21 @@ public static class PlayerCreator
                         if (cp.Born is { } b) capOwner.TryAdd(Key(cp.First, cp.Last, b), idx);
 
         // ---- new ids
-        int nextId = MaxBelow(db, bio, "game_id") + 1;
+        // game ids: in the package's own block when it has one (after the highest already in it), else after the highest
+        // below the package blocks
+        int nextId, idCap;
+        if (idBlock is { } blk)
+        {
+            if (blk.From < PackageIdStart || blk.To >= SpecialIdStart || blk.To < blk.From)
+                throw new ArgumentException($"A package's game id block must lie within {PackageIdStart}-{SpecialIdStart - 1} (got {blk.From}-{blk.To}).");
+            nextId = Math.Max(blk.From, MaxBelow(db, bio, "game_id", blk.To + 1) + 1);
+            idCap = blk.To + 1;
+        }
+        else
+        {
+            nextId = MaxBelow(db, bio, "game_id", PackageIdStart) + 1;
+            idCap = PackageIdStart;
+        }
         int nextIndex = MaxBelow(db, players, "index") + 1;
         int nextArt = 1 + Math.Max(Math.Max(MaxOf(db, bio, "artid"), MaxOf(db, bio, "audioid")), artMemory?.Max ?? 0);
         // art ids in use, so a remembered one is only taken back when nobody has it
@@ -172,7 +191,6 @@ public static class PlayerCreator
             for (int r = 0; r < bio.WrittenRecords; r++)
                 if (!db.IsInvalid(bio, r)) usedArt.Add((int)db.Get(bio, r, artF));
         }
-        int idCap = Math.Min(SpecialIdStart, 1 << 16);
 
         var eqRowOf = new Dictionary<(T3Table, int), int>();
         foreach (var t in new[] { skaterEq, goalieEq })
@@ -206,7 +224,7 @@ public static class PlayerCreator
             var eq = goalie ? goalieEq : skaterEq;
             string full = new[] { bio, players, ai, eq }.FirstOrDefault(t => t.WrittenRecords >= t.Records)?.Name;
             if (full != null) { result.Skipped.Add((name, $"{full} has no room for another player")); continue; }
-            if (nextId >= idCap) { result.Skipped.Add((name, "no free game id")); continue; }
+            if (nextId >= idCap) { result.Skipped.Add((name, idBlock is { } blkFull ? $"the package's game id block {blkFull.From}-{blkFull.To} is full" : "no free game id")); continue; }
             int hand = b.Shoots == "R" ? 1 : 0;
             uint seed = Hash(Key(b.First, b.Last, born));
             var template = PickTemplate(templates, goalie, b.Primary, hand, Age(born, today), Math.Min(Level(c.ToTeam), 1), seed, rule,
@@ -472,12 +490,12 @@ public static class PlayerCreator
         throw new InvalidOperationException($"{t.Name} has no rows to copy.");
     }
 
-    private static int MaxBelow(T3Db db, T3Table t, string field)
+    private static int MaxBelow(T3Db db, T3Table t, string field, int below = SpecialIdStart)
     {
         var f = t.Fields.First(x => x.Name == field);
         int max = -1;
         for (int r = 0; r < t.WrittenRecords; r++)
-            if (!db.IsInvalid(t, r) && (int)db.Get(t, r, f) is var v && v < SpecialIdStart && v > max) max = v;
+            if (!db.IsInvalid(t, r) && (int)db.Get(t, r, f) is var v && v < below && v > max) max = v;
         return max;
     }
 
