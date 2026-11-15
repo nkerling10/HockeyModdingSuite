@@ -470,11 +470,20 @@ public static class CapWagesApi
     /// <summary>True for NHL.com's blank silhouettes (mugs/nhl/default-skater.png, default-goalie.png).</summary>
     public static bool IsBlankPhoto(string url) => url != null && Regex.IsMatch(url, @"/mugs/.*/default-[a-z]+\.png", RegexOptions.IgnoreCase);
 
+    /// <summary>A GET that retries on 429 (up to five times) and on a dropped connection (an SSL handshake that fails, a
+    /// reset, a timeout; up to three times).</summary>
     private static async Task<string> GetAsync(string url, CancellationToken ct)
     {
-        for (int attempt = 0; ; attempt++)
+        for (int attempt = 0, dropped = 0; ; attempt++)
         {
-            using var r = await Http.GetAsync(url, ct);
+            HttpResponseMessage resp;
+            try { resp = await Http.GetAsync(url, ct); }
+            catch (Exception e) when (!ct.IsCancellationRequested && dropped < 3 && (e is HttpRequestException { StatusCode: null } or TaskCanceledException))
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1 << dropped++), ct);
+                continue;
+            }
+            using var r = resp;
             if ((int)r.StatusCode == 429 && attempt < 5)
             {
                 await Task.Delay(r.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(2 << attempt), ct);

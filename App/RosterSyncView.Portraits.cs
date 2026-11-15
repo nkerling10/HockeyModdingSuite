@@ -50,8 +50,9 @@ public partial class RosterSyncView
         try
         {
             // step 2's fetch when there is one; otherwise the roster lists are read here (kept for the next Find)
+            // (a source step 2 couldn't read, such as TheAHL.com's rosters after a failed connection, is read here)
             var api = _api ?? _portraitApi;
-            var ahl = _api != null ? _ahl : _portraitAhl;
+            var ahl = _ahl ?? _portraitAhl;
             if (nhl && api == null)
             {
                 PortraitSay("Reading NHL.com's rosters…");
@@ -210,6 +211,10 @@ public partial class RosterSyncView
             int failed = keep.Count - done.Count;
             string said = (summary ?? "No portraits written") + (failed > 0 ? $"; {failed} couldn't be written (in the Skipped list)" : "")
                 + ". They show on the game's default roster and on franchises started from now on (a saved roster or franchise keeps its own copy of the players); the Mods page can restore them.";
+            // on the card as well as the status bar: the card's line otherwise stops at "Writing portraits… n/n"
+            PortraitSay((done.Count > 0 ? $"Done: {done.Count} portrait{(done.Count == 1 ? "" : "s")} written" : "Done: no portraits written")
+                + (failed > 0 ? $", {failed} couldn't be (in the Skipped list)" : "")
+                + ". They show on the game's default roster and on franchises started from now on; a saved roster or franchise keeps its own copy of the players. The Mods page can restore them.");
             StatusChanged?.Invoke(said);
             return;
         }

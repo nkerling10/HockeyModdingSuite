@@ -172,12 +172,21 @@ public static class AhlApi
         return parts.Length == 2 && int.TryParse(parts[0], out int ft) && int.TryParse(parts[1], out int inch) ? ft * 12 + inch : 0;
     }
 
-    /// <summary>A GET that strips the JSONP wrapper — the feed answers ({...}) — and retries on 429, up to five times.</summary>
+    /// <summary>A GET that strips the JSONP wrapper — the feed answers ({...}) — and retries on 429, up to five times, and
+    /// on a dropped connection (an SSL handshake that fails, a reset, a timeout), up to three times: one bad connection
+    /// shouldn't cost the whole league's rosters.</summary>
     private static async Task<string> GetAsync(string url, CancellationToken ct)
     {
-        for (int attempt = 0; ; attempt++)
+        for (int attempt = 0, dropped = 0; ; attempt++)
         {
-            using var r = await Http.GetAsync(url, ct);
+            HttpResponseMessage resp;
+            try { resp = await Http.GetAsync(url, ct); }
+            catch (Exception e) when (!ct.IsCancellationRequested && dropped < 3 && (e is HttpRequestException { StatusCode: null } or TaskCanceledException))
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1 << dropped++), ct);
+                continue;
+            }
+            using var r = resp;
             if ((int)r.StatusCode == 429 && attempt < 5)
             {
                 var wait = r.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(2 << attempt);
