@@ -51,7 +51,8 @@ public sealed class BaselinePlan
 ///    loads players on club teams, so roster makers put Create-a-Player copies of national-team-only prospects on
 ///    clubs (Keaton Verhoeff) and create missing prospects (Landon DuPont). A copy of an existing player (same name
 ///    and birth date) moves the real one onto the copy's roster row and gives him the copy's ratings, keeping his id,
-///    face, portrait, draft, rights and contract; anyone else becomes a new real player (bio, ratings, gear, a players
+///    face, portrait, draft, rights and contract (matched by name, birth year and rights instead, he takes the copy's
+///    birth date too: the roster file is the source); anyone else becomes a new real player (bio, ratings, gear, a players
 ///    row) on that roster row. Either way the Create-a-Player rows are removed, so he isn't also a free agent. Credit
 ///    entries ("- Vasy Roster"), national teams and Create-a-Player teams are left as they are.
 /// </summary>
@@ -455,6 +456,12 @@ public static class RosterBaseline
                 }
                 int realBio = Row(bio, "game_id", c.MatchId);
                 if (realBio >= 0) db.Set(bio, realBio, bf["team"], c.Team);
+                // matched loosely (same name, birth year and rights, another date): the roster's date is the one kept,
+                // as the roster file is the source (a wrong date there is fixed in the file)
+                if (realBio >= 0 && c.LooseMatch && capBioRow >= 0)
+                    foreach (var name in new[] { "year", "month", "day" })
+                        if (cbio.Fields.FirstOrDefault(f => f.Name == name) is { } cf && bf.TryGetValue(name, out var rf2))
+                            db.Set(bio, realBio, rf2, db.Get(cbio, capBioRow, cf));
                 c.NewId = c.MatchId;
                 moved++;
             }
