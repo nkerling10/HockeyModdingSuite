@@ -389,6 +389,8 @@ public partial class RosterSyncView : UserControl
     {
         _mods = mods;
         ShowBaseline();
+        // step 3's Find needs only the game (it reads the rosters itself without a fetch): on as soon as the page opens
+        SetPortraitButtons();
     }
 
     /// <summary>Starts or ends a fetch/apply: the buttons are locked while it runs.</summary>
