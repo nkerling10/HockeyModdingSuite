@@ -6,6 +6,31 @@ namespace NHL27Kit.Core;
 public sealed record CreatedPlayer(string Name, int GameId, int PlayerIndex, int Team, string TeamName, string Template, int TemplateGameId,
                                    int TemplateOverall, int ArtId, int SurnameId, int Country, int State, PlayerBio Bio);
 
+/// <summary>
+/// Where created players' ratings come from, instead of a typical NHL/AHL player: players of teams in these leagues
+/// (exhibitionteams.league, e.g. 11-13 = OHL/QMJHL/WHL), at most <paramref name="MaxOverall"/> (0 = no cap), and any one
+/// of the matching candidates (by the new player's hash), so the new players spread over the range those leagues have
+/// at that age instead of all landing on the median. With a <paramref name="Median"/> (or a team's own in
+/// <paramref name="TeamMedians"/>, by team index): each player aims at that overall plus a spread of up to
+/// +/-<paramref name="Spread"/> (by his hash, most near the middle; never above the cap) and copies the candidate nearest
+/// it, so a team's created players centre on its median.
+/// </summary>
+public sealed record TemplateRule(IReadOnlyCollection<int> Leagues, int MaxOverall, int Median = 0,
+                                  IReadOnlyDictionary<int, int> TeamMedians = null, int Spread = 6)
+{
+    /// <summary>The overall a new player of this team aims at (0: none, any candidate).</summary>
+    public int Target(int team, uint seed)
+    {
+        int median = TeamMedians != null && TeamMedians.TryGetValue(team, out int m) ? m : Median;
+        if (median <= 0) return 0;
+        uint h = seed * 2654435761u;
+        int w = 2 * Spread + 1;
+        int a = (int)(h % (uint)w) - Spread, b = (int)((h >> 11) % (uint)w) - Spread;
+        int t = median + (a + b) / 2;
+        return MaxOverall > 0 ? Math.Min(t, MaxOverall) : t;
+    }
+}
+
 /// <summary>What a create run did: who was created, who wasn't and why, and the summary line for the mod entry.</summary>
 public sealed class CreateResult
 {
@@ -65,7 +90,7 @@ public static class PlayerCreator
         return null;
     }
 
-    private sealed record Template(RosterPlayer Player, int Age, int Hand, int Level);
+    private sealed record Template(RosterPlayer Player, int Age, int Hand, int Level, int League);
 
     /// <summary>
     /// Creates the given Missing players (each needs a Bio; see <see cref="Problem"/>), places each on his team through
@@ -73,7 +98,7 @@ public static class PlayerCreator
     /// duplicates in the list are skipped (the AHL row wins). <paramref name="cap"/>, when given, decides an AHL player's NHL club (proteam):
     /// the club CapWages lists him under, else none (an AHL-only deal); without it, the AHL team's NHL parent.
     /// </summary>
-    public static CreateResult Create(T3Db db, IEnumerable<SyncChange> missing, IReadOnlyList<CapTeam> cap = null)
+    public static CreateResult Create(T3Db db, IEnumerable<SyncChange> missing, IReadOnlyList<CapTeam> cap = null, TemplateRule rule = null)
     {
         var result = new CreateResult();
         using var batch = db.Batch();
@@ -98,6 +123,12 @@ public static class PlayerCreator
             if (nhlTeams.Contains(nhl) && ahl >= 0) parentOf.TryAdd(ahl, nhl);
         int Level(int team) => nhlTeams.Contains(team) ? 0 : parentOf.ContainsKey(team) ? 1 : 2;
         string TeamName(int i) => roster.Teams.TryGetValue(i, out var tm) && !string.IsNullOrEmpty(tm.Name) ? tm.Name : $"team {i}";
+        // each team's league (exhibitionteams.league), for a TemplateRule
+        var leagueOf = new Dictionary<int, int>();
+        if (db.Table(Roster.TeamsTable) is { } teamsT && teamsT.Fields.FirstOrDefault(f => f.Name == "index") is { } tIdx
+            && teamsT.Fields.FirstOrDefault(f => f.Name == "league") is { } tLeague)
+            for (int r = 0; r < teamsT.WrittenRecords; r++)
+                if (!db.IsInvalid(teamsT, r)) leagueOf[(int)db.Get(teamsT, r, tIdx)] = (int)db.Get(teamsT, r, tLeague);
 
         // ---- the pools the new rows draw from
         var today = DateTime.Today;
@@ -107,7 +138,7 @@ public static class PlayerCreator
             if (p.RatingsRow < 0 || p.RosterRow < 0 || p.GameId >= SpecialIdStart) continue;
             if (BioInt(p.BioRow, "gender") != 0 || BioInt(p.BioRow, "ismascot") != 0 || BioInt(p.BioRow, "islegend") != 0) continue;
             if (matcher.Born(p) is not { } born) continue;
-            templates.Add(new Template(p, Age(born, today), BioInt(p.BioRow, "handedness"), Level(p.Team)));
+            templates.Add(new Template(p, Age(born, today), BioInt(p.BioRow, "handedness"), Level(p.Team), leagueOf.GetValueOrDefault(p.Team, -1)));
         }
         // generic faces: the game's own players without a face scan (head = head texture, a stock head 100000+)
         var faces = roster.Players.Where(p => !p.HasPortrait && p.GameId < SpecialIdStart && BioInt(p.BioRow, "gender") == 0 &&
@@ -170,7 +201,8 @@ public static class PlayerCreator
             if (nextId >= idCap) { result.Skipped.Add((name, "no free game id")); continue; }
             int hand = b.Shoots == "R" ? 1 : 0;
             uint seed = Hash(Key(b.First, b.Last, born));
-            var template = PickTemplate(templates, goalie, b.Primary, hand, Age(born, today), Math.Min(Level(c.ToTeam), 1), seed);
+            var template = PickTemplate(templates, goalie, b.Primary, hand, Age(born, today), Math.Min(Level(c.ToTeam), 1), seed, rule,
+                                        rule?.Target(c.ToTeam, seed) ?? 0);
             if (template == null) { result.Skipped.Add((name, "no similar player to copy ratings from")); continue; }
             var t0 = template.Player;
             if (!eqRowOf.TryGetValue((eq, t0.GameId), out int eqRow)) { result.Skipped.Add((name, $"{t0.Name} (template) has no gear row")); continue; }
@@ -319,13 +351,24 @@ public static class PlayerCreator
     /// target team in another league takes AHL players),
     /// skater or goalie, primary position and hand, within a year of his age — widened step by step (age ±2, ±3, then
     /// any hand, then any age) until at least 5 candidates — and of those, one of the 5 whose overall is nearest their
-    /// median, picked by the new player's hash (the same choice on every run).
+    /// median, picked by the new player's hash (the same choice on every run). With a <see cref="TemplateRule"/>: the
+    /// players of its leagues up to its overall cap, and any one of the candidates (a spread, not the median).
     /// </summary>
-    private static Template PickTemplate(List<Template> all, bool goalie, int primary, int hand, int age, int level, uint seed)
+    private static Template PickTemplate(List<Template> all, bool goalie, int primary, int hand, int age, int level, uint seed, TemplateRule rule = null, int target = 0)
     {
-        var pool = all.Where(t => t.Player.IsGoalie == goalie && t.Level == level).ToList();
-        if (pool.Count == 0) pool = all.Where(t => t.Player.IsGoalie == goalie && Math.Min(t.Level, 1) == level).ToList();
-        if (pool.Count == 0) pool = all.Where(t => t.Player.IsGoalie == goalie).ToList();
+        List<Template> pool = null;
+        if (rule != null)
+        {
+            pool = all.Where(t => t.Player.IsGoalie == goalie && rule.Leagues.Contains(t.League)
+                                  && (rule.MaxOverall <= 0 || t.Player.Overall <= rule.MaxOverall)).ToList();
+            if (pool.Count == 0) rule = null;
+        }
+        if (rule == null)
+        {
+            pool = all.Where(t => t.Player.IsGoalie == goalie && t.Level == level).ToList();
+            if (pool.Count == 0) pool = all.Where(t => t.Player.IsGoalie == goalie && Math.Min(t.Level, 1) == level).ToList();
+            if (pool.Count == 0) pool = all.Where(t => t.Player.IsGoalie == goalie).ToList();
+        }
         var samePos = pool.Where(t => goalie || t.Player.PositionPrimary == primary).ToList();
         if (samePos.Count == 0) samePos = pool.Where(t => Roster.CollapsedPosition(t.Player.PositionPrimary) == Roster.CollapsedPosition(primary)).ToList();
         if (samePos.Count == 0) samePos = pool;
@@ -338,6 +381,17 @@ public static class PlayerCreator
             }
         found:
         if (pick == null || pick.Count == 0) return null;
+        if (rule != null)
+        {
+            var any = pick.OrderBy(t => t.Player.GameId).ToList();
+            if (target > 0)
+            {
+                // the candidates nearest the target overall, one of them by the hash
+                int best = any.Min(t => Math.Abs(t.Player.Overall - target));
+                any = any.Where(t => Math.Abs(t.Player.Overall - target) == best).ToList();
+            }
+            return any[(int)(seed % (uint)any.Count)];
+        }
         var overalls = pick.Select(t => t.Player.Overall).OrderBy(x => x).ToList();
         int median = overalls[overalls.Count / 2];
         // the 5 nearest the median, one of them by the player's own hash: typical, without every new player cloning the same one

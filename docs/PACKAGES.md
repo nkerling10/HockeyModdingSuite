@@ -58,6 +58,12 @@ draft: { year, round, pick, team } } } } }. `"bubble": "true"` (or true/yes/1) g
 unless the game has his rights with another team. No `draft`: the game's draft stays (a created player is undrafted).
 Current-season roster players are matched and moved (taking the file's number and size), or created from the file, then given the NCAA bio (team -1, juniorteam = school, juniorleague) and
 rules.faceProtector; later seasons (commits) are only listed for now.
+Created players copy a whole ratings row from a template player: by default a typical NHL/AHL player of the same
+position, hand and age (near the median: about 72 overall). `"ratings": { "from": [11, 12, 13], "maxOverall": 67 }`
+in a players block takes templates from those leagues' teams instead (exhibitionteams.league; 11-13 = OHL/QMJHL/WHL),
+at most that overall, and any one of the matching candidates, so the new players spread over that league's range.
+Add `"median": 65` and/or `"teams": { "MICH": 70, ... }` (a team's own median by code) and the players aim at that
+overall +/- `"spread"` (default 6, most near the middle, never above `maxOverall`), copying the candidate nearest it.
 Built 2026-11-14: the take-down/re-apply hook (a database save blocked by a package offers to take it off, save,
 and reinstall it: ModService.SaveDbAsync), the App UI (Mods page: Install package… / Reinstall / Remove package; a
 package row is installed and removed as a whole, and left out of Apply all / Restore all / Export pack), and a plain

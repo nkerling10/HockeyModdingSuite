@@ -320,11 +320,25 @@ public static class PackagePlayers
         if (moves.Count > 0) r.Lines.Add("players: " + RosterSync.Apply(db, moves));
         if (creates.Count > 0)
         {
-            var made = PlayerCreator.Create(db, creates);
+            TemplateRule rule = null;
+            if (ps.Ratings?.From is { Count: > 0 } from)
+            {
+                var teamMedians = new Dictionary<int, int>();
+                if (ps.Ratings.Teams != null)
+                    foreach (var l in now)
+                        if (ps.Ratings.Teams.TryGetValue(l.Team.Code, out int m)) teamMedians[l.Team.Index] = m;
+                rule = new TemplateRule(from, ps.Ratings.MaxOverall, ps.Ratings.Median, teamMedians, ps.Ratings.Spread > 0 ? ps.Ratings.Spread : 6);
+            }
+            var made = PlayerCreator.Create(db, creates, null, rule);
             foreach (var cp in made.Created)
                 if (now.FirstOrDefault(l => l.Name.Equals(cp.Bio.Name, StringComparison.OrdinalIgnoreCase)) is { } l) placed.Add((l, cp.GameId));
             foreach (var (n, why) in made.Skipped) r.Warnings.Add($"players: {n} not created: {why}");
-            r.Lines.Add($"players: created {made.Created.Count}");
+            var ovr = made.Created.Select(x => x.TemplateOverall).OrderBy(x => x).ToList();
+            string source = rule == null ? "typical NHL/AHL players"
+                : "leagues " + string.Join("/", rule.Leagues) + (rule.MaxOverall > 0 ? $" up to {rule.MaxOverall}" : "")
+                  + (rule.Median > 0 || rule.TeamMedians?.Count > 0 ? $", aiming at {(rule.TeamMedians?.Count > 0 ? "each team's median" : $"median {rule.Median}")} +/-{rule.Spread}" : "");
+            r.Lines.Add($"players: created {made.Created.Count}"
+                        + (ovr.Count == 0 ? "" : $" (ratings copied from {source}: overall {ovr[0]}-{ovr[^1]}, median {ovr[ovr.Count / 2]})"));
         }
 
         // the NCAA bio and gear
@@ -640,5 +654,21 @@ public sealed class PlayersSpec
     /// <summary>"none": every placed player's NHL contract is cleared the way the game's own NCAA prospects have it
     /// (status 0, length 0, salary 0, not two-way), whatever deal he had; null leaves contracts alone.</summary>
     public string Contract { get; set; }
+    /// <summary>Where created players' ratings come from: { "from": [league ids], "maxOverall": n } (e.g. the CHL, 11-13,
+    /// up to 67 for the USHL). Missing: a typical NHL/AHL player of his profile (PlayerCreator's default).</summary>
+    public RatingsSpec Ratings { get; set; }
     [System.Text.Json.Serialization.JsonIgnore] public bool NoContract => string.Equals(Contract, "none", StringComparison.OrdinalIgnoreCase);
+}
+
+/// <summary>Recipe players.ratings: see <see cref="PlayersSpec.Ratings"/>.</summary>
+public sealed class RatingsSpec
+{
+    public List<int> From { get; set; }
+    public int MaxOverall { get; set; }
+    /// <summary>The overall created players centre on (0: any candidate, a spread over the leagues' range).</summary>
+    public int Median { get; set; }
+    /// <summary>A team's own median, by team code (wins over <see cref="Median"/>).</summary>
+    public Dictionary<string, int> Teams { get; set; }
+    /// <summary>How far a player may land from the median (default 6; most land near it).</summary>
+    public int Spread { get; set; }
 }
