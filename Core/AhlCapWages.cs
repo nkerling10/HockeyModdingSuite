@@ -51,22 +51,40 @@ public static class AhlCapWages
     }
 
     /// <summary>
-    /// Height and weight from each matched player's CapWages page (from the cache when read today). Players whose page
-    /// can't be read keep none, so no size change is listed for them. <paramref name="progress"/>: (done, total).
+    /// Height, weight and the rest of each matched player's bio, from the player data file (<see cref="PlayerDataFile"/>):
+    /// a player page is read only for a player the file doesn't have yet, and he's added to it. Players whose page can't
+    /// be read keep none, so no size change is listed for them. <paramref name="progress"/>: (done, total, pages read).
     /// </summary>
     public static async Task<List<(AhlTeam Team, List<AhlPlayer> Players)>> SizesAsync(IReadOnlyList<(AhlTeam Team, List<AhlPlayer> Players)> rosters,
-        Action<int, int> progress = null, CancellationToken ct = default)
+        PlayerDataFile data, Action<int, int, int> progress = null, CancellationToken ct = default)
     {
         var slugs = rosters.SelectMany(r => r.Players).Select(p => p.CapSlug).Where(s => s.Length > 0).Distinct().ToList();
         var bios = new Dictionary<string, PlayerBio>();
-        int done = 0;
-        foreach (var slug in slugs)
+        int done = 0, read = 0, unsaved = 0;
+        try
         {
-            bool cached = CapWagesApi.IsCached(slug);
-            try { if (await CapWagesApi.BioAsync(slug, ct) is { } b) bios[slug] = b; }
-            catch (Exception e) when (e is not OperationCanceledException) { }
-            progress?.Invoke(++done, slugs.Count);
-            if (!cached) await Task.Delay(250, ct);
+            foreach (var slug in slugs)
+            {
+                bool cached = CapWagesApi.IsCached(slug);
+                try
+                {
+                    var (e, fetched) = await data.GetOrReadAsync(slug, ct);
+                    if (e != null) bios[slug] = e.ToBio();
+                    if (fetched)
+                    {
+                        read++;
+                        // kept as it goes, so a cancelled first sync doesn't lose what it read
+                        if (e != null && ++unsaved >= 50) { data.Save(); unsaved = 0; }
+                        if (!cached) await Task.Delay(250, ct);
+                    }
+                }
+                catch (Exception e) when (e is not OperationCanceledException) { }
+                progress?.Invoke(++done, slugs.Count, read);
+            }
+        }
+        finally
+        {
+            if (unsaved > 0) try { data.Save(); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         }
         // his size, and the whole bio for BioSync's check of an existing player
         return rosters.Select(r => (r.Team, r.Players.Select(p => bios.TryGetValue(p.CapSlug, out var b) ? p with { HeightIn = b.HeightIn, WeightLb = b.WeightLb, CapBio = b } : p).ToList())).ToList();

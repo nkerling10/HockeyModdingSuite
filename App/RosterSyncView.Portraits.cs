@@ -10,7 +10,7 @@ namespace NHL27Kit.App;
 
 /// <summary>
 /// NHL Sync step 3 (optional): portraits for NHL and AHL players who have none (PortraitStage), from the data step 2
-/// read. Find fetches and fits the photos and writes the skipped list; Add shows the fitted portraits and writes the
+/// read (or, with no fetch this session, the NHL.com, TheAHL.com and CapWages roster lists read by Find itself). Find fetches and fits the photos and writes the skipped list; Add shows the fitted portraits and writes the
 /// ticked ones, each into a free slot in HMS's band (a texture mod entry each), then one roster entry pointing the
 /// players' bios at them.
 /// </summary>
@@ -18,6 +18,9 @@ public partial class RosterSyncView
 {
     private List<StagePortrait> _portraits;
     private bool _portraitBusy;
+    /// <summary>The roster lists Find read itself when step 2 hadn't fetched this session (step 2's fetch wins over them).</summary>
+    private List<NhlPlayer> _portraitApi;
+    private List<(AhlTeam Team, List<AhlPlayer> Players)> _portraitAhl;
 
     /// <summary>The skipped-players list (docs/portraits-stage3-plan.md): rewritten by every Find.</summary>
     public static string PortraitSkippedFile => Path.Combine(KitPaths.Export, "portraits-skipped.csv");
@@ -25,7 +28,7 @@ public partial class RosterSyncView
     private void SetPortraitButtons()
     {
         bool idle = !_busy && !_planning && !_portraitBusy;
-        PortraitFindButton.IsEnabled = idle && _mods != null && _api != null;
+        PortraitFindButton.IsEnabled = idle && _mods != null;
         int ready = _portraits?.Count(c => c.Portrait != null) ?? 0;
         PortraitAddButton.IsEnabled = idle && ready > 0;
         PortraitAddLabel.Text = ready > 0 ? $"Add {ready} portrait{(ready == 1 ? "" : "s")}" : "Add portraits";
@@ -38,7 +41,7 @@ public partial class RosterSyncView
     /// game changes. Returns the status text.</summary>
     public async Task<string> FindPortraitsAsync()
     {
-        if (_mods == null || _api == null || _portraitBusy) return null;
+        if (_mods == null || _portraitBusy) return null;
         bool nhl = PortraitNhl.IsChecked == true, ahlOn = PortraitAhl.IsChecked == true;
         if (!nhl && !ahlOn) return PortraitSay("Tick NHL, AHL or both.");
         _portraitBusy = true;
@@ -46,24 +49,50 @@ public partial class RosterSyncView
         SetPortraitButtons();
         try
         {
+            // step 2's fetch when there is one; otherwise the roster lists are read here (kept for the next Find)
+            var api = _api ?? _portraitApi;
+            var ahl = _api != null ? _ahl : _portraitAhl;
+            if (nhl && api == null)
+            {
+                PortraitSay("Reading NHL.com's rosters…");
+                api = _portraitApi = await Task.Run(() => NhlApi.AllRostersAsync(t => Dispatcher.Invoke(() => PortraitSay($"Reading NHL.com's rosters… {t}"))));
+            }
+            if (ahlOn && ahl == null)
+            {
+                PortraitSay("Reading TheAHL.com's rosters…");
+                var feed = await Task.Run(() => AhlApi.AllRostersAsync(t => Dispatcher.Invoke(() => PortraitSay($"Reading TheAHL.com's rosters… {t}"))));
+                // CapWages gives each AHL player his page (where his NHL.com photo is) and birth date
+                PortraitSay("Reading CapWages' team pages…");
+                var cap = await Task.Run(() => CapWagesApi.AllTeamsAsync(t => Dispatcher.Invoke(() => PortraitSay($"Reading CapWages' team pages… {t}"))));
+                ahl = _portraitAhl = AhlCapWages.Enrich(feed, cap);
+            }
             PortraitSay("Finding players with no portrait…");
             var db = await _mods.OpenDbAsync(Roster.Database);
-            var api = _api;
-            var ahl = _ahl;
             var found = await Task.Run(() => PortraitStage.Find(db, _mods.Index, api, ahl, nhl, ahlOn));
             string dir = Path.Combine(_mods.Store.Dir, "portraits");
             Directory.CreateDirectory(dir);
             var todo = found.Where(c => c.Problem == null).ToList();
+            var data = PlayerDataFile.Load();
+            bool dataChanged = false;
             int i = 0;
             foreach (var c in todo)
             {
                 PortraitSay($"Fetching photos… {++i}/{todo.Count} · {c.Player.Name} ({c.TeamName})");
                 try
                 {
-                    // an AHL player's NHL.com photo is on his CapWages page (cached from step 2)
+                    // an AHL player's NHL.com photo is on his CapWages page: from the player data file when it has one,
+                    // else his page (cached from step 2) is looked at again, as a photo may have been added since
+                    if (c.HeadshotUrl == null && data.Get(c.CapSlug) is { HeadshotNhl: true, Headshot.Length: > 0 } known)
+                        c.HeadshotUrl = known.Headshot;
                     if (c.HeadshotUrl == null)
                     {
                         var shot = await CapWagesApi.HeadshotAsync(c.CapSlug);
+                        if (shot is { Nhl: true } && data.Get(c.CapSlug) is { } entry)
+                        {
+                            entry.Headshot = shot.Value.Url;
+                            entry.HeadshotNhl = true;
+                            dataChanged = true;
+                        }
                         if (shot is not { Nhl: true } s)
                         {
                             c.Problem = shot == null ? "no photo on CapWages" : "no NHL.com photo (CapWages has only a non-NHL photo)";
@@ -73,7 +102,19 @@ public partial class RosterSyncView
                     }
                     string raw = Path.Combine(dir, $"{c.Key}.headshot.png");
                     bool cached = File.Exists(raw) && DateTime.Now - File.GetLastWriteTime(raw) < TimeSpan.FromDays(1);
-                    if (!cached) await File.WriteAllBytesAsync(raw, await CapWagesApi.BytesAsync(c.HeadshotUrl));
+                    if (!cached)
+                    {
+                        // NHL.com answers a player it has no photo of with its blank silhouette (a redirect to
+                        // mugs/nhl/default-skater.png or default-goalie.png): no portrait from that
+                        var bytes = await CapWagesApi.PhotoAsync(c.HeadshotUrl);
+                        if (bytes == null)
+                        {
+                            c.Problem = "NHL.com has only its blank silhouette for him (no photo yet)";
+                            if (File.Exists(raw)) File.Delete(raw);
+                            continue;
+                        }
+                        await File.WriteAllBytesAsync(raw, bytes);
+                    }
                     var (rgba, w, h) = await Task.Run(() => ImageLoader.Load(raw));
                     c.Portrait = await Task.Run(() => PortraitSync.Fit(rgba, w, h));
                     c.PortraitFile = Path.Combine(dir, $"{c.Key}.portrait.png");
@@ -86,6 +127,7 @@ public partial class RosterSyncView
                     c.Portrait = null;
                 }
             }
+            if (dataChanged) try { data.Save(); } catch (IOException) { }
             _portraits = found;
             Directory.CreateDirectory(KitPaths.Export);
             await File.WriteAllTextAsync(PortraitSkippedFile, PortraitStage.SkippedCsv(found, DateTime.Now), new System.Text.UTF8Encoding(true));
@@ -216,7 +258,12 @@ internal static class PortraitPreview
         foreach (var c in ready)
         {
             var img = new Image { Width = 192, Height = 128, Stretch = Stretch.Uniform, Source = TextureService.ToBitmap(c.Portrait, PortraitSync.Width, PortraitSync.Height, Channel.Rgba) };
-            var box = new CheckBox { IsChecked = true, Content = new TextBlock { Text = c.Player.Name, FontWeight = FontWeights.SemiBold }, Margin = new Thickness(0, 6, 0, 0) };
+            // the name in the theme's text colour (a plain CheckBox draws its content in the system's dark text)
+            var box = new CheckBox
+            {
+                IsChecked = true, Margin = new Thickness(0, 6, 0, 0), VerticalContentAlignment = VerticalAlignment.Center,
+                Content = new TextBlock { Text = c.Player.Name, FontWeight = FontWeights.SemiBold, Foreground = (Brush)Application.Current.TryFindResource("Text") ?? Brushes.White },
+            };
             ticks[c] = box;
             var card = new Border
             {

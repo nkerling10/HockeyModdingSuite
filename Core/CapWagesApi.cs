@@ -455,6 +455,21 @@ public static class CapWagesApi
         return await r.Content.ReadAsByteArrayAsync(ct);
     }
 
+    /// <summary>
+    /// A player photo (an NHL.com headshot) as bytes; null when it's NHL.com's blank silhouette, which it gives for a
+    /// player it has no photo of by redirecting his mug's address to mugs/nhl/default-skater.png (or default-goalie.png).
+    /// </summary>
+    public static async Task<byte[]> PhotoAsync(string url, CancellationToken ct = default)
+    {
+        using var r = await Http.GetAsync(url, ct);
+        r.EnsureSuccessStatusCode();
+        if (IsBlankPhoto(r.RequestMessage?.RequestUri?.AbsoluteUri)) return null;
+        return await r.Content.ReadAsByteArrayAsync(ct);
+    }
+
+    /// <summary>True for NHL.com's blank silhouettes (mugs/nhl/default-skater.png, default-goalie.png).</summary>
+    public static bool IsBlankPhoto(string url) => url != null && Regex.IsMatch(url, @"/mugs/.*/default-[a-z]+\.png", RegexOptions.IgnoreCase);
+
     private static async Task<string> GetAsync(string url, CancellationToken ct)
     {
         for (int attempt = 0; ; attempt++)

@@ -20,3 +20,6 @@ ThirdParty/*.dll
 *.dll
 *.exe
 /packages/
+
+# HMS player data file (CapWages bios read once, per machine): never committed
+player-data/

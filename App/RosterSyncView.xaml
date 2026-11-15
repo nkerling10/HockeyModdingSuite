@@ -119,7 +119,7 @@
             <StackPanel>
                 <DockPanel>
                     <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-                        <Button Style="{StaticResource Ghost}" Padding="10,6" Click="OnShowProgress">
+                        <Button x:Name="ProgressToggle" Style="{StaticResource Ghost}" Padding="10,6" Click="OnShowProgress">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock x:Name="ProgressToggleIcon" Text="&#xE70D;" Style="{StaticResource Icon}" FontSize="11" />
                                 <TextBlock x:Name="ProgressToggleText" Text="Show sources &amp; progress" Margin="7,0,0,0" />
@@ -141,6 +141,10 @@
                         </Button>
                     </StackPanel>
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,16,0">
+                        <Button x:Name="Step2Toggle" Style="{StaticResource Ghost}" Padding="6,4" Margin="-6,0,4,0" Click="OnStep2Toggle"
+                                ToolTip="Fold step 2's list away (nothing is lost; press again to open it)">
+                            <TextBlock x:Name="Step2ToggleIcon" Text="&#xE70D;" Style="{StaticResource Icon}" FontSize="11" />
+                        </Button>
                         <Border CornerRadius="999" Padding="7,1" Background="{StaticResource Surface2}" VerticalAlignment="Center" Margin="0,0,8,0">
                             <TextBlock Text="STEP 2" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource Accent}" />
                         </Border>
@@ -251,8 +255,10 @@
             <StackPanel>
                 <DockPanel>
                     <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-                        <CheckBox x:Name="PortraitNhl" Content="NHL" IsChecked="True" VerticalAlignment="Center" Margin="0,0,12,0" />
-                        <CheckBox x:Name="PortraitAhl" Content="AHL" IsChecked="True" VerticalAlignment="Center" Margin="0,0,4,0" />
+                        <CheckBox x:Name="PortraitNhl" Style="{StaticResource Switch}" Content="NHL" IsChecked="True" VerticalAlignment="Center" Margin="0,0,14,0"
+                                  ToolTip="Look for NHL players with no portrait" />
+                        <CheckBox x:Name="PortraitAhl" Style="{StaticResource Switch}" Content="AHL" IsChecked="True" VerticalAlignment="Center" Margin="0,0,4,0"
+                                  ToolTip="Look for AHL players with no portrait" />
                         <Button x:Name="PortraitSkippedButton" Style="{StaticResource Ghost}" Padding="10,6" Margin="8,0,0,0" Click="OnPortraitSkipped" Visibility="Collapsed"
                                 ToolTip="The players who got no portrait, and why (a CSV in HMS's export folder)">
                             <TextBlock x:Name="PortraitSkippedText" Text="Skipped list" />
@@ -281,7 +287,7 @@
                     </StackPanel>
                 </DockPanel>
                 <TextBlock x:Name="PortraitStatus" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,8,0,0"
-                           Text="After step 2: fetch, apply, then find the NHL and AHL players who still have no portrait." />
+                           Text="Best after step 2's changes are applied. Find missing uses step 2's fetch, or reads the NHL, AHL and CapWages rosters itself when there isn't one." />
             </StackPanel>
         </Border>
     </StackPanel>

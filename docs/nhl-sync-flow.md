@@ -31,7 +31,7 @@ Step 2 always compares against whatever roster is in the game, so a base roster 
 | # | Source | What happens |
 |---|---|---|
 | B1 | (in memory) | Each TheAHL roster player is matched to CapWages by name (birth date breaks ties). A match takes **CapWages' birth date** and slug; TheAHL's height, weight and birthplace are dropped. **TheAHL.com keeps only: who is on which AHL team, and the AHL number.** |
-| B2 | **CapWages player pages** (`capwages.com/players/{slug}`, ~770; cached 20 h on this PC under `%LOCALAPPDATA%\HockeyModdingSuite\cache\capwages-players`) | Height and weight for every matched AHL player. Players CapWages doesn't list (tryouts, ECHL deals) keep TheAHL's details. |
+| B2 | **Player data file** (`player-datahl-players.json` in HMS's folder, on this PC only, never committed), filled from **CapWages player pages** (`capwages.com/players/{slug}`) | Height, weight, birthplace, shot, positions, draft and NHL.com photo for every matched AHL player. Read once: a later sync reads a page only for a player the file doesn't have yet (delete an entry, or the file, to read it again; entries can be edited by hand). Transactions come from the team pages, which are read live every sync. Players CapWages doesn't list (tryouts, ECHL deals) keep TheAHL's details. |
 
 Result: `_ahl`, the AHL rosters as compared.
 
@@ -85,7 +85,7 @@ On a **copy** of the game database: the ticked roster changes are applied and th
 | F1 | DailyFaceoff + CapWages | **Call-ups**: lineup players the NHL list missed, and players CapWages has on an NHL roster / injured / suspended list whom no list places |
 | F2 | CapWages | **Contracts**: each player's deal, clauses, two-way, extension; team retained salary; team buyouts |
 | F3 | CapWages | **Positions**: primary/secondary from where he has played (forward ↔ defence switches go to Review) |
-| F3b | NHL.com roster lists + CapWages player pages (already read, nothing new downloaded) | **Existing players' bios**: name spelling, birthplace, country and province/state, shoots/catches; AHL players also their draft. Name changes wait for review (NHL.com and CapWages often use the short form). Runs before the lines, which find players by name |
+| F3b | NHL.com roster lists + the player data file (nothing new downloaded) | **Existing players' bios**: name spelling, birthplace, country and province/state, shoots/catches; AHL players also their draft. Name changes wait for review (NHL.com and CapWages often use the short form). Runs before the lines, which find players by name |
 | F4 | CapWages | **Draft picks**: who owns each pick |
 | F5 | Game files | **Name calls**: players with no play-by-play name who have a recording |
 | F6 | DailyFaceoff | **Lines**: each NHL team's lines, PP, PK, goalie (a team whose lineup has a player not on it is left alone) |

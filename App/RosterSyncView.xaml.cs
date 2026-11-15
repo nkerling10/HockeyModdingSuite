@@ -346,7 +346,7 @@ public partial class RosterSyncView : UserControl
     private readonly SyncStage _ahlRosters = new("AHL rosters", "TheAHL.com");
     private readonly SyncStage _capPages = new("NHL team contracts", "CapWages team pages");
     private readonly SyncStage _linePages = new("Lines", "DailyFaceoff");
-    private readonly SyncStage _ahlSizes = new("AHL players' heights and weights", "CapWages player pages");
+    private readonly SyncStage _ahlSizes = new("AHL players' heights and weights", "player data file; CapWages pages for new players");
     private readonly SyncStage _nhlBios = new("New NHL players' bios", "NHL.com");
     private readonly SyncStage _ahlBios = new("New AHL players' bios", "CapWages player pages");
     private readonly SyncStage _leftPages = new("Players no roster lists", "CapWages player pages");
@@ -416,6 +416,18 @@ public partial class RosterSyncView : UserControl
     }
 
     private void OnShowProgress(object sender, RoutedEventArgs e) => ShowProgress(ProgressPanel.Visibility != Visibility.Visible);
+
+    private void OnStep2Toggle(object sender, RoutedEventArgs e) => FoldStep2(ChangesCard.Visibility == Visibility.Visible);
+
+    /// <summary>Folds step 2 down to its header and status line (filters, progress and the changes list hidden; nothing is
+    /// lost), or opens it again. A fetch opens it.</summary>
+    private void FoldStep2(bool fold)
+    {
+        var v = fold ? Visibility.Collapsed : Visibility.Visible;
+        ChangesCard.Visibility = FilterBar.Visibility = ProgressToggle.Visibility = v;
+        if (fold) ShowProgress(false);
+        Step2ToggleIcon.Text = fold ? "" : "";
+    }
 
     /// <summary>Opens or folds the sources and progress list (open while a fetch runs, folded once its list is ready).</summary>
     private void ShowProgress(bool show)
@@ -522,6 +534,7 @@ public partial class RosterSyncView : UserControl
         SetBusy(true);
         CancelButton.Visibility = Visibility.Visible;
         CancelButton.IsEnabled = true;
+        FoldStep2(false);
         ShowProgress(true);
         try
         {
@@ -804,8 +817,8 @@ public partial class RosterSyncView : UserControl
     private bool _ahlSized;
 
     /// <summary>
-    /// The AHL rosters with CapWages' birth dates (and, when sizes are compared, heights and weights from the players'
-    /// CapWages pages, kept a day on this machine). TheAHL.com's feed is left with only who is where and the numbers.
+    /// The AHL rosters with CapWages' birth dates (and, when sizes are compared, heights and weights from the player data file,
+    /// which reads a CapWages page only for a player it doesn't have yet). TheAHL.com's feed is left with only who is where and the numbers.
     /// </summary>
     private async Task UseCapWagesForAhlAsync()
     {
@@ -814,16 +827,21 @@ public partial class RosterSyncView : UserControl
         if (cap == null) { _ahl = _ahlFeed; _ahlSized = false; _ahlSizes.Update(StageState.Failed, "CapWages not read: TheAHL.com's details used"); return; }
         _ahl = AhlCapWages.Enrich(_ahlFeed, cap);
         int onCap = _ahl.Sum(r => r.Players.Count(p => p.CapSlug.Length > 0)), all = _ahl.Sum(r => r.Players.Count);
-        var progress = new Progress<(int Done, int Total)>(x => _ahlSizes.Update(StageState.Running, $"{x.Done}/{x.Total} pages"));
-        var sink = (IProgress<(int, int)>)progress;
+        // the player data file: a page is read only for a player it doesn't have yet (re-read each fetch: it can be edited)
+        var data = PlayerDataFile.Load();
+        int had = data.Count;
+        var progress = new Progress<(int Done, int Total, int Read)>(x => _ahlSizes.Update(StageState.Running,
+            x.Read == 0 ? $"{x.Done}/{x.Total} from the player data file" : $"{x.Done}/{x.Total} · {x.Read} new player page{(x.Read == 1 ? "" : "s")} read"));
+        var sink = (IProgress<(int, int, int)>)progress;
         var enriched = _ahl;
         var ct = Ct;
-        _ahlSizes.Update(StageState.Running, $"0/{onCap} pages");
+        int pagesRead = 0;
+        _ahlSizes.Update(StageState.Running, $"0/{onCap}" + (had == 0 ? " · no player data file yet: reading every player page once" : ""));
         try
         {
-            _ahl = await Task.Run(() => AhlCapWages.SizesAsync(enriched, (d, t) => sink.Report((d, t)), ct));
+            _ahl = await Task.Run(() => AhlCapWages.SizesAsync(enriched, data, (d, t, r) => { pagesRead = r; sink.Report((d, t, r)); }, ct));
             _ahlSized = true;
-            _ahlSizes.Update(StageState.Done, $"{onCap} of {all} on CapWages");
+            _ahlSizes.Update(StageState.Done, $"{onCap} of {all} on CapWages · " + (pagesRead == 0 ? "all from the player data file" : $"{pagesRead} new page{(pagesRead == 1 ? "" : "s")} read, added to the player data file"));
         }
         catch (Exception ex) when (!ct.IsCancellationRequested) { _ahlSizes.Update(StageState.Failed, ex.Message); }
     }
