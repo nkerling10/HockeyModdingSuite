@@ -327,6 +327,13 @@ public partial class JerseyStudioPage : UserControl
     private ImageSource _pantTex, _sockTex;
     private readonly int[] _ownColors = { 0x0B2D6B, 0xFFFFFF, 0xC8102E };
     private int _letterFill = 0xFFFFFF, _letterOutline = 0xC8102E, _pantShift, _sockShift, _thumbGen, _tplGen;
+    /// <summary>The sleeve numbers' colours (null: the numbers'), and the pants' and socks' own colours (empty: the team's).</summary>
+    private int? _armFill, _armOutline;
+    private List<int> _pantColors = new(), _sockColors = new();
+
+    /// <summary>The colours the pants (or socks) are painted in: their own when set, else the team's.</summary>
+    private IReadOnlyList<int> PartPalette(string garment, IReadOnlyList<int> team) =>
+        (garment == "pant" ? _pantColors : _sockColors) is { Count: > 0 } own ? own.ToList() : team;
     /// <summary>The name letters' own colours (null: the numbers'), and the outer ring's of fonts with three (null: the outline's).</summary>
     private int? _nameFill, _nameOutline, _letterOuter;
     /// <summary>Your own pants / socks images (in the game's pant / sock texture layout), used instead of the painted parts.</summary>
@@ -529,6 +536,7 @@ public partial class JerseyStudioPage : UserControl
         var (ft, pt, st) = (Picked(OwnFonts), Picked(OwnPants), Picked(OwnSocks));
         int ps = _pantShift, ss = _sockShift;
         var colors = LetterColors();
+        var (pantPal, sockPal) = (PartPalette("pant", palette), PartPalette("sock", palette));
         var (fontPat, roles, pantPat, sockPat) = (_fontPat, _fontRoles, _pantPat, _sockPat);
         var r = await Task.Run(() =>
         {
@@ -536,8 +544,8 @@ public partial class JerseyStudioPage : UserControl
             if (pt != null && pantPat?.Template != pt) pantPat = JerseyStudio.LoadPattern(index, pt, PartSize);
             if (st != null && sockPat?.Template != st) sockPat = JerseyStudio.LoadPattern(index, st, PartSize);
             return (Font: fontPat != null ? OwnKit.PaintFont(fontPat, roles, colors) : null,
-                Pant: pantPat != null ? OwnKit.PaintPart(pantPat, palette, ps) : null,
-                Sock: sockPat != null ? OwnKit.PaintPart(sockPat, palette, ss) : null);
+                Pant: pantPat != null ? OwnKit.PaintPart(pantPat, pantPal, ps) : null,
+                Sock: sockPat != null ? OwnKit.PaintPart(sockPat, sockPal, ss) : null);
         });
         (_fontPat, _fontRoles, _pantPat, _sockPat) = (fontPat, roles, pantPat, sockPat);
         _fontImg = r.Font;
@@ -596,6 +604,10 @@ public partial class JerseyStudioPage : UserControl
         NameFill.Text = _nameFill is int nf ? GearZone.Hex(nf) : "";
         NameOutline.Text = _nameOutline is int no ? GearZone.Hex(no) : "";
         LetterOuter.Text = _letterOuter is int lo ? GearZone.Hex(lo) : "";
+        ArmFill.Text = _armFill is int af ? GearZone.Hex(af) : "";
+        ArmOutline.Text = _armOutline is int ao ? GearZone.Hex(ao) : "";
+        PantColors.Text = string.Join(",", _pantColors.Select(GearZone.Hex));
+        SockColors.Text = string.Join(",", _sockColors.Select(GearZone.Hex));
         _suppress = false;
         OwnSwatches();
     }
@@ -611,6 +623,20 @@ public partial class JerseyStudioPage : UserControl
         NameFillSwatch.Background = HexColor.Brush(HexColor.Parse(NameFill.Text) ?? HexColor.Parse(LetterFill.Text));
         NameOutlineSwatch.Background = HexColor.Brush(HexColor.Parse(NameOutline.Text) ?? HexColor.Parse(LetterOutline.Text));
         LetterOuterSwatch.Background = HexColor.Brush(HexColor.Parse(LetterOuter.Text) ?? HexColor.Parse(LetterOutline.Text));
+        ArmFillSwatch.Background = HexColor.Brush(HexColor.Parse(ArmFill.Text) ?? HexColor.Parse(LetterFill.Text));
+        ArmOutlineSwatch.Background = HexColor.Brush(HexColor.Parse(ArmOutline.Text) ?? HexColor.Parse(LetterOutline.Text));
+    }
+
+    /// <summary>The pants' or socks' own colours: "#RRGGBB,#RRGGBB…" (blank: the team colours).</summary>
+    private void OnPartColors(object sender, TextChangedEventArgs e)
+    {
+        if (_suppress || sender is not TextBox { Tag: string garment } box) return;
+        var parts = box.Text.Split(new[] { ',', ' ', ';' }, StringSplitOptions.RemoveEmptyEntries).Select(HexColor.Parse).ToList();
+        if (parts.Any(c => c == null)) return;                      // still typing
+        var list = parts.Select(c => c.Value).ToList();
+        if (garment == "pant") _pantColors = list; else _sockColors = list;
+        _ownTimer.Stop();
+        _ownTimer.Start();
     }
 
     private void OnOwnColor(object sender, TextChangedEventArgs e)
@@ -628,11 +654,13 @@ public partial class JerseyStudioPage : UserControl
         OwnSwatches();
         if (_suppress || sender is not TextBox { Tag: string tag } box) return;
         // the name's colours and the outer ring's (their Tag is the empty box's hint): blank follows the numbers' / the outline's
-        if (box == NameFill || box == NameOutline || box == LetterOuter)
+        if (box == NameFill || box == NameOutline || box == LetterOuter || box == ArmFill || box == ArmOutline)
         {
             if (box.Text.Trim().Length > 0 && HexColor.Parse(box.Text) == null) return;
             if (box == NameFill) _nameFill = HexColor.Parse(box.Text);
             else if (box == NameOutline) _nameOutline = HexColor.Parse(box.Text);
+            else if (box == ArmFill) _armFill = HexColor.Parse(box.Text);
+            else if (box == ArmOutline) _armOutline = HexColor.Parse(box.Text);
             else _letterOuter = HexColor.Parse(box.Text);
             _ownTimer.Stop();
             _ownTimer.Start();
@@ -678,7 +706,7 @@ public partial class JerseyStudioPage : UserControl
     }
 
     /// <summary>The lettering colours as set.</summary>
-    private OwnKit.FontColors LetterColors() => new(_letterFill, _letterOutline, _letterOuter, _nameFill, _nameOutline);
+    private OwnKit.FontColors LetterColors() => new(_letterFill, _letterOutline, _letterOuter, _nameFill, _nameOutline, _armFill, _armOutline);
 
     private void OnLetterSwap(object sender, RoutedEventArgs e)
     {
@@ -849,11 +877,15 @@ public partial class JerseyStudioPage : UserControl
         }
     }
 
-    /// <summary>Redraws the helmet (its number follows the lettering), keeping the view.</summary>
+    /// <summary>Redraws the helmet (its number follows the lettering), keeping the view. In the colours the export
+    /// writes (the design's, with your zone rows on top): the start kit's own zones are none for a uniform of your own,
+    /// which left the helmet untextured (grey). A helmet that can't be drawn keeps the one shown.</summary>
     private async Task RedrawGear()
     {
         if (_shown == null || _kit == null) return;
-        var helmet = await KitScene.GearAsync(_mods.Index, _kit, "helmet", _helmetZones, _gloveZones, Lettering().Number);
+        var (h, g) = ExportGear();
+        var helmet = await KitScene.GearAsync(_mods.Index, _kit, "helmet", h, g, Lettering().Number);
+        if (helmet == null) return;
         _shown = _shown.Select(p => p.Garment == "helmet" ? (p.Garment, p.Part, helmet) : p).ToList();
     }
 
@@ -1898,6 +1930,40 @@ public partial class JerseyStudioPage : UserControl
         await EnsureStudio();
     }
 
+    /// <summary>The pants or socks texture as a PNG: what "Export to mod" / "Write over this kit" writes for them (the
+    /// painted part at full size in your colours and shuffle, or your own image when you set one).</summary>
+    private async void OnPartExportPng(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is not string garment || _mods == null) return;
+        bool pant = garment == "pant";
+        var template = Picked(pant ? OwnPants : OwnSocks);
+        var image = pant ? _pantImage : _sockImage;
+        if (template == null && image == null) { StudioStatus.Text = $"Pick {(pant ? "pants" : "socks")} first."; return; }
+        string what = pant ? "pants" : "socks";
+        var dlg = new SaveFileDialog
+        {
+            Title = $"Export the {what}", Filter = "PNG image|*.png", InitialDirectory = DesignFolder(),
+            FileName = $"{DesignFileName().Replace(".jersey.json", "")}_{garment}.png",
+        };
+        if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
+        var index = _mods.Index;
+        var palette = PartPalette(garment, Palette());
+        int shift = pant ? _pantShift : _sockShift, size = pant ? 2048 : 1024;
+        try
+        {
+            var (rgba, w, h) = await Task.Run(() =>
+            {
+                if (image is { } im) return (im.Rgba, im.W, im.H);
+                var p = JerseyStudio.LoadPattern(index, template, size);
+                return (OwnKit.PaintPart(p, palette, shift), p.Size, p.Size);
+            });
+            File.WriteAllBytes(dlg.FileName, ImageFiles.Png(rgba, w, h));
+            StatusChanged?.Invoke($"Exported the {what} to {dlg.FileName}");
+            StudioStatus.Text = $"Exported the {what} ({w}×{h}) to {Path.GetFileName(dlg.FileName)}.";
+        }
+        catch (Exception ex) { StudioStatus.Text = $"Couldn't export the {what}: {ex.Message}"; }
+    }
+
     private void OnStudioExport(object sender, RoutedEventArgs e)
     {
         if (_studioSrc == null || _design == null) return;
@@ -2014,7 +2080,7 @@ public partial class JerseyStudioPage : UserControl
 
     private sealed record OwnFile(List<string> Colors, int? Font, int? Pant, int? Sock, string LetterFill, string LetterOutline, int PantShift, int SockShift,
                                   string NameFill = null, string NameOutline = null, bool? OwnNameLetters = null, string PantImage = null, string SockImage = null,
-                                  string LetterOuter = null);
+                                  string LetterOuter = null, string ArmFill = null, string ArmOutline = null, List<string> PantColors = null, List<string> SockColors = null);
 
     private sealed record SpotFile(int Id, string Name, bool Enabled, double R, double Sx, double Sy, double Tx, double Ty);
     private sealed record CollarStripeFile(double From, double Width, string Color);
@@ -2056,7 +2122,8 @@ public partial class JerseyStudioPage : UserControl
             f.Own = new OwnFile(_ownColors.Select(GearZone.Hex).ToList(), Picked(OwnFonts)?.Number, Picked(OwnPants)?.Number, Picked(OwnSocks)?.Number,
                 GearZone.Hex(_letterFill), GearZone.Hex(_letterOutline), _pantShift, _sockShift,
                 _nameFill is int nf ? GearZone.Hex(nf) : null, _nameOutline is int no ? GearZone.Hex(no) : null, null, _pantImageFile, _sockImageFile,
-                _letterOuter is int lo ? GearZone.Hex(lo) : null);
+                _letterOuter is int lo ? GearZone.Hex(lo) : null, _armFill is int af ? GearZone.Hex(af) : null, _armOutline is int ao ? GearZone.Hex(ao) : null,
+                _pantColors.Count > 0 ? _pantColors.Select(GearZone.Hex).ToList() : null, _sockColors.Count > 0 ? _sockColors.Select(GearZone.Hex).ToList() : null);
         if (SlotTeam.SelectedItem is StudioTeamItem ti && SlotLabel.SelectedItem is PickItem lab)
             f.Target = new TargetFile(ti.Team.Name, ti.Team.TeamId, PickedPackageTeam()?.Team.Code, lab.Value, (SlotFolder.SelectedItem as SlotKitItem)?.Kit.Folder,
                 SlotLight.IsChecked == true, SlotOutfit.IsChecked == true, SlotTop.IsChecked == true);
@@ -2085,6 +2152,9 @@ public partial class JerseyStudioPage : UserControl
             {
                 (_nameFill, _nameOutline) = (HexColor.Parse(own.NameFill ?? ""), HexColor.Parse(own.NameOutline ?? ""));
                 _letterOuter = HexColor.Parse(own.LetterOuter ?? "");
+                (_armFill, _armOutline) = (HexColor.Parse(own.ArmFill ?? ""), HexColor.Parse(own.ArmOutline ?? ""));
+                _pantColors = (own.PantColors ?? new()).Select(HexColor.Parse).Where(c => c != null).Select(c => c.Value).ToList();
+                _sockColors = (own.SockColors ?? new()).Select(HexColor.Parse).Where(c => c != null).Select(c => c.Value).ToList();
                 SetPartImage("pant", own.PantImage != null && File.Exists(own.PantImage) ? own.PantImage : null);
                 SetPartImage("sock", own.SockImage != null && File.Exists(own.SockImage) ? own.SockImage : null);
                 await SetOwn(string.Join(",", own.Colors ?? new()), own.Font, own.Pant, own.Sock, $"{own.LetterFill},{own.LetterOutline}", own.PantShift, own.SockShift);
@@ -2301,6 +2371,7 @@ public partial class JerseyStudioPage : UserControl
         var palette = Palette();
         var (fontT, pantT, sockT) = (_fontPat?.Template, _pantPat?.Template, _sockPat?.Template);
         var (fontImg, ps, ss) = (_fontImg, _pantShift, _sockShift);
+        var (pantPal, sockPal) = (PartPalette("pant", palette), PartPalette("sock", palette));
         var (pantImg, sockImg) = (_pantImage, _sockImage);
         await Task.Run(() =>
         {
@@ -2379,7 +2450,7 @@ public partial class JerseyStudioPage : UserControl
                 else if (pantT != null)
                 {
                     var pp = JerseyStudio.LoadPattern(index, pantT, 2048);
-                    var pant = OwnKit.PaintPart(pp, palette, ps);
+                    var pant = OwnKit.PaintPart(pp, pantPal, ps);
                     // the base keeps the folder's fabric map (alpha)
                     var withAlpha = (byte[])pant.Clone();
                     if (target.Slot("pant_base_color") is { } tpb && Kits.Load(index, tpb.Name, 2048, 0) is { Rgba: not null } pb && pb.Width == pp.Size && pb.Height == pp.Size)
@@ -2395,7 +2466,7 @@ public partial class JerseyStudioPage : UserControl
                 else if (sockT != null)
                 {
                     var sp = JerseyStudio.LoadPattern(index, sockT, 1024);
-                    var sock = OwnKit.PaintPart(sp, palette, ss);
+                    var sock = OwnKit.PaintPart(sp, sockPal, ss);
                     Put("sock_base_color", sock, sp.Size, sp.Size, true);
                     Put("sock_color", sock, sp.Size, sp.Size, true);
                 }

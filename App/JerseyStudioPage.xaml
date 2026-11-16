@@ -226,6 +226,16 @@
                                     <TextBox x:Name="NameOutline" DockPanel.Dock="Right" Style="{StaticResource Hex}" Tag="same" TextChanged="OnLetterColor" GotKeyboardFocus="OnOwnColorFocus" />
                                     <TextBlock Text="Name outline" Style="{StaticResource Caption}" VerticalAlignment="Center" />
                                 </DockPanel>
+                                <DockPanel Style="{StaticResource OwnRow}" ToolTip="The sleeve numbers in their own colour (also the front number and the helmet's), e.g. white on red sleeves with red numbers on the back. Blank: the same as the numbers.">
+                                    <Border x:Name="ArmFillSwatch" Width="22" Height="22" CornerRadius="5" BorderBrush="#40FFFFFF" BorderThickness="1" Margin="0,0,8,0" />
+                                    <TextBox x:Name="ArmFill" DockPanel.Dock="Right" Style="{StaticResource Hex}" Tag="same" TextChanged="OnLetterColor" GotKeyboardFocus="OnOwnColorFocus" />
+                                    <TextBlock Text="Sleeve number fill" Style="{StaticResource Caption}" VerticalAlignment="Center" />
+                                </DockPanel>
+                                <DockPanel Style="{StaticResource OwnRow}" ToolTip="The sleeve numbers' outline colour. Blank: the same as the numbers'.">
+                                    <Border x:Name="ArmOutlineSwatch" Width="22" Height="22" CornerRadius="5" BorderBrush="#40FFFFFF" BorderThickness="1" Margin="0,0,8,0" />
+                                    <TextBox x:Name="ArmOutline" DockPanel.Dock="Right" Style="{StaticResource Hex}" Tag="same" TextChanged="OnLetterColor" GotKeyboardFocus="OnOwnColorFocus" />
+                                    <TextBlock Text="Sleeve number outline" Style="{StaticResource Caption}" VerticalAlignment="Center" />
+                                </DockPanel>
                                 <ListBox x:Name="OwnFonts" Height="150" Background="{StaticResource Surface2}" BorderThickness="0" Padding="3" Margin="0,2,0,10"
                                          ScrollViewer.HorizontalScrollBarVisibility="Disabled" ItemContainerStyle="{StaticResource PickItem}" SelectionChanged="OnOwnPart">
                                     <ListBox.ItemsPanel>
@@ -241,12 +251,18 @@
                                 </ListBox>
 
                                 <DockPanel>
+                                    <Button DockPanel.Dock="Right" Style="{StaticResource Ghost}" Content="PNG…" Padding="6,2" Tag="pant" Click="OnPartExportPng"
+                                            ToolTip="Export the pants texture as the export writes it (2048 px, your colours, or your own image)" />
                                     <Button DockPanel.Dock="Right" Style="{StaticResource Ghost}" Content="Shuffle" Padding="6,2" Click="OnPantShuffle" ToolTip="Move the colours round the pants' zones" />
                                     <Button x:Name="PantImageClear" DockPanel.Dock="Right" Style="{StaticResource Ghost}" Content="Clear" Padding="6,2" Tag="pant" Click="OnPartImageClear"
                                             Visibility="Collapsed" ToolTip="Back to the painted pants" />
                                     <Button DockPanel.Dock="Right" Style="{StaticResource Ghost}" Content="Image…" Padding="6,2" Tag="pant" Click="OnPartImage"
                                             ToolTip="Use your own pants texture (PNG or DDS, in the game's pant layout) instead of the painted pants" />
                                     <TextBlock Text="PANTS" Style="{StaticResource SectionHead}" />
+                                </DockPanel>
+                                <DockPanel Style="{StaticResource OwnRow}" ToolTip="The pants' own colours, #RRGGBB separated by commas: the first is the legs, the rest go to the stripes and trims (Shuffle moves them round). Blank: the team colours above.">
+                                    <TextBox x:Name="PantColors" DockPanel.Dock="Right" Style="{StaticResource Hex}" Width="190" Tag="pant" TextChanged="OnPartColors" />
+                                    <TextBlock Text="Colours" Style="{StaticResource Caption}" VerticalAlignment="Center" />
                                 </DockPanel>
                                 <ListBox x:Name="OwnPants" Height="104" Background="{StaticResource Surface2}" BorderThickness="0" Padding="3" Margin="0,0,0,10"
                                          ScrollViewer.HorizontalScrollBarVisibility="Disabled" ItemContainerStyle="{StaticResource PickItem}" ItemTemplate="{StaticResource PartThumb}"
@@ -257,12 +273,18 @@
                                 </ListBox>
 
                                 <DockPanel>
+                                    <Button DockPanel.Dock="Right" Style="{StaticResource Ghost}" Content="PNG…" Padding="6,2" Tag="sock" Click="OnPartExportPng"
+                                            ToolTip="Export the socks texture as the export writes it (1024 px, your colours, or your own image)" />
                                     <Button DockPanel.Dock="Right" Style="{StaticResource Ghost}" Content="Shuffle" Padding="6,2" Click="OnSockShuffle" ToolTip="Move the colours round the socks' zones" />
                                     <Button x:Name="SockImageClear" DockPanel.Dock="Right" Style="{StaticResource Ghost}" Content="Clear" Padding="6,2" Tag="sock" Click="OnPartImageClear"
                                             Visibility="Collapsed" ToolTip="Back to the painted socks" />
                                     <Button DockPanel.Dock="Right" Style="{StaticResource Ghost}" Content="Image…" Padding="6,2" Tag="sock" Click="OnPartImage"
                                             ToolTip="Use your own socks texture (PNG or DDS, in the game's sock layout) instead of the painted socks" />
                                     <TextBlock Text="SOCKS" Style="{StaticResource SectionHead}" />
+                                </DockPanel>
+                                <DockPanel Style="{StaticResource OwnRow}" ToolTip="The socks' own colours, #RRGGBB separated by commas: the first is the sock, the rest go to the stripes (Shuffle moves them round). Blank: the team colours above.">
+                                    <TextBox x:Name="SockColors" DockPanel.Dock="Right" Style="{StaticResource Hex}" Width="190" Tag="sock" TextChanged="OnPartColors" />
+                                    <TextBlock Text="Colours" Style="{StaticResource Caption}" VerticalAlignment="Center" />
                                 </DockPanel>
                                 <ListBox x:Name="OwnSocks" Height="104" Background="{StaticResource Surface2}" BorderThickness="0" Padding="3" Margin="0,0,0,10"
                                          ScrollViewer.HorizontalScrollBarVisibility="Disabled" ItemContainerStyle="{StaticResource PickItem}" ItemTemplate="{StaticResource PartThumb}"

@@ -45,9 +45,15 @@ public static class OwnKit
     /// and whether it belongs to the name letters (the sheet's top <see cref="LetterRows"/>) rather than the numbers.</summary>
     public sealed record FontRole(int Ring, bool Name);
 
-    /// <summary>A font's lettering colours. The name's (null: the numbers'), and the outer ring's for the fonts that
-    /// have a third ring (null: the outline's).</summary>
-    public sealed record FontColors(int Fill, int Outline, int? Outer = null, int? NameFill = null, int? NameOutline = null);
+    /// <summary>A font's lettering colours. The name's (null: the numbers'), the outer ring's for the fonts that
+    /// have a third ring (null: the outline's), and the sleeve numbers' (the sheet's small digits, which the arms, the
+    /// front number and the helmet use; null: the back numbers').</summary>
+    public sealed record FontColors(int Fill, int Outline, int? Outer = null, int? NameFill = null, int? NameOutline = null,
+                                    int? ArmFill = null, int? ArmOutline = null);
+
+    /// <summary>The font sheet's two rows of small digits (arms, front, helmet), in 2048ths of the sheet (KitFont): both take
+    /// the sleeve colours, whichever row the game reads for which hotspot.</summary>
+    public const int ArmDigitsTop = 1472, ArmDigitsBottom = 2048;
 
     /// <summary>
     /// Each zone's role in a font: the zones are read inside the glyphs only (the masks' alpha). Of two zones that
@@ -205,15 +211,26 @@ public static class OwnKit
             _ => colors.Outer ?? colors.NameOutline ?? colors.Outline,
         };
         var zones = roles.OrderBy(r => r.Key).Select(r => (Zone: r.Key, Color: Color(r.Value))).ToList();
+        // the small digits' band: its own fill and outline when set
+        int ArmColor(FontRole r) => (r.Name, r.Ring) switch
+        {
+            (false, 0) => colors.ArmFill ?? colors.Fill,
+            (false, 1) => colors.ArmOutline ?? colors.Outline,
+            _ => Color(r),
+        };
+        var armZones = roles.OrderBy(r => r.Key).Select(r => (Zone: r.Key, Color: ArmColor(r.Value))).ToList();
+        int armTop = ArmDigitsTop * size / 2048, armBottom = ArmDigitsBottom * size / 2048;
         var img = new byte[size * size * 4];
         Parallel.For(0, size, y =>
         {
-            int start = y < rows ? colors.NameFill ?? colors.Fill : colors.Fill;
+            bool arm = y >= armTop && y < armBottom;
+            int start = y < rows ? colors.NameFill ?? colors.Fill : arm ? colors.ArmFill ?? colors.Fill : colors.Fill;
+            var rowZones = arm ? armZones : zones;
             for (int x = 0; x < size; x++)
             {
                 int o = (y * size + x) * 4;
                 double r = start >> 16 & 255, g = start >> 8 & 255, b = start & 255;
-                foreach (var (zone, c) in zones)
+                foreach (var (zone, c) in rowZones)
                 {
                     double w = font.Masks[zone / 3][o + zone % 3] / 255.0;
                     if (w <= 0) continue;

@@ -64,6 +64,10 @@ in a players block takes templates from those leagues' teams instead (exhibition
 at most that overall, and any one of the matching candidates, so the new players spread over that league's range.
 Add `"median": 65` and/or `"teams": { "MICH": 70, ... }` (a team's own median by code) and the players aim at that
 overall +/- `"spread"` (default 6, most near the middle, never above `maxOverall`), copying the candidate nearest it.
+Helmet logos: a kit folder's helmetlogo_0 (2:1, both sides of the helmet) still holds its old team's logo, so an exported
+uniform without a `helmetlogo_0_color` texture of its own gets the team's main logo centred on a 1024x512 decal, and a
+helmetlogo_2 (league badge or flag on some kits) is cleared (PackageUniforms.HelmetLogos; made in build/helmetlogos).
+Only teams with an exported uniform: the others wear their template's folder, which other teams use.
 Name strings are packed (PackageInstaller.PackNameStrings): a reused set's strings only have the room the old club's
 texts took, so a team's strings with the same text share one stored copy (T3Db.PointString), and a text too long for
 its own place goes to a place freed that way (any team's), counting a freed neighbour's room. Then shorter texts, a

@@ -171,6 +171,7 @@ public static class PackageInstaller
         Took("logos");
         PlanPortraits(index, portraits, locations, tocs, patches, r);
         Took("portraits");
+        PackageUniforms.HelmetLogos(spec, uniforms, r);
         PlanUniforms(index, uniforms, locations, tocs, patches, r);
 
         Took($"uniform textures (encoded textures: {PlanCache.Hits} reused, {PlanCache.Misses} encoded)");

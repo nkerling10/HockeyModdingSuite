@@ -92,6 +92,44 @@ public static class PackageUniforms
     /// Step 3 (database): each team with uniforms gets exactly those in its jersey menu. Returns the uniforms whose
     /// textures and stamps step 4 writes (the ones whose kit folder is in the game).
     /// </summary>
+    /// <summary>
+    /// Helmet decals for the exported uniforms: a kit folder's helmetlogo_0 (2:1, the logo on both sides of the helmet)
+    /// still holds the folder's old team's logo (Boston's "B"), so a uniform that doesn't ship its own gets the team's
+    /// main logo, centred on a transparent 1024×512 decal (about the size the game's own logos take); a helmetlogo_2
+    /// (a league badge or flag on some kits) is cleared. Made in the package's build folder; only in memory in the
+    /// uniform (its uniform.json is left as exported). Teams without an exported uniform wear their template's kit
+    /// folder, which other teams use, so their helmets aren't touched.
+    /// </summary>
+    public static void HelmetLogos(PackageSpec spec, List<(TeamSpec Team, PackageUniform Uniform, Kit Kit)> uniforms, PackageInstaller.Result r)
+    {
+        string dir = Path.Combine(spec.Folder, "build", "helmetlogos");
+        int made = 0, cleared = 0;
+        foreach (var (t, u, kit) in uniforms)
+        {
+            if (kit.Slot("helmetlogo_0_color") != null && !u.Textures.ContainsKey("helmetlogo_0_color") && spec.TeamLogoFile(t) is { } logo)
+            {
+                var (rgba, w, h) = Png.Load(logo);
+                var fitted = Png.Fit(rgba, w, h, 430, 400, true);
+                var canvas = new byte[1024 * 512 * 4];
+                for (int y = 0; y < 400; y++) Array.Copy(fitted, y * 430 * 4, canvas, ((56 + y) * 1024 + 297) * 4, 430 * 4);
+                Directory.CreateDirectory(dir);
+                string file = Path.Combine(dir, $"{t.Code}_{u.Name}_helmetlogo_0.png");
+                File.WriteAllBytes(file, ImageFiles.Png(canvas, 1024, 512));
+                u.Textures["helmetlogo_0_color"] = Path.GetRelativePath(u.Dir, file);
+                made++;
+            }
+            if (kit.Slot("helmetlogo_2_color") != null && !u.Textures.ContainsKey("helmetlogo_2_color"))
+            {
+                Directory.CreateDirectory(dir);
+                string file = Path.Combine(dir, "clear_512.png");
+                if (!File.Exists(file)) File.WriteAllBytes(file, ImageFiles.Png(new byte[512 * 512 * 4], 512, 512));
+                u.Textures["helmetlogo_2_color"] = Path.GetRelativePath(u.Dir, file);
+                cleared++;
+            }
+        }
+        if (made + cleared > 0) r.Lines.Add($"uniforms: helmet logos from the team's logo for {made} uniform(s){(cleared > 0 ? $", {cleared} second decal(s) cleared" : "")}");
+    }
+
     public static List<(TeamSpec Team, PackageUniform Uniform, Kit Kit)> ApplySlots(T3Db db, IReadOnlyList<Kit> kits, PackageSpec spec, PackageInstaller.Result r)
     {
         var problems = new List<string>();

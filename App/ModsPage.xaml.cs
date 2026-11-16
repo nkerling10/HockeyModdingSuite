@@ -240,8 +240,13 @@ public partial class ModsPage : UserControl
             var r = await _mods.InstallPackageAsync(folder, line => Dispatcher.BeginInvoke(() => StatusChanged?.Invoke($"Installing {name}: {line.Trim()}")));
             StatusChanged?.Invoke($"{name} installed");
             if (App.Args.ContainsKey("shot")) return;
-            string report = string.Join("\n", r.Lines.Where(l => !l.StartsWith("  ")).Take(30));
-            if (r.Warnings.Count > 0) report += "\n\nWarnings:\n" + string.Join("\n", r.Warnings.Take(15).Select(w => "• " + (w.Length > 300 ? w[..300] + "…" : w)));
+            // short, so the box fits the screen (its OK button was pushed off it by 30 long lines): the headline lines,
+            // each cut to one line, and the first warnings; everything is in the report file
+            static string Cut(string s) => s.Length > 140 ? s[..140] + "…" : s;
+            string[] keys = { "players: created", "players: commits created", "portraits: ", "uniforms: ", "name strings:", "code mods:", "art ids:" };
+            var head = r.Lines.Select(l => l.Trim()).Where(l => keys.Any(k => l.StartsWith(k)) && !l.Contains("players)")).Take(10).Select(Cut).ToList();
+            string report = "Installed." + (head.Count > 0 ? "\n\n" + string.Join("\n", head) : "");
+            if (r.Warnings.Count > 0) report += $"\n\n{r.Warnings.Count} warning(s), e.g.:\n" + string.Join("\n", r.Warnings.Take(5).Select(w => "• " + Cut(w)));
             MessageBox.Show(Window.GetWindow(this), report + $"\n\nFull report: {System.IO.Path.Combine(folder, "build", "install-report.md")}",
                             $"{name} installed", MessageBoxButton.OK, r.Warnings.Count > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
         });
