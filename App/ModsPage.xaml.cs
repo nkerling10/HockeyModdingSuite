@@ -245,11 +245,63 @@ public partial class ModsPage : UserControl
             static string Cut(string s) => s.Length > 140 ? s[..140] + "…" : s;
             string[] keys = { "players: created", "players: commits created", "portraits: ", "uniforms: ", "name strings:", "code mods:", "art ids:" };
             var head = r.Lines.Select(l => l.Trim()).Where(l => keys.Any(k => l.StartsWith(k)) && !l.Contains("players)")).Take(10).Select(Cut).ToList();
-            string report = "Installed." + (head.Count > 0 ? "\n\n" + string.Join("\n", head) : "");
-            if (r.Warnings.Count > 0) report += $"\n\n{r.Warnings.Count} warning(s), e.g.:\n" + string.Join("\n", r.Warnings.Take(5).Select(w => "• " + Cut(w)));
-            MessageBox.Show(Window.GetWindow(this), report + $"\n\nFull report: {System.IO.Path.Combine(folder, "build", "install-report.md")}",
-                            $"{name} installed", MessageBoxButton.OK, r.Warnings.Count > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
+            string summary = "Installed." + (head.Count > 0 ? "\n\n" + string.Join("\n", head) : "") +
+                             (r.Warnings.Count > 0 ? $"\n\n{r.Warnings.Count} warning(s): see Details." : "");
+            var details = new System.Text.StringBuilder();
+            if (r.Warnings.Count > 0) details.AppendLine("Warnings:").AppendJoin("\n", r.Warnings.Select(w => "• " + w)).AppendLine().AppendLine();
+            details.AppendJoin("\n", r.Lines.Select(l => l.TrimEnd()));
+            ShowReport(Window.GetWindow(this), $"{name} installed", summary, details.ToString(),
+                       System.IO.Path.Combine(folder, "build", "install-report.md"), r.Warnings.Count > 0);
         });
+    }
+
+    /// <summary>
+    /// A small result window that always fits the screen: the summary, then the full text in a scrolling box (closed
+    /// until asked for), a button opening the report file, and OK (Enter / Esc close it too).
+    /// </summary>
+    public static void ShowReport(Window owner, string title, string summary, string details, string reportFile, bool warning)
+    {
+        var w = new Window
+        {
+            Title = title, Owner = owner, WindowStartupLocation = owner != null ? WindowStartupLocation.CenterOwner : WindowStartupLocation.CenterScreen,
+            Width = 640, SizeToContent = SizeToContent.Height, MaxHeight = Math.Min(560, SystemParameters.WorkArea.Height - 40),
+            ResizeMode = ResizeMode.CanResizeWithGrip, ShowInTaskbar = false,
+        };
+        var root = new DockPanel { Margin = new Thickness(16) };
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 12, 0, 0) };
+        DockPanel.SetDock(buttons, Dock.Bottom);
+        if (reportFile != null && System.IO.File.Exists(reportFile))
+        {
+            var open = new Button { Content = "Open report", Padding = new Thickness(12, 4, 12, 4), Margin = new Thickness(0, 0, 8, 0) };
+            open.Click += (_, _) =>
+            {
+                try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(reportFile) { UseShellExecute = true }); }
+                catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException) { }
+            };
+            buttons.Children.Add(open);
+        }
+        var ok = new Button { Content = "OK", IsDefault = true, IsCancel = true, MinWidth = 80, Padding = new Thickness(12, 4, 12, 4) };
+        ok.Click += (_, _) => w.Close();
+        buttons.Children.Add(ok);
+        root.Children.Add(buttons);
+        var top = new TextBlock
+        {
+            Text = (warning ? "⚠ " : "") + summary, TextWrapping = TextWrapping.Wrap, TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxHeight = 220, Margin = new Thickness(0, 0, 0, 8),
+        };
+        DockPanel.SetDock(top, Dock.Top);
+        root.Children.Add(top);
+        if (!string.IsNullOrWhiteSpace(details))
+        {
+            var box = new TextBox
+            {
+                Text = details, IsReadOnly = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Consolas"), FontSize = 11,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, Height = 240,
+            };
+            root.Children.Add(new Expander { Header = "Details", Content = box, IsExpanded = false });
+        }
+        w.Content = root;
+        w.ShowDialog();
     }
 
     private async void OnRemovePackage(object sender, RoutedEventArgs e)
