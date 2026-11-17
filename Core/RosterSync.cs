@@ -616,6 +616,33 @@ public static class RosterSync
     public const string FreeAgentsTable = "exhibitionfreeagents";
 
     /// <summary>
+    /// Puts players (by players index) on the free-agent list, kept in playerindex order as the game ships it; those
+    /// already on it are left. A franchise keeps a player with no roster row only when he's on this list (2026-11-17:
+    /// Evander Kane, listed, is in a new franchise; the base's unlisted teamless prospects are not). Returns how many
+    /// were added (stops when the table is full).
+    /// </summary>
+    public static int ListFreeAgents(T3Db db, IEnumerable<int> playerIndexes)
+    {
+        var fa = db.Table(FreeAgentsTable);
+        if (fa == null) return 0;
+        var ff = fa.Fields.First(f => f.Name == "playerindex");
+        var rows = Enumerable.Range(0, fa.WrittenRecords).Where(r => !db.IsInvalid(fa, r)).ToList();
+        if (rows.Count == 0) return 0;                  // nothing to copy a row from
+        var have = rows.Select(r => (int)db.Get(fa, r, ff)).ToHashSet();
+        var add = playerIndexes.Where(pi => pi >= 0 && !have.Contains(pi)).Distinct().Take(fa.Records - rows.Count).ToList();
+        if (add.Count == 0) return 0;
+        var template = db.RecordBytes(fa, rows[0]);
+        var all = have.Concat(add).OrderBy(x => x).ToList();
+        db.SetWritten(fa, all.Count);
+        for (int r = 0; r < all.Count; r++)
+        {
+            db.WriteRecord(fa, r, (byte[])template.Clone());
+            db.Set(fa, r, ff, all[r]);
+        }
+        return add.Count;
+    }
+
+    /// <summary>
     /// Makes a player a free agent the way the game's own are stored (Evander Kane in the stock roster): his roster row
     /// (<paramref name="pi"/>, the row the compare read) leaves both roster tables, his bio has no team, no NHL club and no
     /// contract, and his players index is on the free-agent list. His other versions (national, All-Star, alumni) stay.

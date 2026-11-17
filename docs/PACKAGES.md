@@ -47,6 +47,9 @@ top of those instead.
 Optional per team: `nicknameShort`, `nameShort`, used when a name-set string has no room for the full text.
 Optional `nameSets.avoid`: sets the package must not take (the NCAA package reserves the 15 old KHL club sets for a KHL
 package).
+Optional group setting `"cityFromSchool": true`: the group's teams take the school name as their city (db cityname
+and NHLCITYNAME), so pickers that show and sort by city (Edit Lines) list them by school. Not inherited by extra
+leagues (the USHL keeps its cities); the arena keeps `arena_city`.
 
 **Status 2026-11-10:** built: `package-check`, `package-install` (+ `--dry`, `--emulator`), `package-remove`,
 `package-status`, `package-codemods`. Core/Packages: PackageSpec, PackageCheck, PackageInstaller, Png, NcaaCodeMods.
@@ -58,6 +61,17 @@ draft: { year, round, pick, team } } } } }. `"bubble": "true"` (or true/yes/1) g
 unless the game has his rights with another team. No `draft`: the game's draft stays (a created player is undrafted).
 Current-season roster players are matched and moved (taking the file's number and size), or created from the file, then given the NCAA bio (team -1, juniorteam = school, juniorleague) and
 rules.faceProtector; later seasons (commits) are only listed for now.
+Goalies may give `"catches": "L|R"` in place of `shoots` (catches L = handedness 0, as most of the game's goalies).
+Read and checked but **not applied yet** (2026-11-17): `"player_model": { skin_tone, hair_color, hair_length, hair_type,
+facial_hair }` (→ bio skincolor 1-12 light to dark, a generic head 100000+ of that tone, hairid male_0-73,
+haircolorcode), `"captaincy": "C|A"` (→ roster `captain` 1 C / 2 A; a team needs 1 C + 2 A or 3 A, checked) and
+`"player_type"` (→ roster `playerstyle`: DFD 1, OFD 2, TWD 4, GRN 5, PLY 6, SNP 7, PWF 8, TWF 9, ENF 10; checked).
+Optional `rules.gloves`, `rules.helmet`, `rules.neckGuard`: every package skater's exhibitionskaterequipment gloves
+(player_glove_mapping id, e.g. 113 CCM JetSpeed FT4), helmetbrand (e.g. 34 CCM Tacks 910) and neckguardtype (1
+turtleneck, 2 floating, 0 none); a neck guard also clears the bio's neckguardexempt. Unset leaves the created
+players' defaults. A team's own `"equipment": { "gloves": 132, "helmet": 39, "neckGuard": 1 }` (in the package's
+"teams" entry, like "arena") overrides the rules for its skaters, and a roster entry's `"neck_guard"` ("none",
+"turtleneck", "floating" or 0-2) overrides both for that player, as "bubble" does the cage. Goalies are left alone.
 Created players copy a whole ratings row from a template player: by default a typical NHL/AHL player of the same
 position, hand and age (near the median: about 72 overall). `"ratings": { "from": [11, 12, 13], "maxOverall": 67 }`
 in a players block takes templates from those leagues' teams instead (exhibitionteams.league; 11-13 = OHL/QMJHL/WHL),
@@ -78,9 +92,11 @@ goes in as the team's ice logo (`<CODE>_ice.png`, or `ice.png` in its logo folde
 `"game": { "titleId": "PPSA34063", "version": "01.003.001" }` (sce_sys/param.json titleId and contentVersion): an
 install into another game or version is refused before anything changes (PackageInstaller.CheckGame).
 `"createCommits": true` in a players block: commits (later seasons) not in the game are created as unsigned
-prospects with no team (team -1, no roster row, not on the free-agent list: how the game keeps its own young prospects),
-rated by the block's `ratings` for their school and in its `ids`, given the file's draft, and join their school by art
-id like any commit; ones without a usable position stay name commits.
+prospects with no team (team -1, no roster row), rated by the block's `ratings` for their school and in its `ids`,
+given the file's draft, and join their school by art id like any commit; ones without a usable position stay name
+commits. They (and any matched commit with no roster row) go on exhibitionfreeagents: a new franchise drops a rosterless
+player who isn't on that list. No name commit for them: it would also send the franchise's own generated namesake (it
+generates ~80 real-named prospects at start, e.g. a second Joey Cullen) to the school.
 `"ids": [40000, 41999]` in a players block puts that file's created players at those game ids (in order, after any
 already there). Ids 40000-49999 are for packages' blocks (PlayerCreator.PackageIdStart); anything created without a block
 (NHL Sync, a roster file) stays below 40000, and 50000+ is the game's (game modes 56500+, archetypes, Create-a-Player).

@@ -52,6 +52,36 @@ public static class PackagePlayers
         public DraftInfo Draft { get; set; }
         /// <summary>"bubble": true in the file: he wears a clear full shield instead of the package's cage.</summary>
         public bool Bubble { get; set; }
+        /// <summary>"neck_guard" in the file (0 none, 1 turtleneck, 2 floating): his neck guard over the package's; or null.</summary>
+        public int? NeckGuard { get; set; }
+        /// <summary>"player_model": { skin_tone, hair_color, hair_length, hair_type, facial_hair, ethnicity }; read and
+        /// checked, not applied yet (see docs/PACKAGES.md: appearance).</summary>
+        public Dictionary<string, string> Model { get; set; }
+        /// <summary>"captaincy": "C" or "A"; read and checked (1 C + 2 A, or 3 A per team), not applied yet.</summary>
+        public string Captaincy { get; set; }
+        /// <summary>"player_type": DFD, OFD, TWD, GRN, PLY, SNP, PWF, TWF (ENF); read and checked, not applied yet.</summary>
+        public string PlayerType { get; set; }
+    }
+
+    /// <summary>
+    /// Roster "player_type" codes → exhibitionrostertable.playerstyle (from the game's players, 2026-11-17: Pelech/Tanev 1,
+    /// Makar/Fox 2, Hedman/Josi/Slavin 4, Lomberg/Kastelic 5, McDavid/Crosby 6, Ovechkin/Matthews 7, the Tkachuks/Wilson 8,
+    /// Barkov/Marchand 9, Ross Johnston 10; 0 = none). Goalies use 1 (butterfly, most) or 0.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, int> PlayerStyles = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["DFD"] = 1, ["OFD"] = 2, ["TWD"] = 4, ["GRN"] = 5, ["PLY"] = 6, ["SNP"] = 7, ["PWF"] = 8, ["TWF"] = 9, ["ENF"] = 10,
+    };
+
+    private static readonly string[] NeckGuardNames = { "none", "turtleneck", "floating" };
+
+    /// <summary>A string-valued object field ("player_model") as a dictionary; null when missing.</summary>
+    private static Dictionary<string, string> StrMap(JsonElement o, string name)
+    {
+        if (o.ValueKind != JsonValueKind.Object || !o.TryGetProperty(name, out var v) || v.ValueKind != JsonValueKind.Object) return null;
+        var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var x in v.EnumerateObject()) d[x.Name] = x.Value.ValueKind == JsonValueKind.String ? x.Value.GetString() : x.Value.ToString();
+        return d;
     }
 
     /// <summary>"draft": { "year": 2025, "round": 2, "pick": 63, "team": "NJ" } → DraftInfo; null when absent or incomplete.</summary>
@@ -112,6 +142,18 @@ public static class PackagePlayers
             _ => false,
         };
 
+    /// <summary>A roster entry's "neck_guard": "none"/"turtleneck"/"floating" (also false/true) or 0-2 → neckguardtype; null when invalid.</summary>
+    private static int? NeckGuardOf(JsonElement v) => v.ValueKind switch
+    {
+        JsonValueKind.Number when v.TryGetInt32(out int n) && n is >= 0 and <= 2 => n,
+        JsonValueKind.False => 0,
+        JsonValueKind.True => 1,
+        JsonValueKind.String => v.GetString()?.Trim().ToLowerInvariant() switch
+        {
+            "none" or "no" or "0" => 0, "turtleneck" or "1" => 1, "floating" or "float" or "2" => 2, _ => null,
+        },
+        _ => null,
+    };
     private static string Str(JsonElement o, string name) =>
         o.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
     /// <summary>"C" or ["C", "RW"] (primary, then secondary); null when missing.</summary>
@@ -151,6 +193,31 @@ public static class PackagePlayers
         PropertyNameCaseInsensitive = true, ReadCommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true,
     };
 
+    /// <summary>
+    /// The roster keys read but not applied yet (player_model, captaincy, player_type): counted and checked, so the
+    /// file is right before the installer starts using them. Goalies may give "catches" in place of "shoots".
+    /// </summary>
+    private static void CheckNewKeys(List<Listed> now, PackageInstaller.Result r)
+    {
+        int models = now.Count(l => l.Model != null), types = now.Count(l => l.PlayerType != null);
+        var badTypes = now.Where(l => l.PlayerType != null && !PlayerStyles.ContainsKey(l.PlayerType)).ToList();
+        foreach (var l in badTypes.Take(10)) r.Warnings.Add($"players: {l.Name} ({l.Team.Code}): player_type '{l.PlayerType}' isn't one of {string.Join("/", PlayerStyles.Keys)}");
+        var capTeams = now.Where(l => !string.IsNullOrEmpty(l.Captaincy)).GroupBy(l => l.Team.Code).ToList();
+        int badCap = 0;
+        foreach (var g in capTeams)
+        {
+            int c = g.Count(l => l.Captaincy == "C"), a = g.Count(l => l.Captaincy == "A"), other = g.Count() - c - a;
+            if (!((c == 1 && a == 2) || (c == 0 && a == 3)) || other > 0)
+            {
+                badCap++;
+                r.Warnings.Add($"players: {g.Key}: captaincy is {c} C + {a} A{(other > 0 ? $" + {other} other" : "")}; the game needs 1 C + 2 A, or 3 A");
+            }
+        }
+        if (models + types + capTeams.Count > 0)
+            r.Lines.Add($"players: read, not applied yet: player_model {models}, player_type {types} ({badTypes.Count} unknown), " +
+                        $"captaincy on {capTeams.Count} teams ({badCap} not 1 C + 2 A or 3 A)");
+    }
+
     public static void Apply(T3Db db, PackageSpec spec, PackageInstaller.Result r)
     {
         // one checksum fix per table at the end, not one per field written (no-op inside the installer's own batch)
@@ -186,7 +253,7 @@ public static class PackagePlayers
                         info = new Details
                         {
                             Pos = posList.ElementAtOrDefault(0), Pos2 = posList.ElementAtOrDefault(1),
-                            Shoots = Str(el, "shoots"), Height = Num(el, "height"), Weight = Num(el, "weight"),
+                            Shoots = Str(el, "shoots") ?? Str(el, "catches"), Height = Num(el, "height"), Weight = Num(el, "weight"),
                             Number = Num(el, "jersey_number") ?? Num(el, "number"), City = city, Region = region, Country = country,
                         };
                     }
@@ -195,6 +262,17 @@ public static class PackagePlayers
                     var (first, last) = SplitPersonName(name);
                     if (info == null || string.IsNullOrWhiteSpace(info.Pos)) info = details.GetValueOrDefault(name) ?? info;
                     var item = new Listed(team, season, name, first, last, b, info) { Draft = DraftOf(el), Bubble = Flag(el, "bubble") };
+                    if (el.ValueKind == JsonValueKind.Object)
+                    {
+                        item.Model = StrMap(el, "player_model");
+                        item.Captaincy = Str(el, "captaincy")?.Trim().ToUpperInvariant();
+                        item.PlayerType = Str(el, "player_type")?.Trim().ToUpperInvariant();
+                        if (el.TryGetProperty("neck_guard", out var ngv))
+                        {
+                            item.NeckGuard = NeckGuardOf(ngv);
+                            if (item.NeckGuard == null) r.Warnings.Add($"players: {name} ({teamName}): neck_guard '{ngv}' isn't none/turtleneck/floating (0-2); ignored");
+                        }
+                    }
                     if (el.ValueKind == JsonValueKind.Object && Str(el, "class") is { } cls)
                     {
                         item.Entry = ClassOffset(cls);
@@ -206,6 +284,7 @@ public static class PackagePlayers
         string current = ps.Season ?? listed.Select(l => l.Season).DefaultIfEmpty("").Min();
         var now = listed.Where(l => l.Season == current).ToList();
         var commits = listed.Where(l => l.Season != current).ToList();
+        CheckNewKeys(now, r);
 
         // positions: the file's primary/secondary; "F" takes the forward spot (C, LW, RW) the team has fewest of, the
         // wing on his shooting side first on a tie
@@ -347,6 +426,9 @@ public static class PackagePlayers
         var eq = db.Table(PlayerCreator.SkaterEquipmentTable);
         var eqId = eq.Fields.First(f => f.Name == "game_id");
         var eqFace = eq.Fields.FirstOrDefault(f => f.Name == "faceprotectortype");
+        var eqF = eq.Fields.ToDictionary(f => f.Name);
+        int gloved = 0, helmeted = 0;
+        var neckGuards = new SortedDictionary<int, int>();
         var eqRow = Enumerable.Range(0, eq.WrittenRecords).Where(i => !db.IsInvalid(eq, i))
                               .GroupBy(i => Convert.ToInt32(db.Get(eq, i, eqId))).ToDictionary(g => g.Key, g => g.First());
         int league = spec.League?.Id ?? 32, cages = 0, bubbles = 0, repositioned = 0, drafted = 0, uncontracted = 0;
@@ -395,6 +477,21 @@ public static class PackagePlayers
                 if (l.Bubble) { db.Set(eq, er, eqFace, spec.Rules.BubbleFaceProtector ?? 9); bubbles++; }
                 else { db.Set(eq, er, eqFace, fp); cages++; }
             }
+            // gloves, helmet and neck guard: the player's own neck guard, else his team's "equipment", else the package's
+            // rules (each off unless set)
+            if (!p.IsGoalie && eqRow.TryGetValue(id, out int er2))
+            {
+                int? gl = l.Team.Gear("gloves", spec.Rules?.Gloves), hm = l.Team.Gear("helmet", spec.Rules?.Helmet),
+                     ng = l.NeckGuard ?? l.Team.Gear("neckGuard", spec.Rules?.NeckGuard);
+                if (gl is int g1 && eqF.TryGetValue("gloves", out var gf)) { db.Set(eq, er2, gf, g1); gloved++; }
+                if (hm is int h1 && eqF.TryGetValue("helmetbrand", out var hf)) { db.Set(eq, er2, hf, h1); helmeted++; }
+                if (ng is int n1 && eqF.TryGetValue("neckguardtype", out var nf))
+                {
+                    db.Set(eq, er2, nf, n1);
+                    if (bf.TryGetValue("neckguardexempt", out var xf)) db.Set(bioT, p.BioRow, xf, n1 > 0 ? 0 : 1);
+                    neckGuards[n1] = neckGuards.GetValueOrDefault(n1) + 1;
+                }
+            }
         }
 
         // lines from the final positions
@@ -402,7 +499,8 @@ public static class PackagePlayers
 
         r.Lines.Add($"players: season {current}: {now.Count} listed, {placed.Count} placed ({moves.Count - already} moved, {already} already there, " +
                     $"{placed.Count - moves.Count} created), {needDetails.Count} need details; {drafted} drafted (file's draft); " +
-                    (ps.NoContract ? $"{uncontracted} contracts cleared; " : "") + $"{cages} cages, {bubbles} bubbles; " +
+                    (ps.NoContract ? $"{uncontracted} contracts cleared; " : "") + $"{cages} cages, {bubbles} bubbles; gear set: {gloved} gloves, {helmeted} helmets, neck guards " +
+                    (neckGuards.Count == 0 ? "left" : string.Join("/", neckGuards.Select(x => $"{x.Value} {NeckGuardNames[x.Key]}"))) + "; " +
                     $"{repositioned} existing players' positions from the file; {forwardsPlaced} \"F\" given a spot; lines rebuilt");
         // which game player each roster-file entry is (the game may spell him differently: "Nic Sima" for Nicholas)
         foreach (var (l, gid) in placed) r.Placed[(l.Team.Code, PackagePortraits.Slug(l.Name))] = gid;
@@ -479,6 +577,7 @@ public static class PackagePlayers
             changes.Add(c); of[c] = (l, off);
         }
         if (changes.Count == 0) return done;
+        var teamless = new List<int>();
         var made = PlayerCreator.Create(db, changes, null, RuleOf(spec.Players, missing.Select(m => m.L)), r.OwnArt, IdBlockOf(spec.Players), teamless: true);
         foreach (var (n, why) in made.Skipped) r.Warnings.Add($"players: commit {n} not created: {why}");
         var roster = new Roster(db);
@@ -493,12 +592,16 @@ public static class PackagePlayers
             SetFileDraft(db, bioT, bf, nhlByCode, badDraft, p.BioRow, l);
             r.Commits.Add((cp.ArtId, l.Team.Index, off));
             done.Add(l);
+            if (p.PlayerIndex >= 0) teamless.Add(p.PlayerIndex);
         }
         var ovr = made.Created.Select(x => x.TemplateOverall).OrderBy(x => x).ToList();
         var gids = made.Created.Select(x => x.GameId).ToList();
         if (made.Created.Count > 0)
             r.Lines.Add($"players: commits created ({made.Created.Count}, unsigned prospects with no team until they join their school): " +
                         $"overall {ovr[0]}-{ovr[^1]}, median {ovr[ovr.Count / 2]}; game ids {gids.Min()}-{gids.Max()}");
+        // on the free-agent list, or a new franchise drops them (it keeps a rosterless player only when he's listed)
+        int listed = RosterSync.ListFreeAgents(db, teamless);
+        if (made.Created.Count > 0) r.Lines.Add($"players: {listed} created commits put on the free-agent list (a franchise keeps them)");
         return done;
     }
 
@@ -538,6 +641,7 @@ public static class PackagePlayers
             var badDraft = new List<string>();
             int drafted = 0, close = 0, spelled = 0, own = 0, before = r.Commits.Count;
             var toCreate = new List<(Listed L, int Offset)>();
+            var rosterless = new List<int>();
             foreach (var l in commits)
             {
                 var (p, nameOnly) = matcher.Find(l.First, l.Last, l.Born);
@@ -558,6 +662,9 @@ public static class PackagePlayers
                 // (players.createCommits: he is created instead, below; one whose birth date says he's another person too)
                 if ((p == null || nameOnly) && int.TryParse(l.Season, out int ny) && int.TryParse(current, out int nc) && ny > nc && ny - nc <= 15)
                 {
+                    // created: no name commit as well. The created recruit is on the free-agent list, so the franchise
+                    // keeps him; a name commit would also send the game's own generated namesake to the school (Joey
+                    // Cullen, MINN 2027: the franchise generates a second one; 2026-11-17)
                     if (spec.Players?.CreateCommits == true && l.Info != null) { toCreate.Add((l, ny - nc)); continue; }
                     if (p == null) r.NameCommits.Add((l.Name, l.Team.Index, ny - nc));
                 }
@@ -580,7 +687,12 @@ public static class PackagePlayers
                 }
                 if (art <= 0 || art > 0xFFFF || artCount.GetValueOrDefault(art) != 1) { skipped.Add($"{l.Name}: art id {art} not his alone"); continue; }
                 r.Commits.Add((art, l.Team.Index, year - cur));        // seasons after the roster season: the game adds the franchise's year
+                if (p.RosterRow < 0 && p.PlayerIndex >= 0) rosterless.Add(p.PlayerIndex);
             }
+            // a matched commit with no roster row (a bio-only prospect) needs the free-agent list too, or a new
+            // franchise drops him
+            int listedMatched = RosterSync.ListFreeAgents(db, rosterless);
+            if (listedMatched > 0) r.Lines.Add($"players: {listedMatched} commits in the game with no roster row put on the free-agent list");
             var createdCommits = CreateCommits(db, r, spec, toCreate, badDraft);
             foreach (var c in r.Commits) nextArt = Math.Max(nextArt, c.ArtId + 1);       // past the created ones' ids
             // those not created after all (no usable position, no room): name commits, as before

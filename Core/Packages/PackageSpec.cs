@@ -85,7 +85,11 @@ public sealed class PackageSpec
             }
             g.Teams ??= new List<TeamSpec>();
             if (!string.IsNullOrEmpty(g.TeamsFile)) g.MergeTeamsFile();
-            foreach (var t in g.Teams) { t.LeagueId = g.League?.Id ?? 0; t.LogoDir = g.PathOf(g.LogoFolder); }
+            foreach (var t in g.Teams)
+            {
+                t.LeagueId = g.League?.Id ?? 0; t.LogoDir = g.PathOf(g.LogoFolder);
+                if (g.CityFromSchool && !string.IsNullOrEmpty(t.School)) t.City = t.School;
+            }
         }
         return spec;
     }
@@ -96,6 +100,13 @@ public sealed class PackageSpec
     /// every field it doesn't set itself from there, so the data file stays the one place team data is edited.
     /// </summary>
     public string TeamsFile { get; set; }
+
+    /// <summary>
+    /// The group's teams take their school name as their city ("Minnesota", not "Minneapolis"): team pickers that show
+    /// and sort by city (Edit Lines) then list them by school. Each group decides (the USHL keeps its cities); the
+    /// arena keeps its own city ("arena_city").
+    /// </summary>
+    public bool CityFromSchool { get; set; }
 
     /// <summary>Every team in the data file (by abbreviation), after loading; empty without a data file.</summary>
     [JsonIgnore] public Dictionary<string, TeamSource> Source { get; private set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -304,6 +315,12 @@ public sealed class TeamSpec
     /// <summary>Arena settings: exhibitionarena field → value for the team's own arena row, e.g. { "goalhorn": 2 }
     /// (an audio id from the game's goalhorns.csv: 0-31 NHL teams, 40 generic, 41-374 novelty horns).</summary>
     public Dictionary<string, int> Arena { get; set; }
+    /// <summary>The team's own skater gear, over the package's rules: { "gloves": 132, "helmet": 39, "neckGuard": 1 }
+    /// (same ids as <see cref="RulesSpec.Gloves"/>, <see cref="RulesSpec.Helmet"/>, <see cref="RulesSpec.NeckGuard"/>).</summary>
+    public Dictionary<string, int> Equipment { get; set; }
+    /// <summary>The team's equipment value for <paramref name="key"/> (case-insensitive), else <paramref name="fallback"/>.</summary>
+    public int? Gear(string key, int? fallback) =>
+        Equipment?.FirstOrDefault(x => string.Equals(x.Key, key, StringComparison.OrdinalIgnoreCase)) is { Key: not null } kv ? kv.Value : fallback;
     /// <summary>The team's row in the team data file, when there is one (colours, arena, rivals...).</summary>
     [JsonIgnore] public TeamSource Data { get; set; }
     /// <summary>The league the team goes in (its group's league id; set on load).</summary>
@@ -329,6 +346,19 @@ public sealed class RulesSpec
     /// <summary>faceprotectortype for a player whose roster entry has "bubble": true (a clear full shield instead of the
     /// cage). Default 9.</summary>
     public int? BubbleFaceProtector { get; set; }
+    /// <summary>
+    /// exhibitionskaterequipment.gloves for the package's skaters (player_glove_mapping: 113 ccm_jetspeed_ft4, 126 ft6,
+    /// 132 ft8, 135 ftw, 119 ccm_tacks_asvpro, 128 tacks_xf, 138 tacks_xr); null leaves it (created players: 131 Bauer Vapor Flylite).
+    /// </summary>
+    public int? Gloves { get; set; }
+    /// <summary>exhibitionskaterequipment.helmetbrand (player_helmet_mapping: 34 ccm_tacks_910, 39 tacks_920, 40 tacks_ftw,
+    /// 42 tacks_x, 20 tacks_710); null leaves it (created players: 38 Bauer Reakt 3D).</summary>
+    public int? Helmet { get; set; }
+    /// <summary>exhibitionskaterequipment.neckguardtype (0 none, 1 turtleneck, 2 floating) for every package skater; also
+    /// clears the bio's neckguardexempt so the game treats it as required. A roster entry's "neck_guard" ("none",
+    /// "turtleneck", "floating" or 0-2) overrides it for that player, as "bubble" does the cage. Null leaves it (created
+    /// players already have 1).</summary>
+    public int? NeckGuard { get; set; }
     /// <summary>Game days the US regions keep per 16 (the NCAA-length season, code mod); 16 = unchanged. Default 9.</summary>
     public int? SeasonKeep { get; set; }
     /// <summary>NCAA seasons before an undrafted NCAA player leaves school for free agency (code mod). Default 4.</summary>

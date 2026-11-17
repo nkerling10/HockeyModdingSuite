@@ -225,13 +225,19 @@ public static class PackageCheck
 
     private static readonly Regex LeagueLogo = new(@"^ui/textures/common/leaguelogos/(.+)/l(\d+)(_fr)?$", RegexOptions.IgnoreCase);
 
+    private static readonly string[] CoreStyles = { "medium", "small", "extrasmall" };
+
     private static void PreviewLogoArt(AssetIndex index, T3Db db, PackageSpec spec, Report r, PackageInstaller.Resolved prior = null)
     {
         var map = TeamLogos.All(index);
         var teams = db.Table("exhibitionteams");
         var used = Valid(db, teams).Select(i => Convert.ToInt32(db.Get(teams, i, F(teams, "artid")))).ToHashSet();
         int full = map.Menu.Values.Max(l => l.Count);
-        var spare = map.Menu.Where(kv => !used.Contains(kv.Key) && map.Ice.ContainsKey(kv.Key))
+        // an id must have the menu sizes the team lists draw (art 147 has no medium/small/extrasmall: no logo on team
+        // select); 9999 isn't used (the game draws its own blurred logo for it on team select, 2026-11-17)
+        bool Fits(int art) => art != 9999 && map.Menu.TryGetValue(art, out var ls)
+                              && CoreStyles.All(c => ls.Any(l => l.Style == c));
+        var spare = map.Menu.Where(kv => Fits(kv.Key) && !used.Contains(kv.Key) && map.Ice.ContainsKey(kv.Key))
                             .OrderByDescending(kv => kv.Value.Count).ThenBy(kv => kv.Key).Select(kv => (kv.Key, kv.Value.Count)).ToList();
         r.Lines.Add($"Spare logo art ids (logo textures + centre ice, no team uses them): {spare.Count}; a full set has {full} menu styles.");
         // more that could serve: unused ids without a centre-ice texture, and ids only inactive teams use
@@ -253,7 +259,7 @@ public static class PackageCheck
         spare = spare.Where(x => !held.Contains(x.Key) && x.Key != priorPh).ToList();
         // ids with menu logos but no centre-ice texture: for teams that aren't played (no rink to show), and for played
         // teams once the ones with centre ice run out (their rink shows the game's default centre ice)
-        var plain = map.Menu.Where(kv => !used.Contains(kv.Key) && !map.Ice.ContainsKey(kv.Key) && kv.Value.Count * 2 >= full)
+        var plain = map.Menu.Where(kv => Fits(kv.Key) && !used.Contains(kv.Key) && !map.Ice.ContainsKey(kv.Key) && kv.Value.Count * 2 >= full)
                             .OrderByDescending(kv => kv.Value.Count).ThenBy(kv => kv.Key).Select(kv => (kv.Key, kv.Value.Count)).ToList();
         foreach (var t in spec.AllTeams.Where(t => spec.TeamLogoFile(t) != null && !kept.ContainsKey(t.Code)))
             if (prior?.LogoArt.GetValueOrDefault(t.Code, -1) is int pa && pa >= 0 && plain.FirstOrDefault(x => x.Key == pa) is { Key: > 0 } pp && held.Add(pa))
