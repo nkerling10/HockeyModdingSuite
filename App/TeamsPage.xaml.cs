@@ -330,8 +330,7 @@ public partial class TeamsPage : UserControl
 
     private string PickImage(string title)
     {
-        var dlg = new OpenFileDialog { Title = title, Filter = ImageLoader.Filter };
-        return dlg.ShowDialog(Window.GetWindow(this)) == true ? dlg.FileName : null;
+        return ImagePicker.Open(Window.GetWindow(this), title);
     }
 
     /// <summary>Replaces logos (scripted runs): which = main, all, or a style such as xl or centerice.</summary>
@@ -427,12 +426,9 @@ public partial class TeamsPage : UserControl
 
     private async void OnChoosePicture(object sender, RoutedEventArgs e)
     {
-        var dlg = new OpenFileDialog
-        {
-            Title = $"The rink picture for {_team?.Name}",
-            Filter = "Rink pictures|*.jpg;*.jpeg;*.png;*.webp;*.avif;*.bmp;*.tif;*.tiff|All files|*.*",
-        };
-        if (dlg.ShowDialog(Window.GetWindow(this)) == true) await OpenIcePicture(dlg.FileName);
+        if (ImagePicker.Open(Window.GetWindow(this), $"The rink picture for {_team?.Name}",
+                             "Rink pictures|*.jpg;*.jpeg;*.png;*.webp;*.avif;*.bmp;*.tif;*.tiff|All files|*.*") is { } file)
+            await OpenIcePicture(file);
     }
 
     private void OnPictureDragOver(object sender, DragEventArgs e)

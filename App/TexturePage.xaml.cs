@@ -295,9 +295,8 @@ public partial class TexturePage : UserControl
     private async void OnReplace(object sender, RoutedEventArgs e)
     {
         if (_selected == null || _mods == null) return;
-        var picker = new Microsoft.Win32.OpenFileDialog { Title = "Replace " + _selected.Leaf, Filter = ImageLoader.Filter };
-        if (picker.ShowDialog(Window.GetWindow(this)) != true) return;
-        await ReplaceWith(picker.FileName);
+        if (ImagePicker.Open(Window.GetWindow(this), "Replace " + _selected.Leaf) is not { } file) return;
+        await ReplaceWith(file);
     }
 
     /// <summary>Replaces the selected texture with an image file (the dialog's choice, or a scripted one).</summary>

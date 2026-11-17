@@ -55,8 +55,7 @@ public partial class PhotoJerseyWindow : Window
 
     private void OnOpen(object sender, RoutedEventArgs e)
     {
-        var dlg = new OpenFileDialog { Title = "A photo of the jersey", Filter = "Images|*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.tif;*.tiff;*.dds|All files|*.*" };
-        if (dlg.ShowDialog(this) == true) Open(dlg.FileName);
+        if (ImagePicker.Open(this, "A photo of the jersey", "Images|*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.tif;*.tiff;*.dds|All files|*.*") is { } file) Open(file);
     }
 
     public void Open(string file)

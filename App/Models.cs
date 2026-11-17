@@ -229,6 +229,8 @@ public sealed class Settings
     public bool BaselineDeclined { get; set; }
     /// <summary>The folder a jersey design was last saved to or opened from (the Studio's Open and Save start there).</summary>
     public string DesignFolder { get; set; }
+    /// <summary>The folder an image was last opened from (every image Open dialog starts there; ImagePicker).</summary>
+    public string ImageFolder { get; set; }
 
     private static string File => System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NHL27Kit", "settings.json");
 

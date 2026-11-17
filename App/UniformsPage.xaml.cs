@@ -544,9 +544,8 @@ public partial class UniformsPage : UserControl
     {
         if ((sender as FrameworkElement)?.DataContext is not KitTexRow row) return;
         if (ModTeamReadOnly()) return;
-        var dlg = new OpenFileDialog { Title = $"Replace {row.Label} ({row.Map})", Filter = ImageLoader.Filter };
-        if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
-        await ReplaceWith(row.Texture, dlg.FileName);
+        if (ImagePicker.Open(Window.GetWindow(this), $"Replace {row.Label} ({row.Map})") is not { } file) return;
+        await ReplaceWith(row.Texture, file);
     }
 
     private async void OnExport(object sender, RoutedEventArgs e)

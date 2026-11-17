@@ -688,13 +688,9 @@ public partial class JerseyStudioPage : UserControl
     private async void OnPartImage(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.Tag is not string garment) return;
-        var dlg = new OpenFileDialog
-        {
-            Title = $"{(garment == "pant" ? "Pants" : "Socks")} texture in the game's {garment} layout (PNG or DDS)", Filter = ImageLoader.Filter,
-            InitialDirectory = DesignFolder(),
-        };
-        if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
-        SetPartImage(garment, dlg.FileName);
+        if (ImagePicker.Open(Window.GetWindow(this), $"{(garment == "pant" ? "Pants" : "Socks")} texture in the game's {garment} layout (PNG or DDS)",
+                             fallback: DesignFolder()) is not { } file) return;
+        SetPartImage(garment, file);
         await PaintOwnParts();
     }
 
@@ -1277,9 +1273,9 @@ public partial class JerseyStudioPage : UserControl
     {
         if (_studioSrc == null) return;
         bool legacy = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
-        var dlg = new OpenFileDialog { Title = legacy ? "Legacy jersey texture (converted to NHL 27's layout)" : "Jersey texture in the NHL 27 layout (PNG or DDS)", Filter = ImageLoader.Filter };
-        if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
-        await UseImage(dlg.FileName, legacy);
+        if (ImagePicker.Open(Window.GetWindow(this), legacy ? "Legacy jersey texture (converted to NHL 27's layout)" : "Jersey texture in the NHL 27 layout (PNG or DDS)",
+                             fallback: DesignFolder()) is not { } file) return;
+        await UseImage(file, legacy);
     }
 
     /// <summary>Uses a whole jersey image as the art (a legacy one is converted first).</summary>
@@ -1460,9 +1456,9 @@ public partial class JerseyStudioPage : UserControl
     private void OnLineImage(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not LineRow row) return;
-        var dlg = new OpenFileDialog { Title = "An image to wrap round as this line (PNG or DDS; a strip template's magenta guides are left out)", Filter = ImageLoader.Filter };
-        if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
-        SetLineImage(row, dlg.FileName);
+        if (ImagePicker.Open(Window.GetWindow(this), "An image to wrap round as this line (PNG or DDS; a strip template's magenta guides are left out)",
+                             fallback: DesignFolder()) is not { } file) return;
+        SetLineImage(row, file);
     }
 
     private bool SetLineImage(LineRow row, string file, int repeat = 1, bool mirror = true)
@@ -1819,10 +1815,9 @@ public partial class JerseyStudioPage : UserControl
     private async void OnSpotReplace(object sender, RoutedEventArgs e)
     {
         if (_spot == null || !(_spot.IsBrand || _spot.IsDecal)) return;
-        var dlg = new OpenFileDialog { Title = $"New image for {_spot.Label} (PNG or DDS)", Filter = ImageLoader.Filter };
-        if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
-        if (_spot.IsDecal) await AddLogo(dlg.FileName, _spot);
-        else await ReplaceSpotLogo(_spot, dlg.FileName);
+        if (ImagePicker.Open(Window.GetWindow(this), $"New image for {_spot.Label} (PNG or DDS)", fallback: DesignFolder()) is not { } file) return;
+        if (_spot.IsDecal) await AddLogo(file, _spot);
+        else await ReplaceSpotLogo(_spot, file);
     }
 
     /// <summary>A logo image squared up (transparent padding keeps its shape) at 512 pixels, and saved as a PNG next to the kit's exports.</summary>
@@ -1869,9 +1864,8 @@ public partial class JerseyStudioPage : UserControl
     private async void OnAddLogo(object sender, RoutedEventArgs e)
     {
         if (_studioSrc == null) return;
-        var dlg = new OpenFileDialog { Title = "A logo to add to the jersey (PNG or DDS; transparency works best)", Filter = ImageLoader.Filter };
-        if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
-        await AddLogo(dlg.FileName);
+        if (ImagePicker.Open(Window.GetWindow(this), "A logo to add to the jersey (PNG or DDS; transparency works best)", fallback: DesignFolder()) is not { } file) return;
+        await AddLogo(file);
     }
 
     /// <summary>

@@ -19,9 +19,8 @@ public partial class UniformsPage
     private async void OnLegacy(object sender, RoutedEventArgs e)
     {
         if (_kit == null) return;
-        var dlg = new OpenFileDialog { Title = "Legacy jersey texture", Filter = ImageLoader.Filter };
-        if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
-        await ConvertLegacy(dlg.FileName);
+        if (ImagePicker.Open(Window.GetWindow(this), "Legacy jersey texture") is not { } file) return;
+        await ConvertLegacy(file);
     }
 
     /// <summary>Converts a legacy jersey and shows it on the kit, without writing anything.</summary>
