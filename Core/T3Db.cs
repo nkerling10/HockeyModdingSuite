@@ -493,6 +493,43 @@ public sealed class T3Db
         else FixCrc(t);
     }
 
+    /// <summary>
+    /// A copy of the database with <paramref name="extra"/> more records of room in a table (its header's record count),
+    /// for a full table such as stockcareerseasonplayerstats (22,769 / 22,769). The new records go right after the table's
+    /// last one, zeroed like unused room in the game's files; the written count stays (fill them with SetWritten +
+    /// WriteRecord on the reloaded copy). Every later table moves up: its offset in the names list grows, the file size
+    /// too, and the file header, names, and this table's header and records CRCs are recomputed (later tables' CRCs cover
+    /// the same bytes as before). Tables with compressed strings aren't supported (their strings follow the records).
+    /// Reload the result with <c>new T3Db(bytes, meta)</c>.
+    /// </summary>
+    public byte[] Grow(T3Table t, int extra)
+    {
+        if (extra <= 0) throw new ArgumentOutOfRangeException(nameof(extra));
+        if (t.HasCompressedStrings || t.Fields.Any(f => f.IsCompressed)) throw new NotSupportedException($"{t.Name} has compressed strings; growing it isn't supported.");
+        if (t.Records + extra > ushort.MaxValue) throw new ArgumentOutOfRangeException(nameof(extra), $"{t.Name} can hold at most {ushort.MaxValue} records.");
+        int at = t.RecordsStart + t.Records * t.RecordSize, delta = extra * t.RecordSize;
+        if (at > t.CrcRecordsPos) throw new InvalidDataException($"{t.Name}'s records run past its CRC.");
+        var d = new byte[Data.Length + delta];
+        Data.AsSpan(0, at).CopyTo(d);
+        Data.AsSpan(at).CopyTo(d.AsSpan(at + delta));
+        // this table's record count; every table stored after it moves up by delta
+        BinaryPrimitives.WriteUInt16LittleEndian(d.AsSpan(t.Start + 16), (ushort)(t.Records + extra));
+        int n = I32(16);
+        for (int i = 0; i < n; i++)
+        {
+            int entry = 24 + i * 8 + 4, start = CrcNamesPos + 4 + I32(entry);
+            if (start > t.Start) BinaryPrimitives.WriteInt32LittleEndian(d.AsSpan(entry), I32(entry) + delta);
+        }
+        BinaryPrimitives.WriteInt32LittleEndian(d.AsSpan(8), I32(8) + delta);
+        void Fix(int from, int pos) => BinaryPrimitives.WriteInt32LittleEndian(d.AsSpan(pos), Crc(d.AsSpan(from, pos - from)));
+        Fix(0, CrcHeaderPos);
+        Fix(CrcHeaderPos + 4, CrcNamesPos);
+        var (hFrom, hPos) = CrcSpans().First(s => s.CrcPos == t.CrcHeaderPos);
+        Fix(hFrom, hPos);
+        Fix(t.CrcHeaderPos + 4, t.CrcRecordsPos + delta);
+        return d;
+    }
+
     private void FixCrc(T3Table t)
     {
         int from = t.CrcHeaderPos + 4;

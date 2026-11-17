@@ -100,6 +100,7 @@ public static class Program
                 "legacy-set" => LegacySetCmd(game, opts),
                 "scorebug" => ScorebugCmd(game, opts),
                 "db-set" => DbSetCmd(game, opts),
+                "db-grow" => DbGrowCmd(game, opts),
                 "db-add" => DbAddCmd(game, opts),
                 "db-remove" => DbRemoveCmd(game, opts),
                 "loc-budget" => LocBudgetCmd(game, opts),
@@ -1593,6 +1594,46 @@ public static class Program
                 Console.WriteLine(line + "\t" + string.Join("\t", tables.Select(t => db.Budget(t, 0, Text(t), line).Need)));
         }
         return 0;
+    }
+
+    /// <summary>
+    /// db-grow NAME TABLE --rows N: read only. Grows a table's room by N records in memory (T3Db.Grow), reads the result
+    /// back and checks it: every CRC, the table's new room, and every table's header and written records byte for byte
+    /// against the original. Nothing is written to the game.
+    /// </summary>
+    private static int DbGrowCmd(string game, Options opts)
+    {
+        string name = opts.Positional.ElementAtOrDefault(0) ?? throw new ArgumentException("db-grow needs a database name");
+        string tname = opts.Positional.ElementAtOrDefault(1) ?? throw new ArgumentException("db-grow needs a table");
+        int rows = int.TryParse(opts.Get("rows"), out int n) ? n : throw new ArgumentException("db-grow needs --rows N");
+        var legacy = new Legacy(OpenIndex(game, false));
+        string meta = System.Text.Encoding.UTF8.GetString(legacy.Read(name[..^3] + "-meta.xml")).TrimStart('﻿');
+        var db = legacy.OpenDb(name);
+        var t = db.Table(tname) ?? throw new ArgumentException($"no table {tname}");
+        var (ok0, total0) = db.CheckCrcs();
+        Console.WriteLine($"{name}: {db.Data.Length:N0} bytes, CRCs {ok0}/{total0}; {t.Name}: {t.WrittenRecords} written / room {t.Records}, {t.RecordSize} bytes each");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var grown = new T3Db(db.Grow(t, rows), meta);
+        var (ok, total) = grown.CheckCrcs();
+        var g = grown.Table(tname);
+        Console.WriteLine($"grown in {sw.ElapsedMilliseconds} ms: {grown.Data.Length:N0} bytes (+{grown.Data.Length - db.Data.Length:N0}), CRCs {ok}/{total}; {g.Name}: {g.WrittenRecords} written / room {g.Records}");
+        int same = 0, diff = 0;
+        foreach (var a in db.Tables)
+        {
+            var b = grown.Table(a.ShortName);
+            bool eq = b != null && a.Records + (a.ShortName == t.ShortName ? rows : 0) == b.Records && a.WrittenRecords == b.WrittenRecords && a.RecordSize == b.RecordSize
+                      && a.Fields.Count == b.Fields.Count
+                      && db.Data.AsSpan(a.RecordsStart, a.WrittenRecords * a.RecordSize).SequenceEqual(grown.Data.AsSpan(b.RecordsStart, b.WrittenRecords * b.RecordSize))
+                      && (!a.HasCompressedStrings || db.Data.AsSpan(a.StringsStart, a.StringsLength).SequenceEqual(grown.Data.AsSpan(b.StringsStart, b.StringsLength)));
+            if (eq) same++; else { diff++; Console.WriteLine($"  DIFFERENT: {a.Name}"); }
+        }
+        // the new room is usable: take one more record, copy the last one in, read it back
+        grown.SetWritten(g, g.WrittenRecords + 1);
+        grown.WriteRecord(g, g.WrittenRecords - 1, grown.RecordBytes(g, g.WrittenRecords - 2));
+        var (ok2, total2) = grown.CheckCrcs();
+        Console.WriteLine($"tables identical apart from the room: {same}/{same + diff}; after writing one record into the new room: {g.WrittenRecords} written, CRCs {ok2}/{total2}");
+        Console.WriteLine(diff == 0 && ok == total && ok2 == total2 ? "OK (in memory only; nothing written)" : "PROBLEM");
+        return diff == 0 && ok == total && ok2 == total2 ? 0 : 1;
     }
 
     /// <summary>db [NAME] [--table T] [--rows N] [--find TEXT]: the game's databases, read now from its files.</summary>

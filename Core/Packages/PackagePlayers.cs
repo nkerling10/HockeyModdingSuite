@@ -197,25 +197,84 @@ public static class PackagePlayers
     /// The roster keys read but not applied yet (player_model, captaincy, player_type): counted and checked, so the
     /// file is right before the installer starts using them. Goalies may give "catches" in place of "shoots".
     /// </summary>
-    private static void CheckNewKeys(List<Listed> now, PackageInstaller.Result r)
+    private static HashSet<TeamSpec> CheckNewKeys(List<Listed> now, PackageInstaller.Result r)
     {
-        int models = now.Count(l => l.Model != null), types = now.Count(l => l.PlayerType != null);
         var badTypes = now.Where(l => l.PlayerType != null && !PlayerStyles.ContainsKey(l.PlayerType)).ToList();
-        foreach (var l in badTypes.Take(10)) r.Warnings.Add($"players: {l.Name} ({l.Team.Code}): player_type '{l.PlayerType}' isn't one of {string.Join("/", PlayerStyles.Keys)}");
-        var capTeams = now.Where(l => !string.IsNullOrEmpty(l.Captaincy)).GroupBy(l => l.Team.Code).ToList();
-        int badCap = 0;
-        foreach (var g in capTeams)
+        foreach (var l in badTypes.Take(10)) r.Warnings.Add($"players: {l.Name} ({l.Team.Code}): player_type '{l.PlayerType}' isn't one of {string.Join("/", PlayerStyles.Keys)}; left as the game has it");
+        var badTones = now.Where(l => l.Model?.GetValueOrDefault("skin_tone") is { } t && !SkinTones.ContainsKey(t)).ToList();
+        foreach (var l in badTones.Take(10)) r.Warnings.Add($"players: {l.Name} ({l.Team.Code}): skin_tone '{l.Model["skin_tone"]}' isn't one of {string.Join("/", SkinTones.Keys)}; left as the game has it");
+        // captains only for a team whose letters the game accepts: 1 C + 2 A, or 3 A
+        var ok = new HashSet<TeamSpec>();
+        foreach (var g in now.Where(l => !string.IsNullOrEmpty(l.Captaincy)).GroupBy(l => l.Team))
         {
             int c = g.Count(l => l.Captaincy == "C"), a = g.Count(l => l.Captaincy == "A"), other = g.Count() - c - a;
-            if (!((c == 1 && a == 2) || (c == 0 && a == 3)) || other > 0)
+            if (((c == 1 && a == 2) || (c == 0 && a == 3)) && other == 0) ok.Add(g.Key);
+            else r.Warnings.Add($"players: {g.Key.Code}: captaincy is {c} C + {a} A{(other > 0 ? $" + {other} other" : "")}; the game needs 1 C + 2 A, or 3 A: no letters set for this team");
+        }
+        return ok;
+    }
+
+    /// <summary>
+    /// Roster "player_model" skin_tone → bio skincolor (1-12, light to dark): the range a tone is given (Pick) and the
+    /// range a player may already be in to be left alone (Keep). From the game's own players: 1-3 hold 7,650 of the
+    /// 8,200 generic-head players, 6-7 the medium browns.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, (int Lo, int Hi, int KeepLo, int KeepHi)> SkinTones =
+        new Dictionary<string, (int, int, int, int)>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["fair"] = (1, 1, 1, 1), ["light"] = (1, 2, 1, 3), ["medium"] = (3, 4, 3, 4), ["olive"] = (4, 5, 4, 5),
+            ["medium_brown"] = (6, 7, 6, 7), ["brown"] = (8, 9, 8, 9), ["dark"] = (10, 12, 10, 12),
+        };
+
+    /// <summary>
+    /// The game's generic heads (headid 100000+, headtexture = headid) by the skin colour most of the game's own players
+    /// wearing them have: a head is used across neighbouring skin colours, so its usual one is the tone it was made for.
+    /// Package-created players (game ids from PlayerCreator.PackageIdStart) don't count: their skin colours were random.
+    /// </summary>
+    private sealed class GenericFaces
+    {
+        private readonly Dictionary<int, int> _tone = new();
+        private readonly Dictionary<int, List<int>> _byTone = new();
+
+        public GenericFaces(T3Db db, T3Table bio, IReadOnlyDictionary<string, T3Field> bf)
+        {
+            var counts = new Dictionary<int, Dictionary<int, int>>();
+            for (int row = 0; row < bio.WrittenRecords; row++)
             {
-                badCap++;
-                r.Warnings.Add($"players: {g.Key}: captaincy is {c} C + {a} A{(other > 0 ? $" + {other} other" : "")}; the game needs 1 C + 2 A, or 3 A");
+                if (db.IsInvalid(bio, row) || Convert.ToInt32(db.Get(bio, row, bf["game_id"])) >= PlayerCreator.PackageIdStart) continue;
+                int head = Convert.ToInt32(db.Get(bio, row, bf["headid"])), skin = Convert.ToInt32(db.Get(bio, row, bf["skincolor"]));
+                if (head < 100000 || skin < 1) continue;
+                var c = counts.TryGetValue(head, out var x) ? x : counts[head] = new Dictionary<int, int>();
+                c[skin] = c.GetValueOrDefault(skin) + 1;
+            }
+            foreach (var (head, c) in counts.OrderBy(x => x.Key))
+            {
+                int tone = c.OrderByDescending(x => x.Value).ThenBy(x => x.Key).First().Key;
+                _tone[head] = tone;
+                (_byTone.TryGetValue(tone, out var l) ? l : _byTone[tone] = new List<int>()).Add(head);
             }
         }
-        if (models + types + capTeams.Count > 0)
-            r.Lines.Add($"players: read, not applied yet: player_model {models}, player_type {types} ({badTypes.Count} unknown), " +
-                        $"captaincy on {capTeams.Count} teams ({badCap} not 1 C + 2 A or 3 A)");
+
+        /// <summary>The skin colour a head was made for; -1 when it isn't a known generic head.</summary>
+        public int Tone(int head) => _tone.GetValueOrDefault(head, -1);
+
+        /// <summary>A skin colour in lo..hi and a head made for it, the same for the same <paramref name="seed"/>; null when none.</summary>
+        public (int Skin, int Head)? Pick(int lo, int hi, uint seed)
+        {
+            var tones = Enumerable.Range(lo, hi - lo + 1).Where(t => _byTone.ContainsKey(t)).ToList();
+            if (tones.Count == 0) return null;
+            int tone = tones[(int)(seed % (uint)tones.Count)];
+            var heads = _byTone[tone];
+            return (tone, heads[(int)(seed / 7 % (uint)heads.Count)]);
+        }
+    }
+
+    /// <summary>FNV-1a of the name: a stable seed, so a reinstall gives a player the same face.</summary>
+    private static uint Seed(string s)
+    {
+        uint h = 0x811c9dc5;
+        foreach (char ch in s) { h ^= ch; h *= 0x01000193; }
+        return h;
     }
 
     public static void Apply(T3Db db, PackageSpec spec, PackageInstaller.Result r)
@@ -284,7 +343,7 @@ public static class PackagePlayers
         string current = ps.Season ?? listed.Select(l => l.Season).DefaultIfEmpty("").Min();
         var now = listed.Where(l => l.Season == current).ToList();
         var commits = listed.Where(l => l.Season != current).ToList();
-        CheckNewKeys(now, r);
+        var captainTeams = CheckNewKeys(now, r);
 
         // positions: the file's primary/secondary; "F" takes the forward spot (C, LW, RW) the team has fewest of, the
         // wing on his shooting side first on a tie
@@ -439,6 +498,18 @@ public static class PackagePlayers
         var nhlByCode = RosterSync.TeamIndex(db);
         var badDraft = new List<string>();
         bool SetDraft(int bioRow, Listed l) => SetFileDraft(db, bioT, bf, nhlByCode, badDraft, bioRow, l);
+        // captaincy and player type go on his row on the school's roster (exhibitionrostertable: captain 1 C / 2 A,
+        // playerstyle); a team with valid letters has its old ones cleared first
+        var rosterT = db.Table(Roster.RosterTable);
+        var rosterF = rosterT.Fields.ToDictionary(f => f.Name);
+        var rosterRows = Enumerable.Range(0, rosterT.WrittenRecords).Where(i => !db.IsInvalid(rosterT, i))
+                                   .GroupBy(i => (Pi: Convert.ToInt32(db.Get(rosterT, i, rosterF["playerindex"])), Team: Convert.ToInt32(db.Get(rosterT, i, rosterF["team"]))))
+                                   .ToDictionary(g => g.Key, g => g.ToList());
+        var capTeamIdx = captainTeams.Select(t => t.Index).ToHashSet();
+        foreach (var ((_, team), rows) in rosterRows)
+            if (capTeamIdx.Contains(team)) foreach (int row in rows) db.Set(rosterT, row, rosterF["captain"], 0);
+        int captains = 0, styled = 0, toned = 0, keptTone = 0, realFace = 0;
+        var faces = new GenericFaces(db, bioT, bf);
         foreach (var (l, id) in placed)
         {
             var p = roster.Find(id);
@@ -492,6 +563,41 @@ public static class PackagePlayers
                     neckGuards[n1] = neckGuards.GetValueOrDefault(n1) + 1;
                 }
             }
+            // the file's captaincy (teams with valid letters only) and player type (skaters), on his school roster row
+            if (p.PlayerIndex >= 0 && rosterRows.TryGetValue((p.PlayerIndex, l.Team.Index), out var myRows))
+            {
+                if (l.Captaincy is "C" or "A" && captainTeams.Contains(l.Team))
+                {
+                    foreach (int row in myRows) db.Set(rosterT, row, rosterF["captain"], l.Captaincy == "C" ? 1 : 2);
+                    captains++;
+                }
+                if (!p.IsGoalie && l.PlayerType != null && PlayerStyles.TryGetValue(l.PlayerType, out int style))
+                    foreach (int row in myRows) db.Set(rosterT, row, rosterF["playerstyle"], style);
+            }
+            // the player type Edit Player shows ("Player Type") is the ratings row's playerstyle (exhibitionskaterai, same
+            // numbers as the roster row's; 2026-11-17: Ziemer showed TWF from a 9 there while his roster row had the
+            // file's 7): written there too
+            if (!p.IsGoalie && l.PlayerType != null && PlayerStyles.TryGetValue(l.PlayerType, out int ownStyle)
+                && p.RatingsTable != null && p.RatingsRow >= 0 && p.RatingsTable.Fields.FirstOrDefault(x => x.Name == "playerstyle") is { } psf)
+            {
+                db.Set(p.RatingsTable, p.RatingsRow, psf, ownStyle);
+                styled++;
+            }
+            // the file's skin tone: a generic-head player gets a skin colour of that tone and a head made for it (left
+            // alone when he's already in the tone's range on a head of it); a player with his own face keeps it
+            if (l.Model?.GetValueOrDefault("skin_tone") is { } toneName && SkinTones.TryGetValue(toneName, out var tr))
+            {
+                int head = Convert.ToInt32(db.Get(bioT, p.BioRow, bf["headid"])), skin = Convert.ToInt32(db.Get(bioT, p.BioRow, bf["skincolor"]));
+                if (head < 100000) realFace++;
+                else if (skin >= tr.KeepLo && skin <= tr.KeepHi && faces.Tone(head) is int ht && ht >= tr.KeepLo && ht <= tr.KeepHi) keptTone++;
+                else if (faces.Pick(tr.Lo, tr.Hi, Seed(l.Name)) is { } pick)
+                {
+                    db.Set(bioT, p.BioRow, bf["skincolor"], pick.Skin);
+                    db.Set(bioT, p.BioRow, bf["headid"], pick.Head);
+                    if (bf.TryGetValue("headtexture", out var htf)) db.Set(bioT, p.BioRow, htf, pick.Head);
+                    toned++;
+                }
+            }
         }
 
         // lines from the final positions
@@ -502,6 +608,9 @@ public static class PackagePlayers
                     (ps.NoContract ? $"{uncontracted} contracts cleared; " : "") + $"{cages} cages, {bubbles} bubbles; gear set: {gloved} gloves, {helmeted} helmets, neck guards " +
                     (neckGuards.Count == 0 ? "left" : string.Join("/", neckGuards.Select(x => $"{x.Value} {NeckGuardNames[x.Key]}"))) + "; " +
                     $"{repositioned} existing players' positions from the file; {forwardsPlaced} \"F\" given a spot; lines rebuilt");
+        if (captains + styled + toned + keptTone + realFace > 0)
+            r.Lines.Add($"players: letters for {captains} players on {captainTeams.Count} teams; player type for {styled}; skin tone: {toned} given a " +
+                    $"matching skin colour and face, {keptTone} already matched, {realFace} keep their own face (hair and facial hair not applied yet)");
         // which game player each roster-file entry is (the game may spell him differently: "Nic Sima" for Nicholas)
         foreach (var (l, gid) in placed) r.Placed[(l.Team.Code, PackagePortraits.Slug(l.Name))] = gid;
         foreach (var g in placed.GroupBy(x => x.L.Team.Code))

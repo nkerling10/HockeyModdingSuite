@@ -326,6 +326,11 @@ public static class NcaaCodeMods
             if (!cell.SequenceEqual(new byte[] { 0x4C, 0x89, 0xE2 }.Concat(Call(NcaaPart8Code.P10TeamCell + 3, NcaaPart8Code.P10TeamCellCall))))
                 throw new InvalidDataException($"Unexpected code at {NcaaPart8Code.P10TeamCell:x}.");
             hookEntries.Add(Entry(NcaaPart8Code.P10TeamCell, Jmp(NcaaPart8Code.P10TeamCell, NcaaPart8Code.P10TeamCellStub).Concat(new byte[] { 0x90, 0x90, 0x90 }).ToArray(), cell));
+            // the SEASON cell's league name: "NCAA" for a school's line (the stat tables' league field is one bit: AHL)
+            var league = At(NcaaPart8Code.P10LeagueCell, 8);
+            if (!league.SequenceEqual(new byte[] { 0x4C, 0x89, 0xF2 }.Concat(Call(NcaaPart8Code.P10LeagueCell + 3, NcaaPart8Code.P10TeamCellCall))))
+                throw new InvalidDataException($"Unexpected code at {NcaaPart8Code.P10LeagueCell:x}.");
+            hookEntries.Add(Entry(NcaaPart8Code.P10LeagueCell, Jmp(NcaaPart8Code.P10LeagueCell, NcaaPart8Code.P10LeagueCellStub).Concat(new byte[] { 0x90, 0x90, 0x90 }).ToArray(), league));
             hookEntries.Add(Entry(NcaaPart8Code.P10Marks, new byte[16], new byte[16]));
 
             // part 11: another destructor run turned into a loop; holds name_commit (commits the game generated after

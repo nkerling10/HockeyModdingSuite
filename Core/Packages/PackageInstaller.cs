@@ -146,6 +146,8 @@ public static class PackageInstaller
         dbBatch.Dispose();
         locBatch.Dispose();
         Took("database checksums");
+        // real career stat lines: may grow the career table, so the database can come back as a bigger copy
+        db = PackageCareerStats.Apply(db, System.Text.Encoding.UTF8.GetString(legacy.Read(legacy.Find(PackageCheck.GameDb[..^3] + "-meta.xml"))).TrimStart('﻿'), spec, r);
         // 4. bytes
         var tocs = new TocCache(index);
         var locations = LocationIndex.Build(index, tocs);
@@ -157,9 +159,17 @@ public static class PackageInstaller
         // encoded textures (logos, portraits, uniforms) kept between installs: only new or changed images are encoded
         // (a dry run keeps what it encodes but deletes nothing)
         using var encoded = PlanCache.Begin(Path.Combine(StateDir(store, spec.Id), "cache"), prune: !dry);
+        // grown chunks (a bigger database, logo/uniform copies) are added at the end of their CAS files: one planned end
+        // per CAS file for the whole install, so two appends never land on the same bytes
+        var ends = new Dictionary<string, long>();
         foreach (var (name, d) in new[] { (PackageCheck.GameDb, db), (PackageCheck.LocDb, loc) })
         {
             var f = legacy.Find(name);
+            if (d.Data.Length != f.Size)
+            {
+                patches.AddRange(PlanGrownLegacy(index, legacy, f, d.Data, locations, tocs, ends, r, log));
+                continue;
+            }
             var raw = legacy.ReadChunk(f.ChunkId);
             d.Data.CopyTo(raw, f.Offset);
             var plan = ChunkPatcher.Plan(index, f.ChunkId, raw, locations, tocs, log);
@@ -167,12 +177,12 @@ public static class PackageInstaller
             r.Lines.Add($"{name}: {plan.Patches.Count} byte ranges");
         }
         Took("database bytes");
-        PlanLogos(index, spec, resolved, locations, tocs, patches, r, log);
+        PlanLogos(index, spec, resolved, locations, tocs, patches, r, log, ends);
         Took("logos");
-        PlanPortraits(index, portraits, locations, tocs, patches, r);
+        PlanPortraits(index, portraits, locations, tocs, patches, r, ends);
         Took("portraits");
         PackageUniforms.HelmetLogos(spec, uniforms, r);
-        PlanUniforms(index, uniforms, locations, tocs, patches, r);
+        PlanUniforms(index, uniforms, locations, tocs, patches, r, ends);
 
         Took($"uniform textures (encoded textures: {PlanCache.Hits} reused, {PlanCache.Misses} encoded)");
         // 5. code mods (+ the standalone ones kept next to the patch file, which no package owns)
@@ -399,6 +409,15 @@ public static class PackageInstaller
             int grp = t.LeagueId == spec.League.Id ? res.Group : res.Groups.GetValueOrDefault(t.LeagueId, res.Group);
             Set("leaguegroup", grp); Set("conferencegroup", grp); Set("divisiongroup", grp);
             Set("active", 1);
+            // the team's own exhibitionteams settings, over everything above: e.g. audioid + audioid2 (the play-by-play
+            // team call: 433 = "the Huskies"), chantaudioid (the crowd chant; the template's is the North Stars'), coachheadid
+            foreach (var (field, value) in t.TeamFields ?? new())
+            {
+                var tf = teams.Fields.FirstOrDefault(x => x.Name.Equals(field, StringComparison.OrdinalIgnoreCase));
+                if (tf == null) { r.Warnings.Add($"{t.Code}: exhibitionteams has no field \"{field}\""); continue; }
+                db.Set(teams, row, tf, value);
+            }
+            if (t.TeamFields?.Count > 0) r.Lines.Add($"{t.Code}: team settings {string.Join(", ", t.TeamFields.Select(kv => $"{kv.Key}={kv.Value}"))}");
 
             // its own arena row: a copy of the template's arena, at the team's index when that's free
             int templateArena = Int(db, teams, row, "arenaid");
@@ -598,6 +617,64 @@ public static class PackageInstaller
         if (!order.SequenceEqual(Enumerable.Range(0, t.WrittenRecords))) db.Reorder(t, order);
     }
 
+    /// <summary>
+    /// A legacy file that changed size (nhl_game.db after the career table grew): its data chunk can't take it in place
+    /// (the chunk is packed: the AI data, the database, its meta XML, three CSVs), so the chunk is rebuilt with the new
+    /// file and everything after it moved up, stored as the game stores it (uncompressed 256 KB blocks, Store gives the
+    /// game's own bytes back for an unchanged chunk), and added at the end of its CAS file (ChunkGrower: the TOC and
+    /// bundle records point at it; restoring cuts the CAS back). The legacy index entries of the chunk's files get their
+    /// new offset, size and stored-block range (written in place: the index chunk keeps its size).
+    /// </summary>
+    private static List<PatchData> PlanGrownLegacy(AssetIndex index, Legacy legacy, LegacyFile f, byte[] data, LocationIndex locations, TocCache tocs,
+                                                   Dictionary<string, long> ends, Result r, Action<string> log)
+    {
+        static int I(byte[] b, int p) => System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(b.AsSpan(p));
+        static void W(byte[] b, int p, int v) => System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(p), v);
+        var raw = legacy.ReadChunk(f.ChunkId);
+        int delta = data.Length - f.Size;
+        var same = legacy.Files().Where(x => x.ChunkId == f.ChunkId).GroupBy(x => x.Entry).Select(g => g.First()).ToList();
+        foreach (var x in same)
+            if (x.Entry != f.Entry && x.Offset < f.Offset + f.Size && f.Offset < x.Offset + x.Size)
+                throw new InvalidDataException($"{f.Name} shares bytes with {x.Name}; it can't change size.");
+        var grown = new byte[raw.Length + delta];
+        raw.AsSpan(0, f.Offset).CopyTo(grown);
+        data.CopyTo(grown, f.Offset);
+        raw.AsSpan(f.Offset + f.Size).CopyTo(grown.AsSpan(f.Offset + data.Length));
+        // the index entries: [u64 hash][i32 stored start][i32 stored end][i32 offset][i32 size][i32 chunk index]; a file
+        // in the chunk's last (partial) block ends at the chunk's stored length, not a whole block (the game's own entries)
+        static int StoredLength(int n) => n + 8 * ((n + Legacy.BlockSize - 1) / Legacy.BlockSize);
+        int oldStored = StoredLength(raw.Length), newStored = StoredLength(grown.Length);
+        var idx = legacy.ReadChunk(legacy.IndexChunk);
+        int moved = 0;
+        foreach (var x in same)
+        {
+            var (s0, e0) = Legacy.StoredRange(x.Offset, x.Size);
+            e0 = Math.Min(e0, oldStored);
+            if (I(idx, x.Entry + 8) != s0 || I(idx, x.Entry + 12) != e0 || I(idx, x.Entry + 16) != x.Offset || I(idx, x.Entry + 20) != x.Size)
+                throw new InvalidDataException($"{x.Name}'s index entry isn't laid out as expected; {f.Name} can't change size.");
+            int o = x.Offset, n = x.Size;
+            if (x.Entry == f.Entry) n = data.Length;
+            else if (x.Offset >= f.Offset + f.Size) { o += delta; moved++; }
+            else continue;
+            var (s, e) = Legacy.StoredRange(o, n);
+            e = Math.Min(e, newStored);
+            W(idx, x.Entry + 8, s); W(idx, x.Entry + 12, e); W(idx, x.Entry + 16, o); W(idx, x.Entry + 20, n);
+        }
+        // the index chunk also lists the raw size of its big chunks, as (u32 size, u32 chunk number) pairs (this chunk:
+        // (15,161,874, 240)); the game reads that many bytes of the chunk, so an old size there cuts off the files at its end
+        // (the 2026-11-17 crash: the meta XML lost its last 7 KB and the database didn't open)
+        int chunkNo = I(idx, f.Entry + 24), sizeHits = 0;
+        for (int p = 0; p + 8 <= idx.Length; p += 4)
+            if (I(idx, p) == raw.Length && I(idx, p + 4) == chunkNo) { W(idx, p, grown.Length); sizeHits++; }
+        if (sizeHits != 1)
+            throw new InvalidDataException($"{f.Name}: the legacy index lists its chunk's size {sizeHits} times (expected once); not changing its size.");
+        var grow = ChunkGrower.Plan(index, f.ChunkId, FrostbiteBlocks.Store(grown), locations, tocs, ends);
+        var idxPlan = ChunkPatcher.Plan(index, legacy.IndexChunk, idx, locations, tocs, log);
+        r.Lines.Add($"{f.Name}: {f.Size:N0} -> {data.Length:N0} bytes: its chunk rebuilt ({raw.Length:N0} -> {grown.Length:N0}) and added at the end " +
+                    $"of its CAS file ({grow.Patches.Count} ranges), {moved} file(s) after it moved, chunk size in the index updated, index chunk {idxPlan.Patches.Count} ranges");
+        return grow.Patches.Concat(idxPlan.Patches).ToList();
+    }
+
     // ---------------------------------------------------------------- logos
 
     private static readonly Regex LeagueLogo = new(@"^ui/textures/common/leaguelogos/(.+)/l(\d+)(_fr)?$", RegexOptions.IgnoreCase);
@@ -606,18 +683,20 @@ public static class PackageInstaller
     /// <summary>Per install: where grown chunks go in each CAS file, and which logo textures use each chunk id.</summary>
     private sealed class LogoState
     {
-        public Dictionary<string, long> Ends { get; } = new();
+        public LogoState(Dictionary<string, long> ends = null) => Ends = ends ?? new();
+        /// <summary>Each CAS file's planned end, shared by every step of one install (a grown database included).</summary>
+        public Dictionary<string, long> Ends { get; }
         public Dictionary<Guid, List<string>> ChunkOwners { get; } = new();
         /// <summary>Seconds spent: in-place planning (encode + patch plan), finding copies + reframing, growing; reading
         /// the logo files (and the rink cut) and fitting them to each texture's size.</summary>
         public double InPlace, Copies, Grow, Load, Fit;
     }
 
-    private static void PlanLogos(AssetIndex index, PackageSpec spec, Resolved res, LocationIndex locations, TocCache tocs, List<PatchData> patches, Result r, Action<string> log)
+    private static void PlanLogos(AssetIndex index, PackageSpec spec, Resolved res, LocationIndex locations, TocCache tocs, List<PatchData> patches, Result r, Action<string> log, Dictionary<string, long> ends)
     {
         var scan = System.Diagnostics.Stopwatch.StartNew();
         var map = TeamLogos.All(index);
-        var st = new LogoState();
+        var st = new LogoState(ends);
         // every menu/league logo texture's chunk id: a chunk shared by two textures can't be given new data for one of them
         ScanOwners(index, index.Res.Keys.Where(k => k.StartsWith("ui/textures/common/teamlogos/", StringComparison.OrdinalIgnoreCase)
                                                 || k.StartsWith("ui/textures/common/leaguelogos/", StringComparison.OrdinalIgnoreCase)
@@ -703,10 +782,10 @@ public static class PackageInstaller
 
     /// <summary>The portraits' textures (slots from PackagePortraits.Assign). A slot whose chunk another portrait
     /// texture also uses is skipped by PlanOne, so no portrait in use changes.</summary>
-    private static void PlanPortraits(AssetIndex index, List<PackagePortraits.Planned> plan, LocationIndex locations, TocCache tocs, List<PatchData> patches, Result r)
+    private static void PlanPortraits(AssetIndex index, List<PackagePortraits.Planned> plan, LocationIndex locations, TocCache tocs, List<PatchData> patches, Result r, Dictionary<string, long> ends)
     {
         if (plan.Count == 0) return;
-        var st = new LogoState();
+        var st = new LogoState(ends);
         ScanOwners(index, index.Res.Keys.Where(k => k.StartsWith(PortraitSync.Prefix, StringComparison.Ordinal)), st);
         int n = PlanMany(index, plan.Select(p => (PortraitSync.TextureName(p.Slot), Source.File(p.File))).ToList(), locations, tocs, patches, r, st);
         r.Lines.Add($"portraits: {n} of {plan.Count} textures written");
@@ -734,12 +813,12 @@ public static class PackageInstaller
     /// The exported uniforms' bytes: each texture into its kit folder's texture (in place, at that texture's size), each
     /// stamp EBX in place. A texture whose stored image other textures share is left alone (it would change them too).
     /// </summary>
-    private static void PlanUniforms(AssetIndex index, List<(TeamSpec Team, PackageUniform Uniform, Kit Kit)> uniforms, LocationIndex locations, TocCache tocs, List<PatchData> patches, Result r)
+    private static void PlanUniforms(AssetIndex index, List<(TeamSpec Team, PackageUniform Uniform, Kit Kit)> uniforms, LocationIndex locations, TocCache tocs, List<PatchData> patches, Result r, Dictionary<string, long> ends = null)
     {
         if (uniforms.Count == 0) return;
         // every kit texture's chunk id: a chunk two textures use can't take new data for one of them; stored bytes several
         // chunks share (identical data stored once) get a copy of their own (PlanOne)
-        var st = new LogoState();
+        var st = new LogoState(ends);
         ScanOwners(index, index.Res.Keys.Where(k => k.StartsWith(Kits.Root, StringComparison.OrdinalIgnoreCase)), st);
         // every uniform's textures encoded together (in parallel, cached: Prepare), then planned in order as before
         var items = new List<(string Name, Source Src)>();

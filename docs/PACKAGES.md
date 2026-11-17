@@ -62,16 +62,28 @@ unless the game has his rights with another team. No `draft`: the game's draft s
 Current-season roster players are matched and moved (taking the file's number and size), or created from the file, then given the NCAA bio (team -1, juniorteam = school, juniorleague) and
 rules.faceProtector; later seasons (commits) are only listed for now.
 Goalies may give `"catches": "L|R"` in place of `shoots` (catches L = handedness 0, as most of the game's goalies).
-Read and checked but **not applied yet** (2026-11-17): `"player_model": { skin_tone, hair_color, hair_length, hair_type,
-facial_hair }` (→ bio skincolor 1-12 light to dark, a generic head 100000+ of that tone, hairid male_0-73,
-haircolorcode), `"captaincy": "C|A"` (→ roster `captain` 1 C / 2 A; a team needs 1 C + 2 A or 3 A, checked) and
-`"player_type"` (→ roster `playerstyle`: DFD 1, OFD 2, TWD 4, GRN 5, PLY 6, SNP 7, PWF 8, TWF 9, ENF 10; checked).
+`"captaincy": "C|A"` → the player's school roster row `captain` (1 C / 2 A), for a team whose letters are 1 C + 2 A or
+3 A (other teams get none, with a warning). `"player_type"` → its `playerstyle` (DFD 1, OFD 2, TWD 4, GRN 5, PLY 6,
+SNP 7, PWF 8, TWF 9, ENF 10; skaters). `"player_model": { "skin_tone": ... }` → bio skincolor (1-12, light to dark:
+fair 1, light 1-2, medium 3-4, olive 4-5, medium_brown 6-7, brown 8-9, dark 10-12) and a generic head (100000+)
+the game's own players mostly wear at that colour, picked by name (stable across installs). Only players on a
+generic head change, and one already in the tone's range on a head of it is left. hair_color / hair_length /
+hair_type / facial_hair are read but not applied yet (hairid male_0-73 has no names in the game).
 Optional `rules.gloves`, `rules.helmet`, `rules.neckGuard`: every package skater's exhibitionskaterequipment gloves
 (player_glove_mapping id, e.g. 113 CCM JetSpeed FT4), helmetbrand (e.g. 34 CCM Tacks 910) and neckguardtype (1
 turtleneck, 2 floating, 0 none); a neck guard also clears the bio's neckguardexempt. Unset leaves the created
 players' defaults. A team's own `"equipment": { "gloves": 132, "helmet": 39, "neckGuard": 1 }` (in the package's
 "teams" entry, like "arena") overrides the rules for its skaters, and a roster entry's `"neck_guard"` ("none",
 "turtleneck", "floating" or 0-2) overrides both for that player, as "bubble" does the cage. Goalies are left alone.
+A team's `"team": { field: value }` sets its exhibitionteams fields last: `audioid` + `audioid2` (the play-by-play
+call; every team has the same id in both, e.g. 433 = "the Huskies" from Rouyn-Noranda), `chantaudioid` (crowd chant;
+0 = none; teams cloned from 309 carry the North Stars' 90), `coachheadid` (the bench coach's face).
+`"careerStats"`: one file or a list (JSON, or CSV like NCAA_Mod/stats_todo/*.csv) of real past seasons for the
+package's players, written to stockcareerseasonplayerstats (skaters) / stockcareerseasongoaliestats (goalies, by the
+game's position). A row is one player, season ("2024-25" = year 2025) and team (default his school); a CSV row without
+`gp` is skipped. The tables ship full, so they're grown (T3Db.Grow) and nhl_game.db is written bigger: its chunk is
+rebuilt and appended to its CAS (ChunkGrower), the legacy index entries and the index's chunk-size list updated. The
+league field is one bit: rows use `careerStatsLeague` (default 1); the NCAA code mod labels school lines "NCAA".
 Created players copy a whole ratings row from a template player: by default a typical NHL/AHL player of the same
 position, hand and age (near the median: about 72 overall). `"ratings": { "from": [11, 12, 13], "maxOverall": 67 }`
 in a players block takes templates from those leagues' teams instead (exhibitionteams.league; 11-13 = OHL/QMJHL/WHL),

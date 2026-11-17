@@ -22,6 +22,16 @@ public sealed class PackageSpec
     public RecycleSpec RecycleTeams { get; set; }
     public List<TeamSpec> Teams { get; set; } = new();
     public PlayersSpec Players { get; set; }
+    /// <summary>Optional: real career stat lines for the package's players (PackageCareerStats): one file or a list of
+    /// files, JSON or CSV. The career tables are grown for them, so the database gets bigger.</summary>
+    public JsonElement? CareerStats { get; set; }
+    /// <summary>The career stats files named by <see cref="CareerStats"/> (none when it's missing).</summary>
+    [JsonIgnore] public List<string> CareerStatsFiles => CareerStats is not { } e ? new()
+        : e.ValueKind == JsonValueKind.String ? new() { e.GetString() }
+        : e.ValueKind == JsonValueKind.Array ? e.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()).ToList()
+        : new();
+    /// <summary>The league field of those lines (one bit: 0 NHL, 1 AHL; default 1) until a code mod labels them.</summary>
+    public int? CareerStatsLeague { get; set; }
     public RulesSpec Rules { get; set; } = new();
     /// <summary>Language strings the package sets (key → text), besides the league's: e.g. the message the code mods show.</summary>
     public Dictionary<string, string> Strings { get; set; } = new();
@@ -315,6 +325,10 @@ public sealed class TeamSpec
     /// <summary>Arena settings: exhibitionarena field → value for the team's own arena row, e.g. { "goalhorn": 2 }
     /// (an audio id from the game's goalhorns.csv: 0-31 NHL teams, 40 generic, 41-374 novelty horns).</summary>
     public Dictionary<string, int> Arena { get; set; }
+    /// <summary>The team's own exhibitionteams settings (field → value), written last: e.g. { "audioid": 433,
+    /// "audioid2": 433 } for the play-by-play call "the Huskies" (both fields hold the same id on every team),
+    /// "chantaudioid" (crowd chant; 0 = none, as most junior teams), "coachheadid" (bench coach's face).</summary>
+    [JsonPropertyName("team")] public Dictionary<string, int> TeamFields { get; set; }
     /// <summary>The team's own skater gear, over the package's rules: { "gloves": 132, "helmet": 39, "neckGuard": 1 }
     /// (same ids as <see cref="RulesSpec.Gloves"/>, <see cref="RulesSpec.Helmet"/>, <see cref="RulesSpec.NeckGuard"/>).</summary>
     public Dictionary<string, int> Equipment { get; set; }
