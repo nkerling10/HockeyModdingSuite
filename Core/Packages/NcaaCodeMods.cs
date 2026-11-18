@@ -13,7 +13,7 @@ namespace NHL27Kit.Core.Packages;
 ///    play an NCAA-length season (keep 9: about 34-37 of 61-66 games).
 /// 3. NCAA careers (pipeline P1): the yearly step that sends undrafted, still-draftable players to free agency at 21
 ///    (0x3adefe0) uses "NCAA seasons finished &gt;= seasons" for league-32 players instead of the age.
-/// 4. New-franchise import: rightless NCAA players of any age join the prospect pool at their school (0x3ad1ba1).
+/// 4. New-franchise import: rightless NCAA (and USHL) players of any age join the prospect pool at their club (0x3ad1ba1).
 /// 5. NCAA seniors graduate (P1 rule) when the NHL regular season ends: event 43 calls the release routine NCAA-only.
 /// Every site is checked against the eboot (each "off" must occur exactly once), so a different game version fails here.
 /// </summary>
@@ -36,6 +36,7 @@ public static class NcaaCodeMods
     // Part 4: in the new-franchise import of non-franchise clubs (0x3ad1280), "cmp ecx,21; setge al" decides that a
     // rightless player is too old for the prospect pool; the club's league is at [rbp-0x2288] (stored by mod 2's code).
     private const int ImportHook = 0x3ad1ba1, ImportNext = 0x3ad1ba7, ClubLeague = -0x2288;
+    private const byte UshlLeague = 29;                    // the package's USHL league id: kept at any age as well
     // Part 5: the calendar dispatcher's (0x3af3120) handler for event 43 = end of the regular season (leaguetasks type 43:
     // tier 0 Apr 9, tier 1 Apr 10 in 2027), entered with rdi = LeagueManager, edx = tier. The summer step's release
     // routine 0x3adefe0(this, year + 2) is called there with 0x1000 added to the year: the P1 cave's NCAA-only mode.
@@ -267,6 +268,13 @@ public static class NcaaCodeMods
                 var siteOff = At(site, 5);               // regular card / scouting card: call SetString(view, "PlayerPreference", text)
                 if (!siteOff.SequenceEqual(Call(site, NcaaPart8Code.P9SetString))) throw new InvalidDataException($"Unexpected code at {site:x}.");
                 hookEntries.Add(Entry(site, Call(site, stub), siteOff));
+            }
+            {
+                // the regular card's PlayerId call (int setter, edx = id): the stub keeps the id for the class lookup
+                // ([rbp-0x150] holds a pointer by the handedness call)
+                var siteOff = At(NcaaPart8Code.P9PidCall, 5);
+                if (!siteOff.SequenceEqual(Call(NcaaPart8Code.P9PidCall, NcaaPart8Code.P9SetInt))) throw new InvalidDataException($"Unexpected code at {NcaaPart8Code.P9PidCall:x}.");
+                hookEntries.Add(Entry(NcaaPart8Code.P9PidCall, Call(NcaaPart8Code.P9PidCall, NcaaPart8Code.P9Pid), siteOff));
             }
             hookEntries.Add(Entry(NcaaPart8Code.P9Buffer, new byte[16], new byte[16]));
 
@@ -539,11 +547,14 @@ public static class NcaaCodeMods
         return b.ToArray();
     }
 
-    /// <summary>cmp ecx,21; setge al (replaced code); cmp dword [rbp-0x2288],32; jne +2; xor eax,eax; jmp next</summary>
+    /// <summary>cmp ecx,21; setge al (replaced code); cmp dword [rbp-0x2288],32; je +9; cmp dword [rbp-0x2288],29;
+    /// jne +2; xor eax,eax; jmp next (NCAA and USHL clubs: never too old; 2006-born USHL commits were dropped)</summary>
     private static byte[] ImportCave(int at)
     {
         var b = new List<byte> { 0x83, 0xF9, 0x15, 0x0F, 0x9D, 0xC0, 0x83, 0xBD };
         b.AddRange(BitConverter.GetBytes(ClubLeague)); b.Add(0x20);
+        b.AddRange(new byte[] { 0x74, 0x09, 0x83, 0xBD });
+        b.AddRange(BitConverter.GetBytes(ClubLeague)); b.Add(UshlLeague);
         b.AddRange(new byte[] { 0x75, 0x02, 0x31, 0xC0 });
         b.Add(0xE9); b.AddRange(Rel32(at + b.Count + 4, ImportNext));
         return b.ToArray();

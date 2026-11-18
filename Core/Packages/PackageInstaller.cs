@@ -127,10 +127,14 @@ public static class PackageInstaller
         // 3. the recipe, in memory
         var nameSets = PackageCheck.NameSets(loc);
         foreach (var g in spec.Groups) ApplyLeague(db, loc, g, g == spec ? resolved.LeagueArt : resolved.LeagueArts.GetValueOrDefault(g.League.Id, -1), r);
+        // goal song files: a Creation Zone song per team, set as its goalsongid before the teams step writes the team settings
+        var goalSongs = PackageGoalSongs.Assign(index, legacy, db, spec, r);
         ApplyTeams(db, loc, spec, resolved, nameSets, r);
+        PackageTeamPalette.Apply(db, spec, r);
         Took("leagues and teams (database)");
         foreach (var g in spec.Groups) PackagePlayers.Apply(db, g, r);
         PackagePlayers.ApplyCommits(db, r);
+        PackageProspectPool.Apply(db, spec, r);
         Took("players (database)");
         var portraits = PackagePortraits.Assign(index, legacy, db, spec, r);
         Took("portrait slots (database)");
@@ -185,6 +189,8 @@ public static class PackageInstaller
         PlanUniforms(index, uniforms, locations, tocs, patches, r, ends);
 
         Took($"uniform textures (encoded textures: {PlanCache.Hits} reused, {PlanCache.Misses} encoded)");
+        PackageGoalSongs.Plan(index, spec, goalSongs, locations, tocs, patches, r);
+        if (goalSongs.Count > 0) Took("goal songs");
         // 5. code mods (+ the standalone ones kept next to the patch file, which no package owns)
         var codeMods = BuildCodeMods(game, spec, r);
         var used = codeMods["mods"]!.AsArray().SelectMany(m => m!["memory"]!.AsArray()).Select(e => e!["offset"]!.ToString()).ToHashSet();

@@ -1011,24 +1011,7 @@ public static class Program
     }
 
     /// <summary>Audio for the CLI: WAV directly, anything else through ffmpeg (on PATH or from winget).</summary>
-    private static (short[] Pcm, int Channels, int Rate) ReadAudio(string file)
-    {
-        if (Path.GetExtension(file).Equals(".wav", StringComparison.OrdinalIgnoreCase))
-            return WavReader.Read(File.ReadAllBytes(file));
-        string ffmpeg = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator).Select(d => Path.Combine(d.Trim(), "ffmpeg.exe")).FirstOrDefault(File.Exists);
-        if (ffmpeg == null)
-        {
-            string winget = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "WinGet", "Packages");
-            ffmpeg = Directory.Exists(winget) ? Directory.GetDirectories(winget, "*FFmpeg*").SelectMany(d => Directory.EnumerateFiles(d, "ffmpeg.exe", SearchOption.AllDirectories)).FirstOrDefault() : null;
-        }
-        if (ffmpeg == null) throw new NotSupportedException("Only WAV files can be read without ffmpeg.");
-        string tmp = Path.Combine(Path.GetTempPath(), "NHL27Kit", Guid.NewGuid().ToString("N") + ".wav");
-        Directory.CreateDirectory(Path.GetDirectoryName(tmp));
-        var psi = new System.Diagnostics.ProcessStartInfo(ffmpeg) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
-        foreach (string a in new[] { "-y", "-v", "error", "-i", file, "-ar", "48000", "-c:a", "pcm_s16le", tmp }) psi.ArgumentList.Add(a);
-        using (var p = System.Diagnostics.Process.Start(psi)) { string err = p.StandardError.ReadToEnd(); p.WaitForExit(); if (p.ExitCode != 0) throw new InvalidDataException("ffmpeg: " + err); }
-        try { return WavReader.Read(File.ReadAllBytes(tmp)); } finally { File.Delete(tmp); }
-    }
+    private static (short[] Pcm, int Channels, int Rate) ReadAudio(string file) => AudioFiles.Read(file);
 
     /// <summary>dbtest DB META [--table NAME] [--rows N]: parses a t3db file, checks its CRCs and prints tables or rows.</summary>
     private static int DbTestCmd(string game, Options opts)
@@ -1458,7 +1441,7 @@ public static class Program
             var born = new DateTime(p.Value("year"), Math.Max(1, p.Value("month")), Math.Max(1, p.Value("day")));
             int age = on.Year - born.Year - (on < born.AddYears(on.Year - born.Year) ? 1 : 0);
             string draft = p.Value("draftround") > 0 ? $"drafted {p.Value("draftyear")} rd {p.Value("draftround")} by {TeamName(p.Value("draftteam"))}" : "undrafted";
-            string ncaa = jl == 32 ? $"NCAA {TeamName(jt)}, entry byte {(entry == 0 ? "0 (birth rule)" : $"{2000 + (entry & 0x7F)}{((entry & 0x80) != 0 ? " +graduated" : "")}")}" : $"junior league {jl}" + (entry != 0 ? $", entry byte {entry}" : "");
+            string ncaa = jl == 32 ? $"NCAA {TeamName(jt)}, entry byte {(entry == 0 ? "0 (birth rule)" : $"{2000 + (entry & 0x7F)}{((entry & 0x80) != 0 ? " +graduated" : "")}")}" : $"junior league {jl}, junior team {jt}" + (entry != 0 ? $", entry byte {entry}" : "");
             return $"{p.Name} (id {BitConverter.ToInt32(b, 0x8C)}) — on {TeamName(p.CurrentTeam)}, {Roster.PositionNameFull(p.Value("positionprimary"))}, {ovr} OVR, age {age}; rights {TeamName(rights)}; {draft}; contract {p.Value("contractlength")} yrs; {ncaa}{(b[0x184] != 0 ? "; marked ex-pro" : "")}";
         }
         // --drafted YEAR: every player drafted that year (league, contract, round)

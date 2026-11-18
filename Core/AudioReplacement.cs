@@ -171,10 +171,23 @@ public static partial class Replacements
         byte[] oldRaw = index.Read(stream.Chunk);
         var h = stream.Header ?? throw new InvalidDataException("That variation is not a sound stream.");
         var plan0 = new List<string>();
+        var mapped = ToStreamLayout(pcm, channels, rate, h, plan0);
+        int target = h.Channels;
+        if (h.Codec == 13)
+            return PlanAtrac9(index, name, stream, oldRaw, h, mapped, target, plan0, locations, tocs);
+        return PlanOpus(index, name, stream, oldRaw, h, mapped, target, plan0, locations, tocs);
+    }
+
+    /// <summary>
+    /// <paramref name="pcm"/> at 48 kHz in the stream's channel layout: resampled when needed, then into the original's
+    /// first two channels (or its one channel, as a mix); any others are left silent.
+    /// </summary>
+    public static short[] ToStreamLayout(short[] pcm, int channels, int rate, SpsHeader h, List<string> notes)
+    {
         if (rate != 48000)
         {
             pcm = WavReader.Resample(pcm, channels, rate, 48000);
-            plan0.Add($"resampled from {rate} Hz to 48000 Hz");
+            notes.Add($"resampled from {rate} Hz to 48000 Hz");
         }
         // channels: into the original's layout
         int frames = pcm.Length / channels, target = h.Channels;
@@ -193,9 +206,13 @@ public static partial class Replacements
                 mapped[f * target + 1] = pcm[f * channels + Math.Min(1, channels - 1)];
             }
         }
-        if (target > 2) plan0.Add($"the original has {target} channels ({target / 2} stereo streams); the replacement is in the first two, the rest are silent");
-        if (h.Codec == 13)
-            return PlanAtrac9(index, name, stream, oldRaw, h, mapped, target, plan0, locations, tocs);
+        if (target > 2) notes.Add($"the original has {target} channels ({target / 2} stereo streams); the replacement is in the first two, the rest are silent");
+        return mapped;
+    }
+
+    private static SoundReplacementPlan PlanOpus(AssetIndex index, string name, SoundStream stream, byte[] oldRaw, SpsHeader h, short[] mapped, int target,
+                                                 List<string> plan0, LocationIndex locations, TocCache tocs)
+    {
         if (h.Codec != 15 && h.Codec != 12 && h.Codec != 14)
             throw new NotSupportedException($"{h.CodecName} sounds can't be replaced yet.");
 
@@ -230,7 +247,27 @@ public static partial class Replacements
     private static SoundReplacementPlan PlanAtrac9(AssetIndex index, string name, SoundStream stream, byte[] oldRaw, SpsHeader h, short[] pcm, int channels,
                                                    List<string> notes, LocationIndex locations, TocCache tocs)
     {
-        var old = oldRaw.AsSpan(stream.Offset, stream.Length).ToArray();
+        var raw = (byte[])oldRaw.Clone();
+        var (sps, bitrate) = EncodeAtrac9Into(raw, stream, pcm, channels, notes);
+        var chunkPlan = ChunkPatcher.Plan(index, stream.ChunkId, raw, locations, tocs);
+        var result = Sound.Decode(sps);
+        var plan = new SoundReplacementPlan { Name = name, Stream = stream, Original = h, Chunk = chunkPlan, Result = result, BitratePerChannel = bitrate, Bytes = sps.Length, Capacity = stream.Length, Codec = "ATRAC9" };
+        plan.Warnings.AddRange(notes);
+        if (Math.Abs(result.Seconds - h.Seconds) > 0.05)
+            plan.Warnings.Add($"the replacement is {result.Seconds:0.0} s, the original {h.Seconds:0.0} s; the sound's asset may still expect the original length");
+        return plan;
+    }
+
+    /// <summary>
+    /// Encodes <paramref name="pcm"/> (48 kHz, the stream's channel layout: <see cref="ToStreamLayout"/>) as ATRAC9 with
+    /// the stream's own configs and writes it over the stream in <paramref name="raw"/> (a copy of its chunk), in place:
+    /// the stream's start and length stay, so several streams of one chunk can be replaced in one copy. Returns the
+    /// new stream's bytes and its bit rate per channel.
+    /// </summary>
+    public static (byte[] Sps, int BitratePerChannel) EncodeAtrac9Into(byte[] raw, SoundStream stream, short[] pcm, int channels, List<string> notes)
+    {
+        var h = stream.Header;
+        var old = raw.AsSpan(stream.Offset, stream.Length).ToArray();
         var configs = SpsAtrac9Writer.ReadConfigs(old, h);
         var cfg0 = new VGAudio.Codecs.Atrac9.Atrac9Config(configs[0]);
         int gpb = SpsAtrac9Writer.GroupsPerBlock(old, h, cfg0.SuperframeSamples);
@@ -253,14 +290,7 @@ public static partial class Replacements
         var useConfigs = fb == cfg0.FrameBytes ? configs : configs.Select(c => SpsAtrac9Writer.WithFrameBytes(c, fb)).ToList();
         var sps = SpsAtrac9Writer.Encode(pcm, channels, useConfigs, old.AsSpan(0, 8).ToArray(), flags, gpb, stream.Length)
                   ?? throw new InvalidDataException("The encoded replacement does not fit the original's space.");
-        var raw = (byte[])oldRaw.Clone();
         sps.CopyTo(raw, stream.Offset);
-        var chunkPlan = ChunkPatcher.Plan(index, stream.ChunkId, raw, locations, tocs);
-        var result = Sound.Decode(sps);
-        var plan = new SoundReplacementPlan { Name = name, Stream = stream, Original = h, Chunk = chunkPlan, Result = result, BitratePerChannel = fb * 8 * h.SampleRate / cfg0.SuperframeSamples / Math.Max(1, cfg0.ChannelCount) * cfg0.FramesPerSuperframe, Bytes = sps.Length, Capacity = stream.Length, Codec = "ATRAC9" };
-        plan.Warnings.AddRange(notes);
-        if (Math.Abs(result.Seconds - h.Seconds) > 0.05)
-            plan.Warnings.Add($"the replacement is {result.Seconds:0.0} s, the original {h.Seconds:0.0} s; the sound's asset may still expect the original length");
-        return plan;
+        return (sps, fb * 8 * h.SampleRate / cfg0.SuperframeSamples / Math.Max(1, cfg0.ChannelCount) * cfg0.FramesPerSuperframe);
     }
 }

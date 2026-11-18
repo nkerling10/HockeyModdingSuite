@@ -488,7 +488,15 @@ public static class PackageCheck
                 picks = fresh; failed = failed2;
             }
         }
-        foreach (var t in failed) r.Errors.Add($"{t.Code}: no name set can hold the abbreviation \"{t.Abbr}\".");
+        foreach (var t in failed)
+        {
+            // the sets that could hold it, and the team that has each now: pin one with the team's "nameSet"
+            bool school = spec.NameSets?.SchoolOnly == true;
+            var could = donors.Where(k => Fit(loc, k, sets[k], t, school) != null)
+                              .Select(k => picks.FirstOrDefault(p => p.Value.ArtAbbr == k).Key is { } holder ? $"{k} ({holder})" : k).ToList();
+            r.Errors.Add($"{t.Code}: no name set can hold the abbreviation \"{t.Abbr}\"." +
+                         (could.Count > 0 ? $" Sets that can, now taken: {string.Join(", ", could)}; give the team \"nameSet\" to take one (that team then picks another)." : ""));
+        }
         foreach (var t in spec.AllTeams)
         {
             if (!picks.TryGetValue(t.Code, out var best)) continue;
@@ -511,7 +519,14 @@ public static class PackageCheck
         var picks = new Dictionary<string, NameSetChoice>();
         failed = new List<TeamSpec>();
         bool school = spec.NameSets?.SchoolOnly == true;
-        foreach (var t in spec.AllTeams)
+        // a team's own pick ("nameSet") first
+        foreach (var t in spec.AllTeams.Where(t => !string.IsNullOrWhiteSpace(t.NameSet)))
+        {
+            string k = t.NameSet.Trim().ToUpperInvariant();
+            if (sets.ContainsKey(k) && donors.Contains(k) && !taken.Contains(k) && Fit(loc, k, sets[k], t, school) is { } own)
+            { picks[t.Code] = own; taken.Add(k); }
+        }
+        foreach (var t in spec.AllTeams.Where(t => !picks.ContainsKey(t.Code)))
             if (prior?.NameSets.GetValueOrDefault(t.Code) is { } ps && donors.Contains(ps.ToUpperInvariant()) && !taken.Contains(ps.ToUpperInvariant())
                 && Fit(loc, ps.ToUpperInvariant(), sets[ps.ToUpperInvariant()], t, school) is { } kf)
             { picks[t.Code] = kf; taken.Add(kf.ArtAbbr); }

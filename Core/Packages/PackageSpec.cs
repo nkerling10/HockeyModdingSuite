@@ -50,6 +50,10 @@ public sealed class PackageSpec
     /// <summary>Optional folder (relative) of top-down rink layouts (TheFaceoff.net's 5000×2236), "&lt;team code&gt;.png":
     /// the team's centre-ice logo is cut from it (CenterIce) onto the team's own logo art id only. Default "rinks".</summary>
     public string Rinks { get; set; }
+    /// <summary>Optional: the teams' own goal songs (PackageGoalSongs): { "folder": "ncaa/audio/goal_songs", "loudness": -10,
+    /// "donors": ["ArtfulWaltz"] }. A file &lt;folder&gt;/&lt;team code&gt;.wav (or .mp3, .flac… with ffmpeg) takes over a Creation
+    /// Zone song (the donors first, then the Misc genre) and becomes the team's goalsongid.</summary>
+    public GoalSongsSpec GoalSongs { get; set; }
     /// <summary>Whether this league's teams get crowd lights in their colour (the team data's crowd_light_color, else its
     /// primary). Default yes; false for a league that isn't played (e.g. the USHL).</summary>
     public bool? CrowdLight { get; set; }
@@ -330,8 +334,16 @@ public sealed class TeamSpec
     /// "chantaudioid" (crowd chant; 0 = none, as most junior teams), "coachheadid" (bench coach's face).</summary>
     [JsonPropertyName("team")] public Dictionary<string, int> TeamFields { get; set; }
     /// <summary>The team's own skater gear, over the package's rules: { "gloves": 132, "helmet": 39, "neckGuard": 1 }
-    /// (same ids as <see cref="RulesSpec.Gloves"/>, <see cref="RulesSpec.Helmet"/>, <see cref="RulesSpec.NeckGuard"/>).</summary>
+    /// (same ids as <see cref="RulesSpec.Gloves"/>, <see cref="RulesSpec.Helmet"/>, <see cref="RulesSpec.NeckGuard"/>).
+    /// Sticks follow the glove brand (each player one of that brand's sticks NHL players carry); "stick": id
+    /// (player_stick_mapping) gives the whole team that stick instead.</summary>
     public Dictionary<string, int> Equipment { get; set; }
+    /// <summary>The team's palette (stockteamcolorstable): true = color_1..3 from the team data file, or a list of
+    /// "#RRGGBB" (primary first). See <see cref="PackageTeamPalette"/>.</summary>
+    public System.Text.Json.JsonElement? Palette { get; set; }
+    /// <summary>Optional: the name set (a donor club's artabbr, e.g. "PLYM") the team must take, before every other
+    /// team picks; for an abbreviation only a few sets have room for (package-check lists them when none is free).</summary>
+    public string NameSet { get; set; }
     /// <summary>The team's equipment value for <paramref name="key"/> (case-insensitive), else <paramref name="fallback"/>.</summary>
     public int? Gear(string key, int? fallback) =>
         Equipment?.FirstOrDefault(x => string.Equals(x.Key, key, StringComparison.OrdinalIgnoreCase)) is { Key: not null } kv ? kv.Value : fallback;
@@ -392,4 +404,14 @@ public sealed class GameSpec
 {
     public string TitleId { get; set; }
     public string Version { get; set; }
+}
+
+public sealed class GoalSongsSpec
+{
+    /// <summary>Folder (relative to the package) of &lt;team code&gt;.wav files.</summary>
+    public string Folder { get; set; }
+    /// <summary>Target loudness in LUFS (default -10; the game's own songs are about -9).</summary>
+    public double? Loudness { get; set; }
+    /// <summary>Creation Zone songs (identifier or audioid from songs.csv) to take over first, in order.</summary>
+    public List<string> Donors { get; set; }
 }

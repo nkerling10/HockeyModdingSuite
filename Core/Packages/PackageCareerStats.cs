@@ -10,7 +10,7 @@ namespace NHL27Kit.Core.Packages;
 /// the installer writes the bigger database through the rebuilt-chunk path.
 ///
 /// JSON: { "&lt;player name as in the roster file&gt;": { "team": "MINN", "seasons": [ { "season": "2024-25", "team": "MINN",
-/// "gp": 38, "g": 12, ... } ] } }. CSV (stats_todo/*.csv): a header row, then one row per season with columns school
+/// "gp": 38, "g": 12, ... } ] } }. CSV (ncaa/player_stats/*.csv): a header row, then one row per season with columns school
 /// (the player's school in the roster file), player, season, team (that season's school; default the school) and the
 /// stat columns below; a row without gp is skipped (not filled in yet), an empty stat is 0.
 /// Skater stats: gp g a pim pm shots ppg ppa shg sha gwg gtg blocks hits giveaways takeaways fow fot toi so_shots

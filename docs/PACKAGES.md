@@ -67,18 +67,45 @@ Goalies may give `"catches": "L|R"` in place of `shoots` (catches L = handedness
 SNP 7, PWF 8, TWF 9, ENF 10; skaters). `"player_model": { "skin_tone": ... }` → bio skincolor (1-12, light to dark:
 fair 1, light 1-2, medium 3-4, olive 4-5, medium_brown 6-7, brown 8-9, dark 10-12) and a generic head (100000+)
 the game's own players mostly wear at that colour, picked by name (stable across installs). Only players on a
-generic head change, and one already in the tone's range on a head of it is left. hair_color / hair_length /
-hair_type / facial_hair are read but not applied yet (hairid male_0-73 has no names in the game).
+generic head change, and one already in the tone's range on a head of it is left. `"ethnicity"` asian / east_asian /
+korean / japanese / chinese → one of the game's East Asian generic heads (the ones its own Korean, Japanese and
+Chinese players wear). `"hair_color"` (black 0, dark_brown 1, medium_brown 2, blond 3, light_brown 4, platinum 5,
+auburn 6, white 7, red/ginger 8, golden_blond 11, grey 12) → haircolorcode, and eyebrowcolorcode and the beard colour
+the same. `"facial_hair"` → the beard worn now (playoffbeardstart, stage 1-4) and its style (playoffbeardtype):
+none = clean-shaven (start 0), stubble = partial/full stage 1, mustache = moustache stage 2, goatee = goatee/goatee2
+stage 2, beard = full/full2/groomed stage 2; the playoff beard grows at least one stage past it. Hair and beard on
+generic heads only. hair_length / hair_type are read but not applied yet (hairid male_0-73 has no names in the game).
 Optional `rules.gloves`, `rules.helmet`, `rules.neckGuard`: every package skater's exhibitionskaterequipment gloves
 (player_glove_mapping id, e.g. 113 CCM JetSpeed FT4), helmetbrand (e.g. 34 CCM Tacks 910) and neckguardtype (1
 turtleneck, 2 floating, 0 none); a neck guard also clears the bio's neckguardexempt. Unset leaves the created
 players' defaults. A team's own `"equipment": { "gloves": 132, "helmet": 39, "neckGuard": 1 }` (in the package's
 "teams" entry, like "arena") overrides the rules for its skaters, and a roster entry's `"neck_guard"` ("none",
 "turtleneck", "floating" or 0-2) overrides both for that player, as "bubble" does the cage. Goalies are left alone.
+Sticks follow the glove brand (Bauer, CCM, Warrior, TRUE, Sherwood): each skater gets one of that brand's sticks the
+game's NHL skaters carry, picked by name (stable across installs); `"equipment": { "stick": 222 }`
+(player_stick_mapping id) gives a team one stick. No glove setting: the stick is left (created players: 221 Bauer
+Vapor FlyLite).
 A team's `"team": { field: value }` sets its exhibitionteams fields last: `audioid` + `audioid2` (the play-by-play
 call; every team has the same id in both, e.g. 433 = "the Huskies" from Rouyn-Noranda), `chantaudioid` (crowd chant;
-0 = none; teams cloned from 309 carry the North Stars' 90), `coachheadid` (the bench coach's face).
-`"careerStats"`: one file or a list (JSON, or CSV like NCAA_Mod/stats_todo/*.csv) of real past seasons for the
+0 = none; teams cloned from 309 carry the North Stars' 90), `coachheadid` (the bench coach's face), `goalsongid`
+(the home goal song: an `audioid` from creation_zone_csv/songs.csv, e.g. 1994003 "NHL94Theme03"; -1 = default).
+`"goalSongs": { "folder": "ncaa/audio/goal_songs", "loudness": -10, "donors": ["ArtfulWaltz"] }`: the teams' own goal
+songs. A file `<folder>/<team code>.wav` (MINN.wav; .mp3/.flac/.ogg/.m4a need ffmpeg) takes over one Creation Zone
+song and becomes the team's goalsongid (over a `"team"` goalsongid). The songs' audio is one 425-stream ATRAC9 chunk
+(sound/music_fb/be/cz/nhl_music_be_cz_wave) whose table maps audioid → stream; a donor's stream is rewritten in place
+with its own ATRAC9 settings, so nothing else moves. Donors: the `donors` list first (identifier or audioid), then
+the Misc genre in list order, shortest one that holds the song; never the NHL 94 themes, the anthems or a song
+another team uses. The audio is first brought to `loudness` LUFS (default -10; the game's songs are about -9, a
+normal WAV is often -19 and plays far quieter) with a look-ahead limiter at -1 dBFS. The donor keeps its name in the
+song picker. Removing the package puts the donors' audio back.
+A team's `"palette": true` gives it a palette in stockteamcolorstable (color_1..3 of the teams file; or a list of
+"#RRGGBB", primary first). The game's own teams have one (it tints the crowd's jerseys, among others); created teams
+don't, and their crowd wears the kit owner's colours. The table's index field is 8 bits and 221 of its 253 rows are
+used, so only ~32 colours fit; teams past that are skipped with a warning.
+A team's `"abbr"` overrides the teams file's abbreviation (the team `code` stays the key for rosters, logos and
+stats), and `"nameSet": "TING"` makes it take that name set before the other teams pick (only a few sets hold a
+4-letter code; when none is free, package-check lists the ones that could and who has them).
+`"careerStats"`: one file or a list (JSON, or CSV like NCAA_Mod/ncaa/player_stats/*.csv) of real past seasons for the
 package's players, written to stockcareerseasonplayerstats (skaters) / stockcareerseasongoaliestats (goalies, by the
 game's position). A row is one player, season ("2024-25" = year 2025) and team (default his school); a CSV row without
 `gp` is skipped. The tables ship full, so they're grown (T3Db.Grow) and nhl_game.db is written bigger: its chunk is
@@ -141,7 +168,9 @@ Shared placeholder textures get their own copy at the end of the CAS file (Chunk
      strategies, jerseys and equipment;
    - the name-set strings;
    - players (stage 3);
-   - face protector.
+   - face protector;
+   - the game's pool of real people (customplayerbiotable, state 2): a row with the same name and birth date as one of
+     the package's players is set to state 127 (unused), so a new franchise doesn't generate a second copy of him.
 5. Plan the bytes:
    - each changed database is written back into its chunk and planned with ChunkPatcher;
    - each logo texture is planned with Replacements.PlanTexture from the folder's images, resized per texture; mono

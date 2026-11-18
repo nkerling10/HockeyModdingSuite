@@ -54,8 +54,9 @@ public static class PackagePlayers
         public bool Bubble { get; set; }
         /// <summary>"neck_guard" in the file (0 none, 1 turtleneck, 2 floating): his neck guard over the package's; or null.</summary>
         public int? NeckGuard { get; set; }
-        /// <summary>"player_model": { skin_tone, hair_color, hair_length, hair_type, facial_hair, ethnicity }; read and
-        /// checked, not applied yet (see docs/PACKAGES.md: appearance).</summary>
+        /// <summary>"player_model": { skin_tone, hair_color, hair_length, hair_type, facial_hair, ethnicity }: skin tone,
+        /// East Asian ethnicity (face), hair colour and facial hair applied; hair_length / hair_type checked, not applied
+        /// yet (see docs/PACKAGES.md: appearance).</summary>
         public Dictionary<string, string> Model { get; set; }
         /// <summary>"captaincy": "C" or "A"; read and checked (1 C + 2 A, or 3 A per team), not applied yet.</summary>
         public string Captaincy { get; set; }
@@ -203,6 +204,10 @@ public static class PackagePlayers
         foreach (var l in badTypes.Take(10)) r.Warnings.Add($"players: {l.Name} ({l.Team.Code}): player_type '{l.PlayerType}' isn't one of {string.Join("/", PlayerStyles.Keys)}; left as the game has it");
         var badTones = now.Where(l => l.Model?.GetValueOrDefault("skin_tone") is { } t && !SkinTones.ContainsKey(t)).ToList();
         foreach (var l in badTones.Take(10)) r.Warnings.Add($"players: {l.Name} ({l.Team.Code}): skin_tone '{l.Model["skin_tone"]}' isn't one of {string.Join("/", SkinTones.Keys)}; left as the game has it");
+        var badHair = now.Where(l => l.Model?.GetValueOrDefault("hair_color") is { } t && !HairColors.ContainsKey(t)).ToList();
+        foreach (var l in badHair.Take(10)) r.Warnings.Add($"players: {l.Name} ({l.Team.Code}): hair_color '{l.Model["hair_color"]}' isn't one of {string.Join("/", HairColors.Keys)}; left as the game has it");
+        var badBeard = now.Where(l => l.Model?.GetValueOrDefault("facial_hair") is { } t && !FacialHair.ContainsKey(t)).ToList();
+        foreach (var l in badBeard.Take(10)) r.Warnings.Add($"players: {l.Name} ({l.Team.Code}): facial_hair '{l.Model["facial_hair"]}' isn't one of {string.Join("/", FacialHair.Keys)}; left as the game has it");
         // captains only for a team whose letters the game accepts: 1 C + 2 A, or 3 A
         var ok = new HashSet<TeamSpec>();
         foreach (var g in now.Where(l => !string.IsNullOrEmpty(l.Captaincy)).GroupBy(l => l.Team))
@@ -225,6 +230,79 @@ public static class PackagePlayers
             ["fair"] = (1, 1, 1, 1), ["light"] = (1, 2, 1, 3), ["medium"] = (3, 4, 3, 4), ["olive"] = (4, 5, 4, 5),
             ["medium_brown"] = (6, 7, 6, 7), ["brown"] = (8, 9, 8, 9), ["dark"] = (10, 12, 10, 12),
         };
+
+    /// <summary>
+    /// Roster "player_model" hair_color → bio haircolorcode (content/common/configs/mappings/player_hair_color_mapping:
+    /// 0 black, 1 dark brown, 2 medium brown, 3 dark blond, 4 light brown, 5 platinum, 6 auburn, 7 white, 8 ginger, 9 ash,
+    /// 10 dark ash, 11 golden blond, 12 grey, 13 taupe). The game's own players have eyebrowcolorcode and
+    /// playoffbeardcolor equal to their hair code (same numbering; the eyebrow table holds darker shades of each).
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, int> HairColors = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["black"] = 0, ["dark_brown"] = 1, ["medium_brown"] = 2, ["brown"] = 2, ["light_brown"] = 4, ["blond"] = 3,
+        ["dark_blond"] = 3, ["golden_blond"] = 11, ["platinum"] = 5, ["auburn"] = 6, ["red"] = 8, ["ginger"] = 8,
+        ["grey"] = 12, ["gray"] = 12, ["white"] = 7,
+    };
+
+    /// <summary>
+    /// Roster "player_model" facial_hair → beard styles (player_beard_style_mapping: 1 full, 2 goatee, 3 partial, 4 patchy,
+    /// 5 wildman, 6 moustache, 7 lambchops, 8 jagr, 9 chincentric, 10 handlebar, 11 goatee2, 12 full2, 13 partial2,
+    /// 14 groomed, 15 chincentric2, 16 moustache2) and the stage worn now (bio playoffbeardstart, 1-4, beard_*_stageN
+    /// meshes); in the playoffs it grows towards playoffbeardmax. "none" is clean-shaven now (start 0), playoff beard as
+    /// the game has it. Stubble is partial stage 1, the game's own most common short beard (596 of its players).
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, (int[] Styles, int Stage)> FacialHair =
+        new Dictionary<string, (int[], int)>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["none"] = (Array.Empty<int>(), 0), ["stubble"] = (new[] { 3, 1 }, 1), ["mustache"] = (new[] { 6 }, 2),
+            ["moustache"] = (new[] { 6 }, 2), ["goatee"] = (new[] { 2, 11 }, 2), ["beard"] = (new[] { 1, 12, 14 }, 2),
+        };
+
+    /// <summary>
+    /// Roster "player_model" ethnicity values that get an East Asian generic head: the heads the game's own Korean,
+    /// Japanese and Chinese players mostly wear (2026-11-18, from the base roster: e.g. 100051 Jin Hwan, Kyung-Sam Tae;
+    /// 100261 Haoxi Wang; 100190 Yushiroh Hirano).
+    /// </summary>
+    /// <summary>
+    /// Glove ids by brand (content/common/configs/mappings/player_glove_mapping, names "&lt;brand&gt;_..."), so a team's
+    /// sticks can follow its glove brand.
+    /// </summary>
+    private static readonly (string Brand, int[] Ids)[] GloveBrands =
+    {
+        ("bauer", new[] { 24, 28, 38, 39, 42, 43, 50, 55, 60, 61, 80, 82, 83, 94, 102, 105, 112, 114, 117, 123, 131, 136 }),
+        ("ccm", new[] { 20, 29, 41, 53, 68, 69, 84, 85, 91, 101, 111, 113, 119, 126, 128, 132, 135, 138 }),
+        ("warrior", new[] { 15, 44, 52, 58, 66, 86, 93, 100, 109, 118, 121, 124, 129, 134, 139 }),
+        ("true", new[] { 95, 96, 104, 110, 115, 125, 127, 140 }),
+        ("sherwood", new[] { 47, 62, 87, 106, 108, 116, 120, 122, 130, 133, 137 }),
+    };
+
+    /// <summary>
+    /// exhibitionskaterequipment.stick by brand (player_stick_mapping): only sticks the game's own NHL skaters carry
+    /// (2026-11-18 count), so every one has its model. Bauer 236 supreme_fuse, 221 vapor_flylite, 237 pulse_2; CCM 214
+    /// jetspeed_ft7, 222 ft8, 212 ribcor_trigger9, 223 trigger10, 213 tacks_xf, 224 xfghost, 220 vizion; Warrior 199
+    /// alpha_lx2, 230 lx3, 215 covert_qr6, 201 novium_super; TRUE 228 hzrdus_smoke, 218 hzrdus_9x4, 196 catalyst_9x3, 179
+    /// catalyst_9x; Sherwood 209 code_encrypt, 225 rekker_morph, 244 code_photon.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, int[]> StickPools = new Dictionary<string, int[]>
+    {
+        ["bauer"] = new[] { 236, 221, 237 },
+        ["ccm"] = new[] { 214, 222, 212, 223, 213, 224, 220 },
+        ["warrior"] = new[] { 199, 230, 215, 201 },
+        ["true"] = new[] { 228, 218, 196, 179 },
+        ["sherwood"] = new[] { 209, 225, 244 },
+    };
+
+    /// <summary>A stick of the brand of glove <paramref name="gloves"/>, the same for the same seed; null for an unknown glove.</summary>
+    private static int? StickFor(int? gloves, uint seed)
+    {
+        if (gloves is not int g) return null;
+        foreach (var (brand, ids) in GloveBrands)
+            if (ids.Contains(g)) { var pool = StickPools[brand]; return pool[(int)(seed % (uint)pool.Length)]; }
+        return null;
+    }
+
+    private static readonly HashSet<string> EastAsian =new(StringComparer.OrdinalIgnoreCase) { "asian", "east_asian", "korean", "japanese", "chinese" };
+    private static readonly int[] EastAsianHeads = { 100051, 100189, 100190, 100191, 100197, 100243, 100258, 100261, 100269 };
 
     /// <summary>
     /// The game's generic heads (headid 100000+, headtexture = headid) by the skin colour most of the game's own players
@@ -486,7 +564,7 @@ public static class PackagePlayers
         var eqId = eq.Fields.First(f => f.Name == "game_id");
         var eqFace = eq.Fields.FirstOrDefault(f => f.Name == "faceprotectortype");
         var eqF = eq.Fields.ToDictionary(f => f.Name);
-        int gloved = 0, helmeted = 0;
+        int gloved = 0, helmeted = 0, sticked = 0;
         var neckGuards = new SortedDictionary<int, int>();
         var eqRow = Enumerable.Range(0, eq.WrittenRecords).Where(i => !db.IsInvalid(eq, i))
                               .GroupBy(i => Convert.ToInt32(db.Get(eq, i, eqId))).ToDictionary(g => g.Key, g => g.First());
@@ -508,7 +586,8 @@ public static class PackagePlayers
         var capTeamIdx = captainTeams.Select(t => t.Index).ToHashSet();
         foreach (var ((_, team), rows) in rosterRows)
             if (capTeamIdx.Contains(team)) foreach (int row in rows) db.Set(rosterT, row, rosterF["captain"], 0);
-        int captains = 0, styled = 0, toned = 0, keptTone = 0, realFace = 0;
+        int captains = 0, styled = 0, toned = 0, keptTone = 0, realFace = 0, eastAsianFaces = 0, haired = 0, shaven = 0;
+        var bearded = new SortedDictionary<string, int>();
         var faces = new GenericFaces(db, bioT, bf);
         foreach (var (l, id) in placed)
         {
@@ -556,6 +635,12 @@ public static class PackagePlayers
                      ng = l.NeckGuard ?? l.Team.Gear("neckGuard", spec.Rules?.NeckGuard);
                 if (gl is int g1 && eqF.TryGetValue("gloves", out var gf)) { db.Set(eq, er2, gf, g1); gloved++; }
                 if (hm is int h1 && eqF.TryGetValue("helmetbrand", out var hf)) { db.Set(eq, er2, hf, h1); helmeted++; }
+                // stick: the team's own "stick" id, else one of its glove brand's (by name, stable across installs)
+                if ((l.Team.Gear("stick", null) ?? StickFor(gl, Seed(l.Name + "/stick"))) is int s1 && eqF.TryGetValue("stick", out var sf))
+                {
+                    db.Set(eq, er2, sf, s1);
+                    sticked++;
+                }
                 if (ng is int n1 && eqF.TryGetValue("neckguardtype", out var nf))
                 {
                     db.Set(eq, er2, nf, n1);
@@ -585,17 +670,65 @@ public static class PackagePlayers
             }
             // the file's skin tone: a generic-head player gets a skin colour of that tone and a head made for it (left
             // alone when he's already in the tone's range on a head of it); a player with his own face keeps it
-            if (l.Model?.GetValueOrDefault("skin_tone") is { } toneName && SkinTones.TryGetValue(toneName, out var tr))
+            bool hasTone = l.Model?.GetValueOrDefault("skin_tone") is { } toneName && SkinTones.ContainsKey(toneName);
+            var tr = hasTone ? SkinTones[l.Model["skin_tone"]] : default;
+            bool eastAsian = l.Model?.GetValueOrDefault("ethnicity") is { } eth && EastAsian.Contains(eth);
+            if (hasTone || eastAsian)
             {
                 int head = Convert.ToInt32(db.Get(bioT, p.BioRow, bf["headid"])), skin = Convert.ToInt32(db.Get(bioT, p.BioRow, bf["skincolor"]));
-                if (head < 100000) realFace++;
-                else if (skin >= tr.KeepLo && skin <= tr.KeepHi && faces.Tone(head) is int ht && ht >= tr.KeepLo && ht <= tr.KeepHi) keptTone++;
-                else if (faces.Pick(tr.Lo, tr.Hi, Seed(l.Name)) is { } pick)
+                uint seed = Seed(l.Name);
+                void SetFace(int newSkin, int newHead)
                 {
-                    db.Set(bioT, p.BioRow, bf["skincolor"], pick.Skin);
-                    db.Set(bioT, p.BioRow, bf["headid"], pick.Head);
-                    if (bf.TryGetValue("headtexture", out var htf)) db.Set(bioT, p.BioRow, htf, pick.Head);
+                    db.Set(bioT, p.BioRow, bf["skincolor"], newSkin);
+                    db.Set(bioT, p.BioRow, bf["headid"], newHead);
+                    if (bf.TryGetValue("headtexture", out var htf)) db.Set(bioT, p.BioRow, htf, newHead);
+                }
+                if (head < 100000) realFace++;
+                else if (eastAsian)
+                {
+                    // one of the game's East Asian heads; its own players on them have skin 2-4, so a light/medium file
+                    // tone keeps 2-4 and is given 2-3 (Haoxi Wang: the game's 4 kept), a darker one the tone's range
+                    var (lo, hi, keepLo, keepHi) = !hasTone || tr.Hi <= 4 ? (2, 3, 2, 4) : tr;
+                    int newSkin = skin >= keepLo && skin <= keepHi ? skin : lo + (int)(seed % (uint)(hi - lo + 1));
+                    int newHead = EastAsianHeads.Contains(head) ? head : EastAsianHeads[(int)(seed / 7 % (uint)EastAsianHeads.Length)];
+                    if (newSkin == skin && newHead == head) keptTone++;
+                    else { SetFace(newSkin, newHead); eastAsianFaces++; }
+                }
+                else if (skin >= tr.KeepLo && skin <= tr.KeepHi && faces.Tone(head) is int ht && ht >= tr.KeepLo && ht <= tr.KeepHi) keptTone++;
+                else if (faces.Pick(tr.Lo, tr.Hi, seed) is { } pick)
+                {
+                    SetFace(pick.Skin, pick.Head);
                     toned++;
+                }
+            }
+            // hair colour (eyebrows and beard the same code, as the game's own players have) and facial hair; generic
+            // heads only, a player's own face carries his own hair
+            if (Convert.ToInt32(db.Get(bioT, p.BioRow, bf["headid"])) >= 100000)
+            {
+                int hairCode = Convert.ToInt32(db.Get(bioT, p.BioRow, bf["haircolorcode"]));
+                if (l.Model?.GetValueOrDefault("hair_color") is { } hc && HairColors.TryGetValue(hc, out int code))
+                {
+                    if (hairCode != code || Convert.ToInt32(db.Get(bioT, p.BioRow, bf["eyebrowcolorcode"])) != code) haired++;
+                    hairCode = code;
+                    db.Set(bioT, p.BioRow, bf["haircolorcode"], code);
+                    db.Set(bioT, p.BioRow, bf["eyebrowcolorcode"], code);
+                }
+                if (l.Model?.GetValueOrDefault("facial_hair") is { } fh && FacialHair.TryGetValue(fh, out var beard)
+                    && bf.TryGetValue("playoffbeardstart", out var bStart) && bf.TryGetValue("playoffbeardtype", out var bType)
+                    && bf.TryGetValue("playoffbeardmax", out var bMax) && bf.TryGetValue("playoffbeardcolor", out var bColor))
+                {
+                    db.Set(bioT, p.BioRow, bStart, beard.Stage);
+                    if (beard.Stage == 0) shaven++;
+                    else
+                    {
+                        db.Set(bioT, p.BioRow, bType, beard.Styles[(int)(Seed(l.Name + "/beard") % (uint)beard.Styles.Length)]);
+                        int max = Convert.ToInt32(db.Get(bioT, p.BioRow, bMax));
+                        db.Set(bioT, p.BioRow, bMax, Math.Min(4, Math.Max(max, beard.Stage + 1)));
+                        if (bf.TryGetValue("playoffbeardgrowthrate", out var bRate) && Convert.ToInt32(db.Get(bioT, p.BioRow, bRate)) == 0)
+                            db.Set(bioT, p.BioRow, bRate, 1);
+                        db.Set(bioT, p.BioRow, bColor, hairCode);
+                        bearded[fh.ToLowerInvariant()] = bearded.GetValueOrDefault(fh.ToLowerInvariant()) + 1;
+                    }
                 }
             }
         }
@@ -605,12 +738,14 @@ public static class PackagePlayers
 
         r.Lines.Add($"players: season {current}: {now.Count} listed, {placed.Count} placed ({moves.Count - already} moved, {already} already there, " +
                     $"{placed.Count - moves.Count} created), {needDetails.Count} need details; {drafted} drafted (file's draft); " +
-                    (ps.NoContract ? $"{uncontracted} contracts cleared; " : "") + $"{cages} cages, {bubbles} bubbles; gear set: {gloved} gloves, {helmeted} helmets, neck guards " +
+                    (ps.NoContract ? $"{uncontracted} contracts cleared; " : "") + $"{cages} cages, {bubbles} bubbles; gear set: {gloved} gloves, {helmeted} helmets, {sticked} sticks, neck guards " +
                     (neckGuards.Count == 0 ? "left" : string.Join("/", neckGuards.Select(x => $"{x.Value} {NeckGuardNames[x.Key]}"))) + "; " +
                     $"{repositioned} existing players' positions from the file; {forwardsPlaced} \"F\" given a spot; lines rebuilt");
         if (captains + styled + toned + keptTone + realFace > 0)
             r.Lines.Add($"players: letters for {captains} players on {captainTeams.Count} teams; player type for {styled}; skin tone: {toned} given a " +
-                    $"matching skin colour and face, {keptTone} already matched, {realFace} keep their own face (hair and facial hair not applied yet)");
+                    $"matching skin colour and face, {eastAsianFaces} an East Asian face, {keptTone} already matched, {realFace} keep their own face; " +
+                    $"hair colour changed for {haired}; facial hair: {shaven} clean-shaven" +
+                    string.Concat(bearded.Select(x => $", {x.Value} {x.Key}")) + " (hairstyles not applied yet)");
         // which game player each roster-file entry is (the game may spell him differently: "Nic Sima" for Nicholas)
         foreach (var (l, gid) in placed) r.Placed[(l.Team.Code, PackagePortraits.Slug(l.Name))] = gid;
         foreach (var g in placed.GroupBy(x => x.L.Team.Code))
