@@ -1,7 +1,8 @@
 namespace NHL27Kit.Core;
 
 /// <summary>A team of the roster (exhibitionteams), by its index.</summary>
-public sealed record RosterTeam(int Index, string Name, string Abbr, int PrimaryColor);
+/// <summary>A team of the roster (exhibitionteams), by its index; <see cref="League"/> -1 when the table has no league field.</summary>
+public sealed record RosterTeam(int Index, string Name, string Abbr, int PrimaryColor, int League = -1);
 
 /// <summary>
 /// A player of NHL 27's roster: his bio row (exhibitionplayerbiotable), his ratings row (exhibitionskaterai or
@@ -18,6 +19,9 @@ public sealed class RosterPlayer
     public string FirstName { get; init; }
     public string LastName { get; init; }
     public int Team { get; init; }
+    /// <summary>The team of his roster row (-1 without one). A school player's bio team is -1 (his school is his roster
+    /// row's team), so team lists use this too.</summary>
+    public int RowTeam { get; init; } = -1;
     public string TeamAbbr { get; init; }
     public int Position { get; init; }
     /// <summary>The primary position, on the 0-5 scale (0=C, 1=LW, 2=RW, 3=LD, 4=RD, 5=G).</summary>
@@ -72,7 +76,8 @@ public sealed class Roster
         foreach (int r in Rows(teams))
         {
             int idx = Int(teams, r, "index");
-            Teams[idx] = new RosterTeam(idx, Str(teams, r, "teamname"), Str(teams, r, "abbrname"), Int(teams, r, "presprimarycolor"));
+            Teams[idx] = new RosterTeam(idx, Str(teams, r, "teamname"), Str(teams, r, "abbrname"), Int(teams, r, "presprimarycolor"),
+                Field(teams, "league") != null ? Int(teams, r, "league") : -1);
         }
 
         var ratings = new Dictionary<int, (T3Table, int)>();
@@ -125,6 +130,7 @@ public sealed class Roster
                 // the index of the version his row is for (his club self), else his first
                 PlayerIndex = rosterRow >= 0 ? Int(roster, rosterRow, "playerindex") : indexOfId.GetValueOrDefault(id, -1),
                 FirstName = Str(bio, r, "firstname"), LastName = Str(bio, r, "lastname"),
+                RowTeam = rosterRow >= 0 ? Int(roster, rosterRow, "team") : -1,
                 Team = team, TeamAbbr = Teams.TryGetValue(team, out var tm) ? tm.Abbr : "FA",
                 Position = Int(bio, r, "position"),
                 // the dual-position fields; a database without them falls back to the legacy position, no secondary

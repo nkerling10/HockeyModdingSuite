@@ -21,6 +21,12 @@ public static class Program
         }
         var opts = Options.Parse(args.Skip(1).ToArray());
         // package zips need no game folder
+        // save-unpack FILE OUT: a save's DATA file (LZ4 frames) decoded to OUT, no game needed
+        if (args[0] == "save-unpack")
+        {
+            try { File.WriteAllBytes(opts.Positional[1], RosterSave.Unpack(File.ReadAllBytes(opts.Positional[0]))); return 0; }
+            catch (Exception e) { Console.Error.WriteLine($"error: {e.Message}"); return 1; }
+        }
         if (args[0] is "package-export" or "package-unzip")
         {
             try { return args[0] == "package-export" ? PackageExportCmd(opts) : PackageUnzipCmd(opts); }
@@ -75,6 +81,9 @@ public static class Program
                 "roster-baseline" => RosterBaselineCmd(game, opts),
                 "roster-pack" => RosterPackCmd(game, opts),
                 "roster-check" => RosterCheckCmd(game, opts),
+                "team-csv" => TeamCsvCmd(game, opts),
+                "match-test" => MatchTestCmd(game, opts),
+                "merge-dupes" => MergeDupesCmd(game, opts),
                 "roster-layer" => RosterLayerCmd(game, opts),
                 "create-players" => CreatePlayersCmd(game, opts),
                 "create-player" => CreatePlayerCmd(game, opts),
@@ -1664,10 +1673,12 @@ public static class Program
         int rows = int.TryParse(opts.Get("rows"), out int r) ? r : 5;
         string find = opts.Get("find");
         int shown = 0;
-        for (int i = 0; i < table.WrittenRecords && shown < rows; i++)
+        for (int i = 0; i < (opts.Get("past") is { } past ? Math.Min(table.Records, table.WrittenRecords + int.Parse(past)) : table.WrittenRecords) && shown < rows; i++)
         {
-            if (db.IsInvalid(table, i)) continue;
-            string line = string.Join(" | ", table.Fields.Select(f => $"{f.Name}={db.Get(table, i, f)}"));
+            // --invalid: the empty rows too (marked invalid, still inside the written records)
+            bool invalid = db.IsInvalid(table, i);
+            if (invalid && !opts.Has("invalid")) continue;
+            string line = (invalid ? "INVALID " : "") + (opts.Has("hex") ? Convert.ToHexString(db.RecordBytes(table, i)) + " " : "") + string.Join(" | ", table.Fields.Select(f => $"{f.Name}={db.Get(table, i, f)}"));
             if (find != null && !line.Contains(find, StringComparison.OrdinalIgnoreCase)) continue;
             Console.WriteLine($"  [{i}] {line}");
             shown++;
@@ -3904,6 +3915,7 @@ public static class Program
         var plan = RosterBaseline.Plan(db, save, pack ? RosterPack.Manifest(dir).Tables.Select(t => t.Name).ToHashSet(StringComparer.OrdinalIgnoreCase) : null);
         Console.WriteLine($"{plan.Tables.Count} tables to copy; {plan.Problems.Count} not copied" + (plan.Problems.Count > 0 ? ": " + string.Join("; ", plan.Problems) : ""));
         Console.WriteLine($"players: {plan.PlayersBoth} in both, {plan.PlayersAdded} added, {plan.PlayersDropped} dropped (only in the game now)");
+        if (plan.Twice.Count > 0) Console.WriteLine($"same person twice in the roster ({plan.Twice.Count}): {string.Join(", ", plan.Twice)}");
         Console.WriteLine($"  dropped e.g. {string.Join(", ", plan.Dropped.Take(8))}");
         if (plan.TeamsDropped.Count > 0) Console.WriteLine($"teams only in the game (dropped): {string.Join(", ", plan.TeamsDropped)}");
         var conv = plan.Created.Where(c => c.Skip == null).ToList();
@@ -4064,6 +4076,54 @@ public static class Program
     /// playerindex field against the players tables, every game_id/playerid against the bios, every team field against
     /// the teams — per table, with examples. --pack checks the pack applied to a copy of the game's roster instead. Read only.
     /// </summary>
+    /// <summary>team-csv TEAMINDEX OUT.csv: one team's roster with every attribute (as HMS's Export CSV).</summary>
+    private static int TeamCsvCmd(string game, Options opts)
+    {
+        var db = new Legacy(OpenIndex(game, false)).OpenDb(Roster.Database);
+        int team = int.Parse(opts.Positional[0]);
+        var roster = new Roster(db);
+        File.WriteAllText(opts.Positional[1], RosterExport.TeamCsv(db, roster, team, f => f), new System.Text.UTF8Encoding(true));
+        Console.WriteLine($"{RosterExport.PlayerCount(roster, team)} players of team {team} -> {opts.Positional[1]}");
+        return 0;
+    }
+
+    /// <summary>match-test "First|Last|yyyy-mm-dd" ... [--pack DIR]: what PlayerMatcher.Find returns for each.</summary>
+    private static int MatchTestCmd(string game, Options opts)
+    {
+        var legacy = new Legacy(OpenIndex(game, false));
+        string meta = System.Text.Encoding.UTF8.GetString(legacy.Read("gamemodes/database/t3db/nhl_game-meta.xml")).TrimStart('﻿');
+        var db = legacy.OpenDb(Roster.Database);
+        if (opts.Get("pack") is { } pack) db = RosterPack.ToDb(pack, db, meta);
+        var matcher = new PlayerMatcher(db, new Roster(db));
+        foreach (var q in opts.Positional)
+        {
+            var f = q.Split('|');
+            DateTime? born = f.Length > 2 && DateTime.TryParse(f[2], out var b) ? b : null;
+            var (p, nameOnly) = matcher.Find(f[0], f[1], born);
+            Console.WriteLine($"{q} -> {(p == null ? "no match" : $"{p.Name} (id {p.GameId}, team {p.Team}, born {matcher.Born(p):yyyy-MM-dd}){(nameOnly ? " NAME ONLY" : "")}")}");
+        }
+        return 0;
+    }
+
+    /// <summary>merge-dupes: PlayerMerge on the game's roster in memory (nothing written): what it would fold, and what's left.</summary>
+    private static int MergeDupesCmd(string game, Options opts)
+    {
+        var db = new Legacy(OpenIndex(game, false)).OpenDb(Roster.Database);
+        PlayerMerge.Trace = Console.WriteLine;
+        var lines = PlayerMerge.Run(db);
+        Console.WriteLine($"{lines.Count} merged (in memory only):");
+        foreach (var l in lines) Console.WriteLine("  " + l);
+        var left = new PlayerMatcher(db, new Roster(db)).SamePersonPairs();
+        Console.WriteLine($"pairs left: {left.Count}");
+        foreach (var (a, b) in left) Console.WriteLine($"  {a.Name} ({a.GameId}, team {a.Team}) = {b.Name} ({b.GameId}, team {b.Team})");
+        var (ok, total) = db.CheckCrcs(); Console.WriteLine($"checksums {ok}/{total}");
+        if (opts.Positional.Count > 0)
+            foreach (var n in opts.Positional)
+                foreach (var p in new Roster(db).Players.Where(p => p.LastName.Contains(n, StringComparison.OrdinalIgnoreCase)))
+                    Console.WriteLine($"  now: {p.Name} id {p.GameId} team {p.Team} row team {p.RowTeam} index {p.PlayerIndex} ovr {p.Overall}");
+        return 0;
+    }
+
     private static int RosterCheckCmd(string game, Options opts)
     {
         var index = OpenIndex(game, false);
@@ -4107,6 +4167,15 @@ public static class Program
                 Console.WriteLine($"  {t.Name}.{f.Name}: {bad.Values.Sum()} rows point at a missing {what}, e.g. {string.Join(", ", bad.Take(8).Select(kv => $"{kv.Key} (x{kv.Value})"))}");
             }
         Console.WriteLine(problems == 0 ? "no dangling references" : $"{problems} dangling references");
+        // the same person entered twice (another spelling, the same birth date)
+        var roster = new Roster(db);
+        var twice = new PlayerMatcher(db, roster).SamePersonPairs();
+        Console.WriteLine(twice.Count == 0 ? "no player entered twice" : $"{twice.Count} player(s) entered twice (same birth date, the name spelled another way):");
+        foreach (var (a, b) in twice)
+            Console.WriteLine($"  {a.FirstName} {a.LastName} (id {a.GameId}, team {a.Team}) = {b.FirstName} {b.LastName} (id {b.GameId}, team {b.Team})");
+        // players on a club team still on the free-agent list (they crash Player Movement > Free Agents); in memory only
+        int signed = RosterSync.UnlistSigned(db);
+        Console.WriteLine(signed == 0 ? "free-agent list clean (no signed player, nobody twice)" : $"{signed} free-agent entries to drop: players on a club team, or a second entry for one player (a reinstall of the package takes them off)");
         return 0;
     }
 

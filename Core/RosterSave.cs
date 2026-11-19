@@ -28,17 +28,59 @@ public static class RosterSave
         return (d.Success ? $"{d.Groups[1]}-{d.Groups[2]}-{d.Groups[3]} {d.Groups[4]}:{d.Groups[5]}:{d.Groups[6]}" : "", v?.Groups[1].Value ?? "");
     }
 
-    /// <summary>The roster database's bytes from a save's DATA.</summary>
+    /// <summary>
+    /// The roster database's bytes from a save's DATA: its LZ4 frame (and any frames right after it), each decoded to
+    /// exactly its own length from the block headers. The frames are followed by the save's trailer, which the decoder
+    /// used to be run into and stopped by the error, keeping whatever had come out by then: a large roster could come
+    /// back short without a word (2026-11, a deleted RosterCustom save). Now a frame that runs past the end of the file,
+    /// or a database shorter than its own header's size, is refused.
+    /// </summary>
     public static byte[] Unpack(byte[] data)
     {
         int at = data.AsSpan().IndexOf(Lz4Magic);
         if (at < 0) throw new InvalidDataException("This save holds no roster database (no LZ4 frame).");
-        using var lz = LZ4Stream.Decode(new MemoryStream(data, at, data.Length - at));
         using var raw = new MemoryStream();
-        // the frame is followed by the save's trailer, which the decoder takes for a second frame: stop at its end
-        var buf = new byte[1 << 16];
-        try { for (int n; (n = lz.Read(buf, 0, buf.Length)) > 0;) raw.Write(buf, 0, n); }
-        catch (Exception e) when (raw.Length > 0 && e is InvalidDataException or InvalidOperationException or ArgumentException) { }
-        return raw.ToArray();
+        int frames = 0;
+        while (at >= 0 && at + 4 <= data.Length && data.AsSpan(at, 4).SequenceEqual(Lz4Magic))
+        {
+            int length = FrameLength(data, at);
+            if (length < 0) throw new InvalidDataException("This save's roster database is cut short (its LZ4 frame runs past the end of the file).");
+            using (var lz = LZ4Stream.Decode(new MemoryStream(data, at, length))) lz.CopyTo(raw);
+            at += length;
+            frames++;
+        }
+        var db = raw.ToArray();
+        // the database's header ("DB", version, then its whole size at 8) says how long it must be
+        if (db.Length >= 12 && db[0] == (byte)'D' && db[1] == (byte)'B'
+            && System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(db.AsSpan(8)) is var size && size > db.Length)
+            throw new InvalidDataException($"This save's roster database is cut short: {db.Length:N0} of its {size:N0} bytes ({frames} LZ4 frame(s)).");
+        return db;
+    }
+
+    /// <summary>
+    /// The length in bytes of the LZ4 frame at <paramref name="at"/> (frame header, blocks, end mark, content checksum),
+    /// from its block headers; -1 when the data ends first or it isn't an LZ4 frame.
+    /// </summary>
+    public static int FrameLength(ReadOnlySpan<byte> d, int at)
+    {
+        if (at < 0 || at + 7 > d.Length || !d.Slice(at, 4).SequenceEqual(Lz4Magic)) return -1;
+        byte flg = d[at + 4];
+        if (flg >> 6 != 1) return -1;                                   // frame version 01
+        long p = at + 6;                                                // magic, FLG, BD
+        if ((flg & 0x08) != 0) p += 8;                                  // content size
+        if ((flg & 0x01) != 0) p += 4;                                  // dictionary id
+        p += 1;                                                         // header checksum
+        bool blockSum = (flg & 0x10) != 0, contentSum = (flg & 0x04) != 0;
+        while (true)
+        {
+            if (p + 4 > d.Length) return -1;
+            uint size = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(d.Slice((int)p, 4));
+            p += 4;
+            if (size == 0) break;                                       // end mark
+            p += (size & 0x7FFFFFFF) + (blockSum ? 4 : 0);
+            if (p > d.Length) return -1;
+        }
+        if (contentSum) p += 4;
+        return p > d.Length ? -1 : (int)(p - at);
     }
 }

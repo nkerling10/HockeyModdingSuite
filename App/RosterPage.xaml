@@ -193,7 +193,17 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <TextBox x:Name="Search" Style="{StaticResource SearchBox}" Tag="Search players — name, team, position, #jersey" TextChanged="OnSearchChanged" />
-            <ComboBox x:Name="TeamFilter" Grid.Column="1" Width="230" Margin="12,0,0,0" SelectionChanged="OnTeamChanged" />
+            <StackPanel x:Name="TeamPick" Grid.Column="1" Orientation="Horizontal" Margin="12,0,0,0">
+                <Button x:Name="ExportTeamButton" Margin="0,0,8,0" Click="OnExportTeam"
+                        ToolTip="Save the selected team's players as a CSV: name, birthday, positions, potential, overall and every attribute">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE74E;" Style="{StaticResource Icon}" FontSize="13" />
+                        <TextBlock Text="Export CSV" Margin="8,0,0,0" />
+                    </StackPanel>
+                </Button>
+                <TextBox x:Name="TeamSearch" Style="{StaticResource SearchBox}" Width="150" Tag="Find team" TextChanged="OnTeamSearchChanged" PreviewKeyDown="OnTeamSearchKey" />
+                <ComboBox x:Name="TeamFilter" Width="260" Margin="8,0,0,0" SelectionChanged="OnTeamChanged" />
+            </StackPanel>
             <ComboBox x:Name="LanguageFilter" Grid.Column="1" Width="230" Margin="12,0,0,0" SelectionChanged="OnLanguageChanged" Visibility="Collapsed" />
         </Grid>
 

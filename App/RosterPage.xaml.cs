@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using NHL27Kit.Core;
@@ -183,14 +184,21 @@ public partial class RosterPage : UserControl
         // the game's own template players (game ids 50000+: game modes, player classes, Create-a-Player slots) aren't listed
         _players = roster.Players.Where(p => p.RatingsTable != null && p.Name.Length > 0 && p.GameId < PlayerCreator.SpecialIdStart)
             .OrderByDescending(p => p.Overall).ThenBy(p => p.LastName).Select(p => new PlayerRow(p)).ToList();
-        _teams = roster.Teams.Values.Where(t => !string.IsNullOrEmpty(t.Name)).OrderBy(t => t.Name).ToList();
+        // only teams with a listed player (the table also has hundreds of empty event / online / circuit teams, many
+        // sharing a name: "Aces (BAC)" x 12); a name still shared gets its league and index
+        var used = _players.SelectMany(r => new[] { r.Player.Team, r.Player.RowTeam }).Where(t => t >= 0).ToHashSet();
+        _teams = roster.Teams.Values.Where(t => !string.IsNullOrEmpty(t.Name) && used.Contains(t.Index)).OrderBy(t => t.Name).ToList();
+        var shared = _teams.GroupBy(t => (t.Name.Trim(), t.Abbr)).Where(g => g.Count() > 1).SelectMany(g => g).Select(t => t.Index).ToHashSet();
 
         _suppress = true;
         var keep = (TeamFilter.SelectedItem as ComboBoxItem)?.Tag;
-        var items = new List<ComboBoxItem> { new() { Content = "All teams", Tag = -1 } };
-        items.AddRange(_teams.Select(t => new ComboBoxItem { Content = $"{t.Name}  ({t.Abbr})", Tag = t.Index }));
-        TeamFilter.ItemsSource = items;
-        TeamFilter.SelectedItem = items.FirstOrDefault(i => Equals(i.Tag, keep)) ?? items[0];
+        _teamItems = new List<ComboBoxItem> { new() { Content = "All teams", Tag = -1 } };
+        _teamItems.AddRange(_teams.Select(t => new ComboBoxItem
+        {
+            Content = $"{t.Name.Trim()}  ({t.Abbr})" + (shared.Contains(t.Index) ? $"  · league {t.League}, #{t.Index}" : ""),
+            Tag = t.Index,
+        }));
+        FillTeamPicker(keep);
         _suppress = false;
 
         var (ok, total) = db.CheckCrcs();
@@ -215,7 +223,8 @@ public partial class RosterPage : UserControl
         string q = Search.Text.Trim().ToLowerInvariant();
         int team = (TeamFilter.SelectedItem as ComboBoxItem)?.Tag is int t ? t : -1;
         var terms = q.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        var rows = _players.Where(r => (team < 0 || r.Player.Team == team) && terms.All(r.Search.Contains)).ToList();
+        // a school player's team is his roster row's (his bio team is -1)
+        var rows = _players.Where(r => (team < 0 || r.Player.Team == team || r.Player.RowTeam == team) && terms.All(r.Search.Contains)).ToList();
         PlayerList.ItemsSource = rows;
         ListCount.Text = $"{rows.Count:N0}";
     }
@@ -224,6 +233,71 @@ public partial class RosterPage : UserControl
     {
         _searchTimer.Stop();
         _searchTimer.Start();
+    }
+
+    private List<ComboBoxItem> _teamItems = new();
+
+    /// <summary>Export CSV: the selected team's players with every attribute (RosterExport), read from the game now.</summary>
+    private async void OnExportTeam(object sender, RoutedEventArgs e)
+    {
+        if ((TeamFilter.SelectedItem as ComboBoxItem)?.Tag is not int team || team < 0)
+        {
+            MessageBox.Show(Window.GetWindow(this), "Pick a team first: the export is one team's roster.", "Export CSV", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var t = _teams.FirstOrDefault(x => x.Index == team);
+        string name = $"{t?.Name.Trim() ?? "team " + team} roster.csv";
+        foreach (char c in System.IO.Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = "Export the team's roster", Filter = "CSV|*.csv", FileName = name,
+            InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+        };
+        if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
+        try
+        {
+            ExportTeamButton.IsEnabled = false;
+            var db = await _mods.OpenDbAsync(Roster.Database);
+            var (csv, n) = await Task.Run(() => { var r = new Roster(db); return (RosterExport.TeamCsv(db, r, team, RosterVisuals.Label), RosterExport.PlayerCount(r, team)); });
+            System.IO.File.WriteAllText(dlg.FileName, csv, new System.Text.UTF8Encoding(true));
+            StatusChanged?.Invoke($"Exported {n} players of {t?.Name.Trim()} to {dlg.FileName}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(Window.GetWindow(this), "Couldn't export: " + ex.Message, "Export CSV", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally { ExportTeamButton.IsEnabled = true; }
+    }
+
+    /// <summary>The team picker's items: those whose name contains every word typed in "Find team" ("gophers",
+    /// "min gol"); "All teams" always stays first. Keeps the selection when it's still listed.</summary>
+    private void FillTeamPicker(object keep)
+    {
+        var terms = (TeamSearch.Text ?? "").Trim().ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var shown = _teamItems.Where((i, n) => n == 0 || terms.All(w => i.Content.ToString().ToLowerInvariant().Contains(w))).ToList();
+        TeamFilter.ItemsSource = shown;
+        TeamFilter.SelectedItem = shown.FirstOrDefault(i => Equals(i.Tag, keep)) ?? shown[0];
+    }
+
+    private void OnTeamSearchChanged(object sender, TextChangedEventArgs e)
+    {
+        if (!_loaded) return;
+        var keep = (TeamFilter.SelectedItem as ComboBoxItem)?.Tag;
+        _suppress = true;
+        FillTeamPicker(keep);
+        _suppress = false;
+        // one match: pick it. Several: the list is narrowed; Enter or Down opens it (opening it while typing took the
+        // keyboard away from the box after every letter)
+        var list = (List<ComboBoxItem>)TeamFilter.ItemsSource;
+        if (TeamSearch.Text.Trim().Length > 0 && list.Count == 2) TeamFilter.SelectedItem = list[1];
+        ApplyFilter();
+    }
+
+    private void OnTeamSearchKey(object sender, KeyEventArgs e)
+    {
+        if (e.Key is not (Key.Enter or Key.Down) || TeamFilter.Items.Count < 2) return;
+        TeamFilter.IsDropDownOpen = true;
+        e.Handled = true;
     }
 
     private void OnTeamChanged(object sender, SelectionChangedEventArgs e)
@@ -627,7 +701,7 @@ public partial class RosterPage : UserControl
             if (_mods != null) await PicksView.ShownAsync();
             return;
         }
-        TeamFilter.Visibility = TextMode ? Visibility.Collapsed : Visibility.Visible;
+        TeamPick.Visibility = TextMode ? Visibility.Collapsed : Visibility.Visible;
         LanguageFilter.Visibility = TextMode ? Visibility.Visible : Visibility.Collapsed;
         PageTitle.Text = TextMode ? "Text" : "Roster";
         Search.Tag = TextMode ? "Search text or string ids — e.g. Stanley Cup, TXT_BOTH" : "Search players — name, team, position, #jersey";

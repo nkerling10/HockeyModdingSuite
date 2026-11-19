@@ -62,6 +62,10 @@ public static class PackagePlayers
         public string Captaincy { get; set; }
         /// <summary>"player_type": DFD, OFD, TWD, GRN, PLY, SNP, PWF, TWF (ENF); read and checked, not applied yet.</summary>
         public string PlayerType { get; set; }
+        /// <summary>"current_team" of a commit (a later season's entry): the team he plays for until he joins the school,
+        /// by the game's team name ("London Knights"). A game player with no team is moved onto it at install; a
+        /// player with a team keeps his.</summary>
+        public string CurrentTeam { get; set; }
     }
 
     /// <summary>
@@ -404,6 +408,7 @@ public static class PackagePlayers
                         item.Model = StrMap(el, "player_model");
                         item.Captaincy = Str(el, "captaincy")?.Trim().ToUpperInvariant();
                         item.PlayerType = Str(el, "player_type")?.Trim().ToUpperInvariant();
+                        item.CurrentTeam = Str(el, "current_team")?.Trim();
                         if (el.TryGetProperty("neck_guard", out var ngv))
                         {
                             item.NeckGuard = NeckGuardOf(ngv);
@@ -612,13 +617,7 @@ public static class PackagePlayers
             if (ps.NoContract)
             {
                 // no NHL deal while in college, as the game's own NCAA prospects (e.g. L.J. Mooney): status 0, the rest 0
-                foreach (var (fname, v) in NoContractFields)
-                    if (bf.TryGetValue(fname, out var cf)) db.Set(bioT, p.BioRow, cf, v);
-                for (int k = 0; k < ContractSync.ClauseSlots; k++)
-                {
-                    if (bf.TryGetValue($"contractclause{k}", out var c1)) db.Set(bioT, p.BioRow, c1, 0);
-                    if (bf.TryGetValue($"contractclausemntcnumteams{k}", out var c2)) db.Set(bioT, p.BioRow, c2, 0);
-                }
+                ClearContract(db, bioT, bf, p.BioRow);
                 uncontracted++;
             }
             // the package's cage, or a clear bubble for a player the file marks "bubble"
@@ -884,6 +883,9 @@ public static class PackagePlayers
             var skipped = new List<string>();
             var badDraft = new List<string>();
             int drafted = 0, close = 0, spelled = 0, own = 0, before = r.Commits.Count;
+            var uncontracted = new List<string>();
+            var joins = new List<SyncChange>();
+            var joined = new List<string>();
             var toCreate = new List<(Listed L, int Offset)>();
             var rosterless = new List<int>();
             foreach (var l in commits)
@@ -915,6 +917,33 @@ public static class PackagePlayers
                 if (p == null || nameOnly || !int.TryParse(l.Season, out int year) || !int.TryParse(current, out int cur) || year <= cur || year - cur > 15)
                 { skipped.Add($"{l.Name} ({l.Team.Code} {l.Season}){(nameOnly ? ": birth date differs" : "")}"); continue; }
                 if (SetFileDraft(db, bioT, bf, nhlByCode, badDraft, p.BioRow, l)) drafted++;
+                // a commit holding an NHL team's rights AND an NHL deal: he's going to college, so no deal (rights kept),
+                // as the players step does for the schools' own players (players.contract "none"). NHL Sync gave three
+                // 2027 commits a 4-year two-way deal (Sokolovskii PHI, Hrenak, Kurtz; 2026-11-19). A junior deal (no
+                // rights) stays: he's still on his CHL team until he leaves for school.
+                if (spec.Players?.NoContract == true && Convert.ToInt32(db.Get(bioT, p.BioRow, bf["proteam"])) >= 0
+                    && Convert.ToInt32(db.Get(bioT, p.BioRow, bf["contractlength"])) > 0)
+                {
+                    ClearContract(db, bioT, bf, p.BioRow);
+                    uncontracted.Add($"{l.Name} ({l.Team.Code} {l.Season})");
+                }
+                // "current_team": a game player with no team plays there until his school year (the summer step then
+                // takes him off its roster); one with a team keeps it
+                if (l.CurrentTeam is { Length: > 0 } ct && p.Team < 0 && p.RosterRow < 0)
+                {
+                    var to = roster.Teams.Values.Where(t => RosterSync.Norm(t.Name) == RosterSync.Norm(ct)).ToList();
+                    if (to.Count != 1 || p.PlayerIndex < 0)
+                        r.Warnings.Add($"players: commit {l.Name} ({l.Team.Code} {l.Season}): current_team \"{ct}\" {(to.Count == 0 ? "isn't a team in the game" : to.Count > 1 ? "matches more than one team" : "can't take him (no player index)")}; left without a team");
+                    else
+                    {
+                        joins.Add(new SyncChange
+                        {
+                            Kind = SyncKind.Join, GameId = p.GameId, Name = p.Name, Position = p.PositionDisplay, RosterRow = p.RosterRow, BioRow = p.BioRow,
+                            PlayerIndex = p.PlayerIndex, FromTeam = -1, ToTeam = to[0].Index, FromTeamName = "none", ToTeamName = to[0].Name, Selected = true,
+                        });
+                        joined.Add($"{l.Name} → {to[0].Name}");
+                    }
+                }
                 int art = Convert.ToInt32(db.Get(bioT, p.BioRow, bf["artid"]));
                 if (artCount.GetValueOrDefault(art) != 1 && !p.HasPortrait && nextArt <= 0xFFFF)
                 {
@@ -931,12 +960,22 @@ public static class PackagePlayers
                 }
                 if (art <= 0 || art > 0xFFFF || artCount.GetValueOrDefault(art) != 1) { skipped.Add($"{l.Name}: art id {art} not his alone"); continue; }
                 r.Commits.Add((art, l.Team.Index, year - cur));        // seasons after the roster season: the game adds the franchise's year
-                if (p.RosterRow < 0 && p.PlayerIndex >= 0) rosterless.Add(p.PlayerIndex);
+                if (p.RosterRow < 0 && p.PlayerIndex >= 0 && !joins.Any(j => j.GameId == p.GameId)) rosterless.Add(p.PlayerIndex);
+            }
+            // commits with a "current_team" onto it, the way NHL Sync moves players (roster rows, bio team, lines)
+            if (joins.Count > 0)
+            {
+                RosterSync.Apply(db, joins);
+                r.Lines.Add($"players: commits put on their current team ({joined.Count}): {string.Join(", ", joined)}");
             }
             // a matched commit with no roster row (a bio-only prospect) needs the free-agent list too, or a new
             // franchise drops him
             int listedMatched = RosterSync.ListFreeAgents(db, rosterless);
             if (listedMatched > 0) r.Lines.Add($"players: {listedMatched} commits in the game with no roster row put on the free-agent list");
+            // signed players still on the free-agent list (an older NHL Sync left them there) crash Player Movement >
+            // Free Agents in the main menu (2026-11-19)
+            int unlisted = RosterSync.UnlistSigned(db);
+            if (unlisted > 0) r.Lines.Add($"players: {unlisted} free-agent entries dropped (players on a club team, or listed twice)");
             var createdCommits = CreateCommits(db, r, spec, toCreate, badDraft);
             foreach (var c in r.Commits) nextArt = Math.Max(nextArt, c.ArtId + 1);       // past the created ones' ids
             // those not created after all (no usable position, no room): name commits, as before
@@ -946,6 +985,8 @@ public static class PackagePlayers
                         string.Join("; ", commits.GroupBy(c => (c.Team.Code, c.Season)).Select(g => $"{g.Key.Code} {g.Key.Season}: {g.Count()}")) +
                         $"; {r.Commits.Count - before} in the game join their school in their commit year ({close} with a birth date a typo or a few days off, " +
                         $"{spelled} with a last name one letter off, {own} given an art id of their own); {drafted} given the file's draft");
+            if (uncontracted.Count > 0)
+                r.Lines.Add($"players: commits with an NHL deal, cleared (rights kept) ({uncontracted.Count}): {string.Join(", ", uncontracted)}");
             if (skipped.Count > 0)
                 r.Lines.Add($"players: commits not in the game or not matched exactly ({skipped.Count}): {string.Join(", ", skipped)}");
             if (badDraft.Count > 0) r.Warnings.Add($"players: commits' draft team not an NHL team, draft left as the game has it: {string.Join(", ", badDraft)}");
@@ -1060,6 +1101,18 @@ public static class PackagePlayers
         ("contractstatus", 0), ("contractlength", 0), ("contractdollars", 0), ("contractis2way", 0), ("contractismultiyear", 0),
         ("contractneedsentrylevel", 0), ("extensionlength", 0), ("extensiondollars", 0), ("extensionis2way", 0), ("retainedsalarytrades", 0),
     };
+
+    /// <summary>The bio's NHL contract cleared (<see cref="NoContractFields"/> and every clause); rights and draft kept.</summary>
+    private static void ClearContract(T3Db db, T3Table bioT, IReadOnlyDictionary<string, T3Field> bf, int row)
+    {
+        foreach (var (fname, v) in NoContractFields)
+            if (bf.TryGetValue(fname, out var cf)) db.Set(bioT, row, cf, v);
+        for (int k = 0; k < ContractSync.ClauseSlots; k++)
+        {
+            if (bf.TryGetValue($"contractclause{k}", out var c1)) db.Set(bioT, row, c1, 0);
+            if (bf.TryGetValue($"contractclausemntcnumteams{k}", out var c2)) db.Set(bioT, row, c2, 0);
+        }
+    }
 
     private static PlayerBio BioOf(Listed l, Details d, int primary, int secondary)
     {

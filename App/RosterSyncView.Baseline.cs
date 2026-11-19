@@ -199,6 +199,9 @@ public partial class RosterSyncView
             + string.Join("", r.Created.Where(c => c.Skip != null).GroupBy(c => c.Skip).Select(g => $"; {g.Count()} left as they are ({g.Key})")) + "."
             + (r.Cleaned != null ? " " + r.Cleaned + "." : ""));
         sb.AppendLine(r.Problems.Count == 0 ? "Checked: no player or team reference points at nothing." : "PROBLEMS — it won't be written:\n  " + string.Join("\n  ", r.Problems));
+        if (r.Twice.Count > 0)
+            sb.AppendLine($"Same person twice ({r.Twice.Count}; same birth date, the name spelled another way): " + string.Join(", ", r.Twice)
+                + ". Both stay; remove one in the roster pack if they're the same player.");
         sb.AppendLine("The game's own teams, strategies, jerseys, arenas, team gear, draft picks and existing players' gear stay as they are. Earlier NHL Sync changes are replaced: run NHL Sync (step 2) afterwards.");
         sb.AppendLine();
         foreach (var g in conv.GroupBy(c => c.League))

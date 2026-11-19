@@ -610,7 +610,64 @@ public static class RosterSync
         }
         string left = full.Count == 0 ? "" : $"; {full.Count} not moved, their team has 40 players ({string.Join(", ", full.Take(5))}{(full.Count > 5 ? ", ..." : "")})";
         string released = releases.Count == 0 ? "" : $", {releases.Count} released ({string.Join(", ", releases.Take(5).Select(r => r.C.Name))}{(releases.Count > 5 ? ", ..." : "")})";
-        return $"Roster sync: {moved} moved{released}, {numbers} numbers, {sizes} heights/weights, {births} birth dates, {createdPis.Count} new roster rows, lines rebuilt for {touched.Count} teams{left}";
+        int unlisted = UnlistSigned(db);
+        string faNote = unlisted == 0 ? "" : $", {unlisted} taken off the free-agent list";
+        return $"Roster sync: {moved} moved{released}, {numbers} numbers, {sizes} heights/weights, {births} birth dates, {createdPis.Count} new roster rows, lines rebuilt for {touched.Count} teams{faNote}{left}";
+    }
+
+    /// <summary>Leagues of clubs a player signs with (NHL, AHL, CHL, European leagues, ECHL, USHL/NCAA/spare): a roster row
+    /// on one of these teams means he isn't a free agent. National, alumni, Worlds and EASHL "circuit" teams (leagues 10,
+    /// 21, 23, 25, ...) don't count: the stock free agents keep rows there.</summary>
+    public static bool IsClubTeamLeague(int league) => IsClubLeague(league);
+    private static bool IsClubLeague(int league) => league is >= 0 and <= 8 or >= 11 and <= 13 or 15 or >= 29 and <= 34;
+
+    /// <summary>
+    /// Takes off the free-agent list (exhibitionfreeagents) every player whose roster row (same players index) is on a
+    /// club team. Moving a player onto a team never took him off it, so NHL Sync left 60 signed players listed (Cam
+    /// Talbot CBJ, David Perron DAL, ...; 2026-11-19), and the main menu's Player Movement > Free Agents then crashed
+    /// the game: it asks for those ids' bios as free agents, gets none, and reads a null "Bio" map
+    /// (RosterTeamPlayers, 0x591b4fd). A new franchise would also import them as free agents with rights cleared.
+    /// Returns how many were taken off.
+    /// </summary>
+    public static int UnlistSigned(T3Db db)
+    {
+        var fa = db.Table(FreeAgentsTable);
+        var roster = db.Table(Roster.RosterTable);
+        var teams = db.Table(Roster.TeamsTable);
+        if (fa == null || roster == null || teams == null) return 0;
+        var tf = teams.Fields.ToDictionary(f => f.Name);
+        if (!tf.ContainsKey("index") || !tf.ContainsKey("league")) return 0;
+        var club = Enumerable.Range(0, teams.WrittenRecords).Where(r => !db.IsInvalid(teams, r))
+            .Where(r => IsClubLeague(Convert.ToInt32(db.Get(teams, r, tf["league"]))))
+            .Select(r => Convert.ToInt32(db.Get(teams, r, tf["index"]))).ToHashSet();
+        var rpf = roster.Fields.First(f => f.Name == "playerindex");
+        var rtf = roster.Fields.First(f => f.Name == "team");
+        // by player id: the game ships two players rows per player, and his club row can be under the other index than
+        // the listed one (Eeli Tolvanen: SEA under 5187, listed as 5188)
+        var idOf = new Dictionary<int, int>();
+        if (db.Table(Roster.PlayersTable) is { } players)
+        {
+            var pif = players.Fields.First(f => f.Name == "index");
+            var pidf = players.Fields.First(f => f.Name == "playerid");
+            foreach (int r in Enumerable.Range(0, players.WrittenRecords).Where(r => !db.IsInvalid(players, r)))
+                idOf[Convert.ToInt32(db.Get(players, r, pif))] = Convert.ToInt32(db.Get(players, r, pidf));
+        }
+        int Who(int pi) => idOf.TryGetValue(pi, out int id) ? id : -1 - pi;
+        var signed = Enumerable.Range(0, roster.WrittenRecords).Where(r => !db.IsInvalid(roster, r))
+            .Where(r => club.Contains(Convert.ToInt32(db.Get(roster, r, rtf))))
+            .Select(r => Who(Convert.ToInt32(db.Get(roster, r, rpf)))).ToHashSet();
+        var ff = fa.Fields.First(f => f.Name == "playerindex");
+        var rows = Enumerable.Range(0, fa.WrittenRecords).Where(r => !db.IsInvalid(fa, r)).ToList();
+        // and one entry per player: the list can hold both of a player's indexes (James Reimer 1215 and 1216: the stock
+        // entry plus the one a release added under his other index), and he then shows twice; the first is kept
+        var seen = new HashSet<int>();
+        var keep = rows.Where(r => Who(Convert.ToInt32(db.Get(fa, r, ff))) is int who && !signed.Contains(who) && seen.Add(who))
+            .Select(r => db.RecordBytes(fa, r)).ToList();
+        int gone = rows.Count - keep.Count;
+        if (gone == 0) return 0;
+        db.SetWritten(fa, keep.Count);
+        for (int r = 0; r < keep.Count; r++) db.WriteRecord(fa, r, keep[r]);
+        return gone;
     }
 
     public const string FreeAgentsTable = "exhibitionfreeagents";

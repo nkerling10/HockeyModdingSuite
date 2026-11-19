@@ -61,6 +61,9 @@ public static class SyncPlan
             if (made.Skipped.Count > 0)
                 summaries.Add("not created: " + string.Join(", ", made.Skipped.Take(5).Select(s => $"{s.Name} ({s.Reason})")) + (made.Skipped.Count > 5 ? ", …" : ""));
         }
+        // a player the sync made twice in an earlier run (another spelling): folded into the base player
+        var merged = PlayerMerge.Run(db);
+        if (merged.Count > 0) summaries.Add($"players entered twice, merged ({merged.Count}): {string.Join("; ", merged)}");
         return new PlayerResult(summaries, created);
     }
 

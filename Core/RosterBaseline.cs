@@ -35,6 +35,9 @@ public sealed class BaselinePlan
     public List<string> Dropped { get; } = new();
     public List<string> TeamsDropped { get; } = new();
     public List<BaselineCreated> Created { get; } = new();
+    /// <summary>The same person entered twice in the roster (another spelling, the same birth date): a warning, not a
+    /// problem; e.g. "Maxim Andreyev (27743) = Maxim Andreev (31117)".</summary>
+    public List<string> Twice { get; } = new();
 }
 
 /// <summary>
@@ -105,6 +108,9 @@ public static class RosterBaseline
         var st = new Roster(save).Teams;
         foreach (var (i, t) in gt.Where(kv => !st.ContainsKey(kv.Key))) plan.TeamsDropped.Add($"{t.Name} ({i})");
         plan.Created.AddRange(Created(save));
+        var sr = new Roster(save);
+        foreach (var (a, b) in new PlayerMatcher(save, sr).SamePersonPairs())
+            plan.Twice.Add($"{a.FirstName} {a.LastName} ({a.GameId}) = {b.FirstName} {b.LastName} ({b.GameId})");
         return plan;
     }
 
@@ -239,8 +245,13 @@ public static class RosterBaseline
         public List<BaselineCreated> Created = new();
         /// <summary>References left pointing at nothing (none expected); the app refuses to write when there are any.</summary>
         public List<string> Problems = new();
+        /// <summary>The same person entered twice (another spelling, the same birth date): shown, not written over.</summary>
+        public List<string> Twice = new();
+        /// <summary>Players entered twice and folded into one (PlayerMerge).</summary>
+        public List<string> Merged = new();
         public string Summary(string pack) =>
-            $"Baseline roster (layered) from {pack}: ratings and bios {RatingsAndBios} rows; {Added} players added; {Spots}; {Converted}" + (Cleaned != null ? "; " + Cleaned : "");
+            $"Baseline roster (layered) from {pack}: ratings and bios {RatingsAndBios} rows; {Added} players added; {Spots}; {Converted}" + (Cleaned != null ? "; " + Cleaned : "")
+            + (Merged.Count > 0 ? $"; players entered twice, merged ({Merged.Count}): {string.Join("; ", Merged)}" : "");
     }
 
     /// <summary>
@@ -274,9 +285,16 @@ public static class RosterBaseline
         result.Spots = ApplyRosterSpots(game, source, withCreated: true);
         result.Created = Created(game);
         result.Converted = ConvertCreated(game, result.Created, progress);
+        // a player entered twice by an earlier import (the pack's created copy converted to a new id before the matcher
+        // knew other spellings): folded into the base player, with the pack's ratings, position and spelling
+        progress?.Invoke("Folding players entered twice", 0, 0);
+        result.Merged = PlayerMerge.Run(game, freshRatings: result.Created.Where(c => c.NewId >= 0).Select(c => c.NewId).ToHashSet());
         result.Cleaned = RemoveOrphanStats(game);
         progress?.Invoke("Checking every player and team reference", 0, 0);
         result.Problems = CheckReferences(game);
+        // the same person entered twice (in the pack, or the pack's and the game's spelling of him): reported
+        foreach (var (a, b) in new PlayerMatcher(game, new Roster(game)).SamePersonPairs())
+            result.Twice.Add($"{a.FirstName} {a.LastName} ({a.GameId}) = {b.FirstName} {b.LastName} ({b.GameId})");
         return result;
     }
 
@@ -335,7 +353,7 @@ public static class RosterBaseline
     }
 
     /// <summary>Removes rows from a table, the rows after them moving up (tables keyed by id, not position).</summary>
-    private static void RemoveRows(T3Db db, T3Table t, ISet<int> remove)
+    internal static void RemoveRows(T3Db db, T3Table t, ISet<int> remove)
     {
         if (remove.Count == 0) return;
         var keep = Enumerable.Range(0, t.WrittenRecords).Where(i => !remove.Contains(i)).Select(i => db.RecordBytes(t, i)).ToList();
@@ -392,6 +410,7 @@ public static class RosterBaseline
     /// <param name="progress">Reports each player as he's converted: (name, number, of).</param>
     public static string ConvertCreated(T3Db db, IReadOnlyList<BaselineCreated> players, Action<string, int, int> progress = null)
     {
+        var names = PlayerMerge.LoadNames();
         using var batch = db.Batch();
         // value -> rows, per table and field, built once: every lookup below is for a row that existed before converting
         // started (added rows are never looked up), so a snapshot serves instead of scanning the table each time
@@ -457,6 +476,15 @@ public static class RosterBaseline
                 }
                 int realBio = Row(bio, "game_id", c.MatchId);
                 if (realBio >= 0) db.Set(bio, realBio, bf["team"], c.Team);
+                // the roster's spelling is the source of truth (Sokolovsky in the base, Sokolovskii in Vasy's pack: he
+                // becomes Sokolovskii), unless player-names.json fixes it (Lofttus, a typo, stays Loftus)
+                if (realBio >= 0 && capBioRow >= 0)
+                {
+                    string cf = (string)db.Get(cbio, capBioRow, cbio.Fields.First(f => f.Name == "firstname"));
+                    string cl = (string)db.Get(cbio, capBioRow, cbio.Fields.First(f => f.Name == "lastname"));
+                    var (nf, nl) = PlayerMerge.Spelling(c.Born, cf, cl, names);
+                    if (nf.Length > 0 && nl.Length > 0) { db.Set(bio, realBio, bf["firstname"], nf); db.Set(bio, realBio, bf["lastname"], nl); }
+                }
                 // matched loosely (same name, birth year and rights, another date): the roster's date is the one kept,
                 // as the roster file is the source (a wrong date there is fixed in the file)
                 if (realBio >= 0 && c.LooseMatch && capBioRow >= 0)

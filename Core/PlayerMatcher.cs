@@ -28,6 +28,79 @@ public sealed class PlayerMatcher
             l.Add(p);
         }
         _byLast = roster.Players.GroupBy(p => RosterSync.Norm(p.LastName)).ToDictionary(g => g.Key, g => g.ToList());
+        foreach (var p in roster.Players)
+            if (Born(p) is { } b) (_byBorn.TryGetValue(b, out var l) ? l : _byBorn[b] = new List<RosterPlayer>()).Add(p);
+    }
+
+    private readonly Dictionary<DateTime, List<RosterPlayer>> _byBorn = new();
+
+    /// <summary>A name with spellings evened out: accents and punctuation gone (Norm), then ks → x, kh → h, ph → f,
+    /// ii / iy / yi / y → i, doubled letters single (Sokolovskii = Sokolovsky = sokolovxi; Pettersson = Petterson).</summary>
+    public static string Skeleton(string s)
+    {
+        var n = RosterSync.Norm(s).Replace("ks", "x").Replace("kh", "h").Replace("ph", "f")
+            .Replace("ii", "i").Replace("iy", "i").Replace("yi", "i").Replace('y', 'i');
+        var sb = new System.Text.StringBuilder();
+        foreach (char c in n) if (sb.Length == 0 || sb[^1] != c) sb.Append(c);
+        return sb.ToString();
+    }
+
+    /// <summary>Last names that are the same person's: equal skeletons, or one letter apart when 5 letters or more.</summary>
+    /// <summary>Public form of SameLast (PlayerMerge, name fixes).</summary>
+    public static bool SameLastName(string a, string b) => SameLast(a, b);
+
+    internal static bool SameLast(string a, string b)
+    {
+        string x = Skeleton(a), y = Skeleton(b);
+        return x == y || (Math.Min(x.Length, y.Length) >= 5 && OneEdit(x, y));
+    }
+
+    /// <summary>First names that are the same person's: equal skeletons, a short form of the other (Zach / Zachary,
+    /// Alex / Alexander, Dima / Dimian: 3 letters or more), or one letter apart when 4 letters or more (Egor / Yegor,
+    /// Landen / Landon). Not Kelly / Kevin, Tylor / Tyson (twins).</summary>
+    internal static bool SameFirst(string a, string b)
+    {
+        string x = Skeleton(a), y = Skeleton(b);
+        if (x == y) return true;
+        if (Math.Min(x.Length, y.Length) >= 3 && (x.StartsWith(y) || y.StartsWith(x))) return true;
+        return Math.Min(x.Length, y.Length) >= 4 && OneEdit(x, y);
+    }
+
+    /// <summary>
+    /// Pairs of players in one roster that look like the same person entered twice: the same birth date and the same
+    /// name once spellings are evened out (<see cref="SameFirst"/>, <see cref="SameLast"/>). E.g. the Vasy pack of
+    /// 2026-11-05 has Maxim Andreyev (27743) and Maxim Andreev (31117), both born 1998-10-22, both on team 54. Twins
+    /// and brothers have different first names, so they don't pair.
+    /// </summary>
+    public List<(RosterPlayer A, RosterPlayer B)> SamePersonPairs()
+    {
+        var pairs = new List<(RosterPlayer, RosterPlayer)>();
+        // ids 50000+: the game's Create-a-Player templates ("Jordan NHL" x6, 56703..), not people
+        foreach (var all in _byBorn.Values)
+        {
+            var group = all.Where(p => p.GameId < 50000).ToList();
+            for (int i = 0; i < group.Count; i++)
+                for (int j = i + 1; j < group.Count; j++)
+                    if (group[i].GameId != group[j].GameId && SameLast(group[i].LastName, group[j].LastName) && SameFirst(group[i].FirstName, group[j].FirstName))
+                        pairs.Add((group[i], group[j]));
+        }
+        return pairs;
+    }
+
+    /// <summary>Whether two strings are one insert, delete or change apart (and not equal).</summary>
+    internal static bool OneEdit(string a, string b)
+    {
+        if (a == b || Math.Abs(a.Length - b.Length) > 1) return false;
+        int i = 0, j = 0, edits = 0;
+        while (i < a.Length && j < b.Length)
+        {
+            if (a[i] == b[j]) { i++; j++; continue; }
+            if (++edits > 1) return false;
+            if (a.Length > b.Length) i++;
+            else if (b.Length > a.Length) j++;
+            else { i++; j++; }
+        }
+        return edits + (a.Length - i) + (b.Length - j) <= 1;
     }
 
     /// <summary>The game player for this name and birth date, and whether he was matched by name only; (null, false) when none.</summary>
@@ -40,6 +113,13 @@ public sealed class PlayerMatcher
         var p = cands.FirstOrDefault(c => Born(c) == born);
         if (p == null && born != null)
             p = _byLast.GetValueOrDefault(RosterSync.Norm(last))?.FirstOrDefault(c => Born(c) == born);
+        // (2b) the same birth date and the same person spelled another way: transliteration and typos (Maksim Sokolovskii
+        // / Maxim Sokolovsky, Pettersson / Petterson, Andreev / Andreyev, Lofttus / Loftus, Yegor / Egor). Both names
+        // must agree (twins share a birthday: Kelly / Kevin Klima stay apart) and he must be the only such player. NHL
+        // Sync created a second player for each of these before (2026-11-19).
+        if (p == null && born != null && _byBorn.TryGetValue(born.Value, out var sameDay)
+            && sameDay.Where(c => SameLast(c.LastName, last) && SameFirst(c.FirstName, first)).Take(2).ToList() is { Count: 1 } alike)
+            p = alike[0];
         if (p != null) return (p, false);
         if (cands.Count == 1) return (cands[0], true);
         string f = RosterSync.Norm(first);
