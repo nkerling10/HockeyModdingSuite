@@ -248,16 +248,27 @@ public static class OwnKit
     }
 
     /// <summary>
-    /// Pants or socks painted: the big zones (a fifth of the sheet or more: the pant legs, a sock's upper and lower leg)
-    /// in the main colour, the rest (stripes, panels, trims) dealt the other colours in turn; <paramref name="shift"/>
-    /// moves the colours along.
+    /// The colour each zone of a pants / socks design is dealt: the big zones (a fifth of the sheet or more: the pant
+    /// legs, a sock's upper and lower leg) in the main colour, the rest (stripes, panels, trims) the other colours in
+    /// turn; <paramref name="shift"/> moves the colours along.
     /// </summary>
-    public static byte[] PaintPart(StudioPattern part, IReadOnlyList<int> palette, int shift)
+    public static Dictionary<int, int> DealPart(StudioPattern part, IReadOnlyList<int> palette, int shift)
     {
         var colors = new Dictionary<int, int>();
         int n = palette.Count, other = 0;
         foreach (var (zone, share) in part.Zones)
             colors[zone] = share >= 0.2 || n == 1 ? palette[shift % n] : palette[(shift + 1 + other++ % (n - 1)) % n];
+        return colors;
+    }
+
+    /// <summary>A pants / socks design painted: the colours dealt (<see cref="DealPart"/>), with <paramref name="own"/>
+    /// zone colours on top.</summary>
+    public static byte[] PaintPart(StudioPattern part, IReadOnlyList<int> palette, int shift, IReadOnlyDictionary<int, int> own = null)
+    {
+        var colors = DealPart(part, palette, shift);
+        if (own != null)
+            foreach (var (zone, c) in own)
+                if (colors.ContainsKey(zone)) colors[zone] = c;
         var img = JerseyStudio.Paint(part.Detail, part.Size, part, colors);
         for (int i = 3; i < img.Length; i += 4) img[i] = 255;
         return img;

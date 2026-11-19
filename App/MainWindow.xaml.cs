@@ -35,6 +35,50 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         _searchDelay.Tick += (_, _) => { _searchDelay.Stop(); Refresh(); };
+        // opens maximized; the restored size never bigger than the screen (a 1480x900 window on a smaller remote
+        // desktop put the title bar's buttons off the edge)
+        var work = SystemParameters.WorkArea;
+        Width = Math.Min(Width, work.Width);
+        Height = Math.Min(Height, work.Height);
+        SourceInitialized += (_, _) => System.Windows.Interop.HwndSource.FromHwnd(new System.Windows.Interop.WindowInteropHelper(this).Handle)?.AddHook(WindowHook);
+        WindowState = WindowState.Maximized;
+        OnStateChanged(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// WM_GETMINMAXINFO: a chrome-less window maximizes to its monitor's work area (not past the screen edges by the
+    /// resize border, nor over the taskbar), whatever the monitor, DPI or remote-desktop size.
+    /// </summary>
+    private static IntPtr WindowHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        const int WM_GETMINMAXINFO = 0x0024;
+        if (msg != WM_GETMINMAXINFO) return IntPtr.Zero;
+        var monitor = NativeWin.MonitorFromWindow(hwnd, 2 /* nearest */);
+        var info = new NativeWin.MonitorInfo { Size = System.Runtime.InteropServices.Marshal.SizeOf<NativeWin.MonitorInfo>() };
+        if (monitor == IntPtr.Zero || !NativeWin.GetMonitorInfo(monitor, ref info)) return IntPtr.Zero;
+        var mmi = System.Runtime.InteropServices.Marshal.PtrToStructure<NativeWin.MinMaxInfo>(lParam);
+        mmi.MaxPosition.X = info.Work.Left - info.Monitor.Left;
+        mmi.MaxPosition.Y = info.Work.Top - info.Monitor.Top;
+        mmi.MaxSize.X = info.Work.Right - info.Work.Left;
+        mmi.MaxSize.Y = info.Work.Bottom - info.Work.Top;
+        System.Runtime.InteropServices.Marshal.StructureToPtr(mmi, lParam, false);
+        return IntPtr.Zero;
+    }
+
+    private static class NativeWin
+    {
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        public struct Point { public int X, Y; }
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        public struct Rect { public int Left, Top, Right, Bottom; }
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        public struct MinMaxInfo { public Point Reserved, MaxSize, MaxPosition, MinTrackSize, MaxTrackSize; }
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        public struct MonitorInfo { public int Size; public Rect Monitor, Work; public int Flags; }
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern IntPtr MonitorFromWindow(IntPtr hwnd, int flags);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
     }
 
     private string Game => GameDir.Text.Trim().TrimEnd('\\', '/');
@@ -937,8 +981,8 @@ public partial class MainWindow : Window
 
     private void OnStateChanged(object sender, EventArgs e)
     {
-        // a maximized chrome-less window overhangs the screen by its resize border
-        Root.BorderThickness = WindowState == WindowState.Maximized ? new Thickness(7) : new Thickness(1);
+        // maximized: the window is exactly the work area (WindowHook), so no frame line is needed
+        Root.BorderThickness = WindowState == WindowState.Maximized ? new Thickness(0) : new Thickness(1);
         MaxButton.Content = WindowState == WindowState.Maximized ? "" : "";
     }
 
@@ -1064,6 +1108,8 @@ public partial class MainWindow : Window
                 int? N(string key) => int.TryParse(a.GetValueOrDefault(key), out int v) ? v : null;
                 await StudioPage.SetOwn(a.GetValueOrDefault("jcolors"), N("jfont"), N("jpant"), N("jsock"), a.GetValueOrDefault("jletter"));
             }
+            // --jopen FILE: a saved design (.jersey.json) opened over the start kit
+            if (a.TryGetValue("jopen", out var jopen)) { await Task.Delay(3000); await StudioPage.OpenDesign(jopen); }
             await Task.Delay(5000);
             if (a.TryGetValue("jtemplate", out var stpl)) { await StudioPage.StudioUseTemplate(stpl); await Task.Delay(1500); }
             if (a.TryGetValue("jimage", out var simg)) { await StudioPage.UseImage(simg, a.ContainsKey("jlegacy")); await Task.Delay(1500); }

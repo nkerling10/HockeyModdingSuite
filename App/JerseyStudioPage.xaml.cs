@@ -330,6 +330,11 @@ public partial class JerseyStudioPage : UserControl
     /// <summary>The sleeve numbers' colours (null: the numbers'), and the pants' and socks' own colours (empty: the team's).</summary>
     private int? _armFill, _armOutline;
     private List<int> _pantColors = new(), _sockColors = new();
+    /// <summary>The pants' and socks' zones you coloured yourself (zone → colour), over the colours dealt to them.</summary>
+    private Dictionary<int, int> _pantZoneColors = new(), _sockZoneColors = new();
+    /// <summary>What the pants' / socks' zone rows were built from, so a change of design, colours or shuffle rebuilds
+    /// them and typing in a row doesn't.</summary>
+    private string _pantRowsKey, _sockRowsKey;
 
     /// <summary>The colours the pants (or socks) are painted in: their own when set, else the team's.</summary>
     private IReadOnlyList<int> PartPalette(string garment, IReadOnlyList<int> team) =>
@@ -376,6 +381,7 @@ public partial class JerseyStudioPage : UserControl
         _suppress = false;
         ShowOwnColors();
         ModeLayout();
+        RestoreSections();
         SlotInfo.Text = "Writes the design into a kit folder, then adds that folder to the team's jersey menu (nhl_game.db). " +
                         "A free folder is one no team's menu shows, so no other jersey changes. Restore on the Mods page undoes each part.";
     }
@@ -438,8 +444,11 @@ public partial class JerseyStudioPage : UserControl
     private void ModeLayout()
     {
         _own = ModeOwn.IsChecked == true;
-        OwnPanel.Visibility = _own ? Visibility.Visible : Visibility.Collapsed;
-        TeamPanel.Visibility = _own ? Visibility.Collapsed : Visibility.Visible;
+        var own = _own ? Visibility.Visible : Visibility.Collapsed;
+        var team = _own ? Visibility.Collapsed : Visibility.Visible;
+        OwnColorsPanel.Visibility = OwnModeNote.Visibility = SectionLettering.Visibility = PantsEditor.Visibility = SocksEditor.Visibility = own;
+        PantsTeamNote.Visibility = SocksTeamNote.Visibility = team;
+        TeamPanel.Visibility = team;
         Search.Visibility = _own ? Visibility.Collapsed : Visibility.Visible;
         KitPicker.Visibility = _own ? Visibility.Collapsed : Visibility.Visible;
         StudioWrite.Visibility = _own ? Visibility.Collapsed : Visibility.Visible;
@@ -447,7 +456,7 @@ public partial class JerseyStudioPage : UserControl
 
     private async void OnMode(object sender, RoutedEventArgs e)
     {
-        if (OwnPanel == null || TeamPanel == null) return;
+        if (OwnColorsPanel == null || TeamPanel == null || SocksTeamNote == null) return;
         ModeLayout();
         if (_mods == null) return;
         if (_own) { await StartOwn(); return; }
@@ -537,6 +546,7 @@ public partial class JerseyStudioPage : UserControl
         int ps = _pantShift, ss = _sockShift;
         var colors = LetterColors();
         var (pantPal, sockPal) = (PartPalette("pant", palette), PartPalette("sock", palette));
+        var (pantOwn, sockOwn) = (new Dictionary<int, int>(_pantZoneColors), new Dictionary<int, int>(_sockZoneColors));
         var (fontPat, roles, pantPat, sockPat) = (_fontPat, _fontRoles, _pantPat, _sockPat);
         var r = await Task.Run(() =>
         {
@@ -544,10 +554,12 @@ public partial class JerseyStudioPage : UserControl
             if (pt != null && pantPat?.Template != pt) pantPat = JerseyStudio.LoadPattern(index, pt, PartSize);
             if (st != null && sockPat?.Template != st) sockPat = JerseyStudio.LoadPattern(index, st, PartSize);
             return (Font: fontPat != null ? OwnKit.PaintFont(fontPat, roles, colors) : null,
-                Pant: pantPat != null ? OwnKit.PaintPart(pantPat, pantPal, ps) : null,
-                Sock: sockPat != null ? OwnKit.PaintPart(sockPat, sockPal, ss) : null);
+                Pant: pantPat != null ? OwnKit.PaintPart(pantPat, pantPal, ps, pantOwn) : null,
+                Sock: sockPat != null ? OwnKit.PaintPart(sockPat, sockPal, ss, sockOwn) : null);
         });
         (_fontPat, _fontRoles, _pantPat, _sockPat) = (fontPat, roles, pantPat, sockPat);
+        BuildPartZones("pant", pantPat, pantPal, ps);
+        BuildPartZones("sock", sockPat, sockPal, ss);
         _fontImg = r.Font;
         // your own pants / socks images take the painted parts' place
         var pantShow = _pantImage is { } pi ? JerseyStudio.Resize(pi.Rgba, pi.W, pi.H, PartSize) : r.Pant;
@@ -606,8 +618,6 @@ public partial class JerseyStudioPage : UserControl
         LetterOuter.Text = _letterOuter is int lo ? GearZone.Hex(lo) : "";
         ArmFill.Text = _armFill is int af ? GearZone.Hex(af) : "";
         ArmOutline.Text = _armOutline is int ao ? GearZone.Hex(ao) : "";
-        PantColors.Text = string.Join(",", _pantColors.Select(GearZone.Hex));
-        SockColors.Text = string.Join(",", _sockColors.Select(GearZone.Hex));
         _suppress = false;
         OwnSwatches();
     }
@@ -627,14 +637,73 @@ public partial class JerseyStudioPage : UserControl
         ArmOutlineSwatch.Background = HexColor.Brush(HexColor.Parse(ArmOutline.Text) ?? HexColor.Parse(LetterOutline.Text));
     }
 
-    /// <summary>The pants' or socks' own colours: "#RRGGBB,#RRGGBB…" (blank: the team colours).</summary>
-    private void OnPartColors(object sender, TextChangedEventArgs e)
+    // ---------------------------------------------------------------- pants & socks zones
+
+    /// <summary>StudioZone.Region of a pants (0) or socks (1) zone row.</summary>
+    private const int PantRegion = 0, SockRegion = 1;
+
+    private IEnumerable<StudioZone> PartZoneRows =>
+        (PantZones.ItemsSource as IEnumerable<StudioZone> ?? Enumerable.Empty<StudioZone>()).Concat(SockZones.ItemsSource as IEnumerable<StudioZone> ?? Enumerable.Empty<StudioZone>());
+
+    /// <summary>The colours each zone of the picked pants / socks were dealt (zone → colour), to tell your own from them.</summary>
+    private Dictionary<int, int> _pantDealt = new(), _sockDealt = new();
+
+    /// <summary>
+    /// One colour row per zone of the picked pants or socks design, largest first: what it's painted in (your own colour,
+    /// else the one dealt). Rebuilt when the design, the colours or the shuffle change; not while you type in a row.
+    /// </summary>
+    private void BuildPartZones(string garment, StudioPattern pat, IReadOnlyList<int> palette, int shift)
     {
-        if (_suppress || sender is not TextBox { Tag: string garment } box) return;
-        var parts = box.Text.Split(new[] { ',', ' ', ';' }, StringSplitOptions.RemoveEmptyEntries).Select(HexColor.Parse).ToList();
-        if (parts.Any(c => c == null)) return;                      // still typing
-        var list = parts.Select(c => c.Value).ToList();
-        if (garment == "pant") _pantColors = list; else _sockColors = list;
+        bool pant = garment == "pant";
+        var list = pant ? PantZones : SockZones;
+        var note = pant ? PantZonesNote : SockZonesNote;
+        var own = pant ? _pantZoneColors : _sockZoneColors;
+        bool image = (pant ? _pantImage : _sockImage) != null;
+        note.Text = image ? $"Your own image is used for the {(pant ? "pants" : "socks")}: these colours don't apply until you clear it."
+            : $"Each zone of the design. A blank box takes the colour dealt from the team colours; Shuffle deals them again.";
+        if (pat == null) { list.ItemsSource = null; return; }
+        string key = PartRowsKey(pat, palette, shift, own);
+        if (key == (pant ? _pantRowsKey : _sockRowsKey)) return;
+        if (pant) _pantRowsKey = key; else _sockRowsKey = key;
+        var dealt = OwnKit.DealPart(pat, palette, shift);
+        if (pant) _pantDealt = dealt; else _sockDealt = dealt;
+        int main = 0, other = 0;
+        string mainName = pant ? "Legs" : "Sock";
+        list.ItemsSource = pat.Zones.Select(z =>
+        {
+            bool big = z.Share >= 0.2;
+            string label = big ? (main++ == 0 ? $"{mainName} (main)" : $"{mainName} {main}") : $"Stripe / trim {++other}";
+            int color = own.TryGetValue(z.Zone, out int c) ? c : dealt.GetValueOrDefault(z.Zone);
+            return new StudioZone(z.Zone, pant ? PantRegion : SockRegion, label, $"{z.Share:P0} of the texture", color, OnPartZoneChanged);
+        }).ToList();
+    }
+
+    private static string PartRowsKey(StudioPattern pat, IReadOnlyList<int> palette, int shift, Dictionary<int, int> own) =>
+        $"{pat?.Template?.Number}|{shift}|{string.Join(",", palette)}|{string.Join(",", own.OrderBy(x => x.Key).Select(x => $"{x.Key}:{x.Value}"))}";
+
+    /// <summary>A pants / socks zone row typed in or filled from a swatch: your colour for that zone (the dealt one or
+    /// blank: none of your own).</summary>
+    private void OnPartZoneChanged(StudioZone z)
+    {
+        if (_suppress) return;
+        bool pant = z.Region == PantRegion;
+        var own = pant ? _pantZoneColors : _sockZoneColors;
+        var dealt = pant ? _pantDealt : _sockDealt;
+        if (z.HasError) return;                                   // still typing
+        if (z.Value is int c && (!dealt.TryGetValue(z.Zone, out int d) || d != c)) own[z.Zone] = c;
+        else own.Remove(z.Zone);
+        // keep the rows (and the box being typed in) while the model repaints
+        string key = PartRowsKey(pant ? _pantPat : _sockPat, PartPalette(pant ? "pant" : "sock", Palette()), pant ? _pantShift : _sockShift, own);
+        if (pant) _pantRowsKey = key; else _sockRowsKey = key;
+        _ownTimer.Stop();
+        _ownTimer.Start();
+    }
+
+    /// <summary>Deals the team colours to the pants' or socks' zones in another order, clearing your own zone colours.</summary>
+    private void OnPartShuffle(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is not string garment) return;
+        if (garment == "pant") { _pantShift++; _pantZoneColors.Clear(); } else { _sockShift++; _sockZoneColors.Clear(); }
         _ownTimer.Stop();
         _ownTimer.Start();
     }
@@ -721,12 +790,12 @@ public partial class JerseyStudioPage : UserControl
     private void OnOwnPart(object sender, SelectionChangedEventArgs e)
     {
         if (_suppress || !_own || _mods == null) return;
+        // another pants / socks design: its zones are other zones, so your colours for the last one go
+        if (sender == OwnPants) _pantZoneColors.Clear();
+        else if (sender == OwnSocks) _sockZoneColors.Clear();
         _ownTimer.Stop();
         _ownTimer.Start();
     }
-
-    private void OnPantShuffle(object sender, RoutedEventArgs e) { _pantShift++; _ownTimer.Stop(); _ownTimer.Start(); }
-    private void OnSockShuffle(object sender, RoutedEventArgs e) { _sockShift++; _ownTimer.Stop(); _ownTimer.Start(); }
 
     /// <summary>Puts a change of your colours, lettering or parts on the model (and the pictures).</summary>
     private async Task ApplyOwn()
@@ -1124,7 +1193,8 @@ public partial class JerseyStudioPage : UserControl
     /// <summary>Marks a colour row or line as the one a swatch fills.</summary>
     private void SelectColor(object row, Action<string> target)
     {
-        foreach (var r in StudioZoneRows.Concat(CollarRows)) r.IsSelected = r == row;
+        foreach (var r in StudioZoneRows.Concat(CollarRows).Concat(PartZoneRows)) r.IsSelected = r == row;
+        foreach (var g in StudioGearRows) g.IsSelected = g == row;
         foreach (var l in LineRows) l.IsSelected = l == row;
         foreach (var s in CollarStripeRows) s.IsSelected = s == row;
         _colorTarget = target;
@@ -1137,17 +1207,52 @@ public partial class JerseyStudioPage : UserControl
         if (sender is RadioButton { Uid: { Length: > 0 } tab }) ShowTab(tab);
     }
 
-    /// <summary>Shows one of the studio's tabs: design, colours, collar, lines, logos or menu.</summary>
+    /// <summary>
+    /// Shows one of the studio's tabs: jersey, pants, socks, gear (helmet &amp; gloves) or menu. A jersey section's name
+    /// (start, design, colours, collar, lines, logos, lettering) opens the jersey tab with that section open.
+    /// </summary>
     public void ShowTab(string tab)
     {
-        if (TabDesign == null) return;
-        var tabs = new (string Name, FrameworkElement Panel)[] { ("design", TabDesign), ("colours", TabColours), ("collar", TabCollar), ("lines", TabLines), ("logos", TabLogos), ("menu", TabMenu) };
+        if (TabJersey == null) return;
+        var section = JerseySections.FirstOrDefault(s => (string)s.Tag == tab);
+        if (section != null) tab = "jersey";
+        var tabs = new (string Name, FrameworkElement Panel)[] { ("jersey", TabJersey), ("pants", TabPants), ("socks", TabSocks), ("gear", TabGear), ("menu", TabMenu) };
         int was = Array.FindIndex(tabs, t => t.Panel.Visibility == Visibility.Visible), now = Array.FindIndex(tabs, t => t.Name == tab);
+        if (now < 0) return;
         foreach (var (name, panel) in tabs)
             panel.Visibility = name == tab ? Visibility.Visible : Visibility.Collapsed;
         StudioScroller.ScrollToTop();
-        if (now >= 0 && now != was) Motion.Enter(tabs[now].Panel, dx: was < 0 ? 0 : now > was ? 28 : -28, dy: 0, ms: 240);
+        if (now != was) Motion.Enter(tabs[now].Panel, dx: was < 0 ? 0 : now > was ? 28 : -28, dy: 0, ms: 240);
         foreach (var rb in FindTabs()) if (rb.Uid == tab && rb.IsChecked != true) rb.IsChecked = true;
+        if (section != null)
+        {
+            section.IsExpanded = true;
+            section.UpdateLayout();
+            section.BringIntoView();
+        }
+    }
+
+    private Expander[] JerseySections => new[] { SectionStart, SectionDesign, SectionColours, SectionCollar, SectionLines, SectionLogos, SectionLettering };
+
+    /// <summary>The jersey sections open last time (Settings), opened again; the rest closed.</summary>
+    private void RestoreSections()
+    {
+        var open = Settings.Load().StudioOpenSections;
+        if (open == null) return;
+        _sectionsLoading = true;
+        foreach (var s in JerseySections) s.IsExpanded = open.Contains((string)s.Tag);
+        _sectionsLoading = false;
+    }
+
+    private bool _sectionsLoading;
+
+    /// <summary>A jersey section opened or closed: remembered for next time.</summary>
+    private void OnSectionToggled(object sender, RoutedEventArgs e)
+    {
+        if (_sectionsLoading || !ReferenceEquals(e.OriginalSource, sender) || SectionLettering == null) return;
+        var settings = Settings.Load();
+        settings.StudioOpenSections = JerseySections.Where(s => s.IsExpanded).Select(s => (string)s.Tag).ToList();
+        settings.Save();
     }
 
     private IEnumerable<RadioButton> FindTabs()
@@ -1943,13 +2048,14 @@ public partial class JerseyStudioPage : UserControl
         var index = _mods.Index;
         var palette = PartPalette(garment, Palette());
         int shift = pant ? _pantShift : _sockShift, size = pant ? 2048 : 1024;
+        var own = new Dictionary<int, int>(pant ? _pantZoneColors : _sockZoneColors);
         try
         {
             var (rgba, w, h) = await Task.Run(() =>
             {
                 if (image is { } im) return (im.Rgba, im.W, im.H);
                 var p = JerseyStudio.LoadPattern(index, template, size);
-                return (OwnKit.PaintPart(p, palette, shift), p.Size, p.Size);
+                return (OwnKit.PaintPart(p, palette, shift, own), p.Size, p.Size);
             });
             File.WriteAllBytes(dlg.FileName, ImageFiles.Png(rgba, w, h));
             StatusChanged?.Invoke($"Exported the {what} to {dlg.FileName}");
@@ -2074,7 +2180,19 @@ public partial class JerseyStudioPage : UserControl
 
     private sealed record OwnFile(List<string> Colors, int? Font, int? Pant, int? Sock, string LetterFill, string LetterOutline, int PantShift, int SockShift,
                                   string NameFill = null, string NameOutline = null, bool? OwnNameLetters = null, string PantImage = null, string SockImage = null,
-                                  string LetterOuter = null, string ArmFill = null, string ArmOutline = null, List<string> PantColors = null, List<string> SockColors = null);
+                                  string LetterOuter = null, string ArmFill = null, string ArmOutline = null, List<string> PantColors = null, List<string> SockColors = null,
+                                  Dictionary<string, string> PantZones = null, Dictionary<string, string> SockZones = null);
+
+    private static Dictionary<string, string> ZoneFile(Dictionary<int, int> zones) =>
+        zones.Count > 0 ? zones.OrderBy(z => z.Key).ToDictionary(z => z.Key.ToString(), z => GearZone.Hex(z.Value)) : null;
+
+    private static Dictionary<int, int> ZoneColors(Dictionary<string, string> file)
+    {
+        var zones = new Dictionary<int, int>();
+        foreach (var (k, v) in file ?? new())
+            if (int.TryParse(k, out int z) && HexColor.Parse(v) is int c) zones[z] = c;
+        return zones;
+    }
 
     private sealed record SpotFile(int Id, string Name, bool Enabled, double R, double Sx, double Sy, double Tx, double Ty);
     private sealed record CollarStripeFile(double From, double Width, string Color);
@@ -2117,7 +2235,8 @@ public partial class JerseyStudioPage : UserControl
                 GearZone.Hex(_letterFill), GearZone.Hex(_letterOutline), _pantShift, _sockShift,
                 _nameFill is int nf ? GearZone.Hex(nf) : null, _nameOutline is int no ? GearZone.Hex(no) : null, null, _pantImageFile, _sockImageFile,
                 _letterOuter is int lo ? GearZone.Hex(lo) : null, _armFill is int af ? GearZone.Hex(af) : null, _armOutline is int ao ? GearZone.Hex(ao) : null,
-                _pantColors.Count > 0 ? _pantColors.Select(GearZone.Hex).ToList() : null, _sockColors.Count > 0 ? _sockColors.Select(GearZone.Hex).ToList() : null);
+                _pantColors.Count > 0 ? _pantColors.Select(GearZone.Hex).ToList() : null, _sockColors.Count > 0 ? _sockColors.Select(GearZone.Hex).ToList() : null,
+                ZoneFile(_pantZoneColors), ZoneFile(_sockZoneColors));
         if (SlotTeam.SelectedItem is StudioTeamItem ti && SlotLabel.SelectedItem is PickItem lab)
             f.Target = new TargetFile(ti.Team.Name, ti.Team.TeamId, PickedPackageTeam()?.Team.Code, lab.Value, (SlotFolder.SelectedItem as SlotKitItem)?.Kit.Folder,
                 SlotLight.IsChecked == true, SlotOutfit.IsChecked == true, SlotTop.IsChecked == true);
@@ -2149,6 +2268,8 @@ public partial class JerseyStudioPage : UserControl
                 (_armFill, _armOutline) = (HexColor.Parse(own.ArmFill ?? ""), HexColor.Parse(own.ArmOutline ?? ""));
                 _pantColors = (own.PantColors ?? new()).Select(HexColor.Parse).Where(c => c != null).Select(c => c.Value).ToList();
                 _sockColors = (own.SockColors ?? new()).Select(HexColor.Parse).Where(c => c != null).Select(c => c.Value).ToList();
+                // your own zone colours (older files have none: their colour list and shuffle give the same pants)
+                (_pantZoneColors, _sockZoneColors) = (ZoneColors(own.PantZones), ZoneColors(own.SockZones));
                 SetPartImage("pant", own.PantImage != null && File.Exists(own.PantImage) ? own.PantImage : null);
                 SetPartImage("sock", own.SockImage != null && File.Exists(own.SockImage) ? own.SockImage : null);
                 await SetOwn(string.Join(",", own.Colors ?? new()), own.Font, own.Pant, own.Sock, $"{own.LetterFill},{own.LetterOutline}", own.PantShift, own.SockShift);
@@ -2366,6 +2487,7 @@ public partial class JerseyStudioPage : UserControl
         var (fontT, pantT, sockT) = (_fontPat?.Template, _pantPat?.Template, _sockPat?.Template);
         var (fontImg, ps, ss) = (_fontImg, _pantShift, _sockShift);
         var (pantPal, sockPal) = (PartPalette("pant", palette), PartPalette("sock", palette));
+        var (pantOwn, sockOwn) = (new Dictionary<int, int>(_pantZoneColors), new Dictionary<int, int>(_sockZoneColors));
         var (pantImg, sockImg) = (_pantImage, _sockImage);
         await Task.Run(() =>
         {
@@ -2444,7 +2566,7 @@ public partial class JerseyStudioPage : UserControl
                 else if (pantT != null)
                 {
                     var pp = JerseyStudio.LoadPattern(index, pantT, 2048);
-                    var pant = OwnKit.PaintPart(pp, pantPal, ps);
+                    var pant = OwnKit.PaintPart(pp, pantPal, ps, pantOwn);
                     // the base keeps the folder's fabric map (alpha)
                     var withAlpha = (byte[])pant.Clone();
                     if (target.Slot("pant_base_color") is { } tpb && Kits.Load(index, tpb.Name, 2048, 0) is { Rgba: not null } pb && pb.Width == pp.Size && pb.Height == pp.Size)
@@ -2460,7 +2582,7 @@ public partial class JerseyStudioPage : UserControl
                 else if (sockT != null)
                 {
                     var sp = JerseyStudio.LoadPattern(index, sockT, 1024);
-                    var sock = OwnKit.PaintPart(sp, sockPal, ss);
+                    var sock = OwnKit.PaintPart(sp, sockPal, ss, sockOwn);
                     Put("sock_base_color", sock, sp.Size, sp.Size, true);
                     Put("sock_color", sock, sp.Size, sp.Size, true);
                 }

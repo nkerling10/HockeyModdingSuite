@@ -231,6 +231,9 @@ public sealed class Settings
     public string DesignFolder { get; set; }
     /// <summary>The folder an image was last opened from (every image Open dialog starts there; ImagePicker).</summary>
     public string ImageFolder { get; set; }
+    /// <summary>The Jersey Studio's jersey sections left open (start, design, colours, collar, lines, logos, lettering);
+    /// null: the first-run default (start and design).</summary>
+    public List<string> StudioOpenSections { get; set; }
 
     private static string File => System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NHL27Kit", "settings.json");
 
